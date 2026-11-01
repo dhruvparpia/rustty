@@ -617,6 +617,10 @@ struct WindowState {
     profile: usize,
     /// `themes/` beside the config, for per-profile theme files (THEME-009/011).
     theme_dir: Option<std::path::PathBuf>,
+    /// Last seen config file mtime; a change triggers a CONFIG-018 reload.
+    /// `None` until the first poll tick records it, so a reload never fires on
+    /// startup.
+    cfg_mtime: Option<std::time::SystemTime>,
 }
 
 impl WindowState {
@@ -661,6 +665,28 @@ impl WindowState {
     }
 
     /// `true` when `y` (client DIPs) lands on the tab-bar strip.
+    /// CONFIG-018: reload when the config file changes on disk.
+    ///
+    /// shortcut: one `fs::metadata` per poll tick, which is cheap; move to
+    /// `ReadDirectoryChangesW` if a trace ever shows it costing anything. No
+    /// unit test: the state machine lives on `WindowState`, which needs an HWND.
+    fn watch_config(&mut self, hwnd: HWND) {
+        let Some(path) = crate::config::config_path() else {
+            return;
+        };
+        let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+            return;
+        };
+        if self.cfg_mtime == Some(mtime) {
+            return;
+        }
+        let first = self.cfg_mtime.is_none();
+        self.cfg_mtime = Some(mtime);
+        if !first {
+            reload_config(self, hwnd);
+        }
+    }
+
     /// BELL-001..008: ring the bells the shells just produced. A bell that
     /// arrives while a flash is running only re-arms the timer.
     fn take_bell(&mut self, hwnd: HWND) {
@@ -1009,17 +1035,7 @@ fn init_window(hwnd: HWND) {
     };
     if let Some(s) = state_mut(hwnd) {
         s.renderer = renderer;
-        if let Some(r) = &mut s.renderer {
-            // Config-driven chrome (TAB-022/023/021, CONFIG-009/010, SPLIT).
-            r.set_tab_bar_options(
-                s.cfg.tab_bar.placement,
-                s.cfg.tab_bar.show_profiles,
-                s.cfg.tab_bar.close_button,
-            );
-            r.set_cursor_options(s.cfg.cursor_shape, s.cfg.cursor_blink);
-            r.set_split_options(s.cfg.split.border, s.cfg.split.padding);
-            r.set_padding(s.cfg.window.padding.x, s.cfg.window.padding.y);
-        }
+        sync_chrome(s);
         // The first tab belongs to the starting profile (CONFIG-013). Its
         // theme and font (SHELL-019) apply before the grid is measured: a
         // different font means a different grid.
@@ -1990,6 +2006,7 @@ fn drain_and_cleanup(hwnd: HWND) {
         let Some(s) = state_mut(hwnd) else { return };
         s.app.drain_shells();
         s.take_bell(hwnd);
+        s.watch_config(hwnd);
         // Repaint only when a grid actually changed (NFR-113: no idle
         // repaints), and only the rows the grid wrote: paint the damage
         // directly instead of invalidating the client area, so a burst of
@@ -2230,6 +2247,89 @@ fn tab_profile(s: &WindowState) -> ProfileSpec {
 /// Apply a profile's font (SHELL-019). One renderer serves every tab, so the
 /// whole window follows, and the grid the window fits changes with the new
 /// metrics: every tab is resized to the new grid.
+/// Config-driven chrome the renderer owns: tab bar placement/labels (TAB-022,
+/// TAB-023, CONFIG-010), cursor (CONFIG-009), split border and padding, window
+/// padding. Startup and CONFIG-018 hot reload share this.
+fn sync_chrome(s: &mut WindowState) {
+    let Some(r) = &mut s.renderer else {
+        return;
+    };
+    r.set_tab_bar_options(
+        s.cfg.tab_bar.placement,
+        s.cfg.tab_bar.show_profiles,
+        s.cfg.tab_bar.close_button,
+    );
+    r.set_cursor_options(s.cfg.cursor_shape, s.cfg.cursor_blink);
+    r.set_split_options(s.cfg.split.border, s.cfg.split.padding);
+    r.set_padding(s.cfg.window.padding.x, s.cfg.window.padding.y);
+}
+
+/// CONFIG-018: re-read the config file and apply what can change live. Shells
+/// are never restarted; `scrollback` and `starting-profile` only reach the next
+/// tab, and DPI stays whatever the manifest said at startup. A config that no
+/// longer parses is reported and the running one is kept.
+fn reload_config(s: &mut WindowState, hwnd: HWND) {
+    let cfg = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("rusttyterm: config reload failed: {e}");
+            return;
+        }
+    };
+    // THEME-009/010/013/014: the same resolution startup uses, system theme
+    // included, so an unset `theme` follows a dark/light flip too.
+    let name = if cfg.theme.name().is_empty() {
+        theme::Theme::system_preset()
+    } else {
+        cfg.theme.name()
+    };
+    let (new_theme, problems) =
+        theme::resolve_configured(name, &cfg.theme.overrides(), s.theme_dir.as_deref());
+    for problem in &problems {
+        eprintln!("rusttyterm: {problem}");
+    }
+    let font = cfg.font();
+    let font_changed = font != s.font;
+    s.theme = new_theme;
+    s.cfg = cfg;
+    s.tab_bar = s.cfg.tab_bar.visible;
+    s.app.set_show_cwd(s.cfg.tab_bar.show_cwd);
+    s.profiles = merge_profiles(&s.cfg);
+    s.profile = s.profile.min(s.profiles.len().saturating_sub(1));
+    sync_chrome(s);
+    if font_changed {
+        // A font the renderer refuses (bad family, metrics failure) keeps the
+        // old one; the window never goes blind over a config edit.
+        if s.renderer
+            .as_mut()
+            .is_some_and(|r| r.set_font(&font).is_ok())
+        {
+            s.font = font;
+        }
+    }
+    // SHELL-019: the active tab's profile overrides the global theme and font.
+    let spec = active_profile(s);
+    apply_profile_theme(s, &spec);
+    apply_profile_font(s, &spec);
+    apply_opacity(hwnd);
+    sync_tab_bar(hwnd);
+    // A new font, bar placement, bar visibility or padding changes how many
+    // cells fit in the same client rect, so refit every tab, not just the
+    // active one (FONT-002, TAB-022, CONFIG-011).
+    let mut rect = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut rect) };
+    if let Some(s) = state_mut(hwnd) {
+        if let Some(r) = s.renderer.as_mut() {
+            r.resize(rect.right.max(0) as u32, rect.bottom.max(0) as u32);
+            let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
+            if s.app.resize_all_tabs(cols, rows).is_err() {
+                eprintln!("rusttyterm: ConPTY resize failed after a config reload");
+            }
+        }
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    }
+}
+
 fn apply_profile_font(s: &mut WindowState, spec: &ProfileSpec) {
     let mut font = s.font.clone();
     let mut changed = false;
@@ -2606,6 +2706,7 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         tab_bar: cfg.tab_bar.visible,
         bell_tabs: Vec::new(),
         bell_flash: false,
+        cfg_mtime: None,
         profiles: merge_profiles(cfg),
         cfg: cfg.clone(),
         renaming: None,

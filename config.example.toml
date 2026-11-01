@@ -1,6 +1,12 @@
 # rusttyterm config — %APPDATA%\rusttyterm\config.toml
 # (portable mode: a `config.toml` next to rusttyterm.exe wins)
 #
+# The app re-reads this file when you save it (CONFIG-018): themes, colours,
+# fonts, window padding, split, tab bar, cursor, opacity, key bindings, bell
+# mode, search defaults and profiles apply without restarting a shell.
+# `scrollback` and `starting-profile` only affect the next tab. A file that does
+# not parse is reported on stderr and the running config is kept.
+#
 # Every key below is optional; the defaults shown are what the app uses when
 # the file or a key is missing. Unknown keys are rejected with an error at
 # startup (no silent clamps: a bad value is an error, not a surprise). Keep

@@ -91,6 +91,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `solarized-light` preset, dark mode gets `predawn`. A `theme` in the config, and
   a per-profile theme, both win over the system. Adds the `windows`
   `Win32_System_Registry` feature.
+- Config hot reload (CONFIG-018): the app notices `config.toml` changing and
+  applies theme (including the system dark/light choice), colours, fonts, window
+  padding, split border and padding, tab bar placement and labels, cursor shape
+  and blink, opacity, key bindings, bell mode, search defaults and the profile
+  list — without restarting any shell. A config that no longer parses is reported
+  on stderr and the running one is kept. `scrollback` and `starting-profile`
+  only reach the next tab.
 
 ### Fixed
 
