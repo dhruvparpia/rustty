@@ -307,6 +307,10 @@ struct ProfileSpec {
     theme: Option<String>,
     color: Option<Color>,
     scrollback: Option<usize>,
+    /// SHELL-019: profile font family / size / line height.
+    font: Option<String>,
+    font_size: Option<f32>,
+    line_height: Option<f32>,
     /// TAB-014: ask before this tab's shells are closed.
     confirm_close: bool,
     /// TAB-021: warn when a new process starts unasked.
@@ -324,6 +328,9 @@ impl ProfileSpec {
             theme: None,
             color: None,
             scrollback: None,
+            font: None,
+            font_size: None,
+            line_height: None,
             confirm_close: true,
             confirm_new_process: true,
         }
@@ -344,6 +351,12 @@ fn merge_profiles(cfg: &Config) -> Vec<ProfileSpec> {
             theme: (!profile.theme.is_empty()).then(|| profile.theme.clone()),
             color: profile.tab_color.as_deref().and_then(Color::parse_hex),
             scrollback: profile.scrollback,
+            font: profile
+                .font
+                .clone()
+                .filter(|family| !family.trim().is_empty()),
+            font_size: profile.font_size,
+            line_height: profile.line_height,
             confirm_close: profile.confirm_close.unwrap_or(true),
             confirm_new_process: profile.confirm_new_process.unwrap_or(true),
         };
@@ -938,15 +951,18 @@ fn init_window(hwnd: HWND) {
             r.set_split_options(s.cfg.split.border, s.cfg.split.padding);
             r.set_padding(s.cfg.window.padding.x, s.cfg.window.padding.y);
         }
+        // The first tab belongs to the starting profile (CONFIG-013). Its
+        // theme and font (SHELL-019) apply before the grid is measured: a
+        // different font means a different grid.
+        let spec = active_profile(s);
+        apply_profile_theme(s, &spec);
+        apply_profile_font(s, &spec);
         let (cols, rows) = s
             .renderer
             .as_ref()
             .map_or((init_cols, init_rows), |r| r.grid_size());
         let cols = cols.max(MIN_COLS);
         let rows = rows.max(MIN_ROWS);
-        // The first tab belongs to the starting profile (CONFIG-013).
-        let spec = active_profile(s);
-        apply_profile_theme(s, &spec);
         if let Some(tab) = s.app.active_tab_mut() {
             tab.set_profile(spec.name.clone());
             tab.set_auto_title(spec.name.clone());
@@ -2058,6 +2074,7 @@ fn new_tab_with_profile(hwnd: HWND, spec: ProfileSpec) {
         spec.color,
     );
     apply_profile_theme(s, &spec);
+    apply_profile_font(s, &spec);
     if let Some(tab) = s.app.active_tab_mut() {
         tab.set_confirm(spec.confirm_close, spec.confirm_new_process);
     }
@@ -2096,6 +2113,41 @@ fn tab_profile(s: &WindowState) -> ProfileSpec {
         .active_tab()
         .and_then(|t| s.profiles.iter().find(|p| p.name == t.profile()).cloned())
         .unwrap_or_else(|| active_profile(s))
+}
+
+/// Apply a profile's font (SHELL-019). One renderer serves every tab, so the
+/// whole window follows, and the grid the window fits changes with the new
+/// metrics: every tab is resized to the new grid.
+fn apply_profile_font(s: &mut WindowState, spec: &ProfileSpec) {
+    let mut font = s.font.clone();
+    let mut changed = false;
+    if let Some(family) = spec.font.as_ref() {
+        font.family = family.clone();
+        changed = true;
+    }
+    if let Some(size) = spec.font_size.filter(|v| (4.0..=72.0).contains(v)) {
+        font.size = size;
+        changed = true;
+    }
+    if let Some(lh) = spec.line_height.filter(|v| (0.8..=2.0).contains(v)) {
+        font.line_height = lh;
+        changed = true;
+    }
+    if !changed {
+        return;
+    }
+    let Some(renderer) = s.renderer.as_mut() else {
+        s.font = font;
+        return;
+    };
+    if renderer.set_font(&font).is_err() {
+        return; // the previous font keeps working, the window is unchanged
+    }
+    s.font = font;
+    let (cols, rows) = renderer.grid_size().max((MIN_COLS, MIN_ROWS));
+    if s.app.resize_all_tabs(cols, rows).is_err() {
+        eprintln!("rusttyterm: ConPTY resize failed after a profile font change");
+    }
 }
 
 /// THEME-011: a profile's theme is the window theme while its tab lives. The
@@ -2341,6 +2393,7 @@ fn cycle_profile(hwnd: HWND, delta: i32) {
         tab.set_color(spec.color);
     }
     apply_profile_theme(s, &spec);
+    apply_profile_font(s, &spec);
     set_title(hwnd, &s.app);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }

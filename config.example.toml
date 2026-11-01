@@ -145,9 +145,10 @@ copy-on-select = true
 # scrollback = 20000
 # confirm-close = true         # TAB-014: ask before a tab of this profile closes
 # confirm-new-process = true   # TAB-021: warn when a command starts in a tab unasked
-# font = "Consolas"                   # applied at startup only: per-profile
-# font-size = 12                      # fonts are not swapped in a live tab
-# line-height = 1.2
+# font = "Consolas"                   # applied when a tab of this profile is
+# font-size = 12                      # created, or when profiles are cycled:
+# line-height = 1.2                   # one renderer serves the whole window,
+                                      # so every tab follows the new metrics
 
 # ---------------------------------------------------------------------------
 # Search defaults (SEARCH-006/007/014)
@@ -165,7 +166,7 @@ copy-on-select = true
 #
 # [split]
 # border = true
-# padding = 1     # parsed, not drawn: panes are laid out on the cell grid
+# padding = 1     # pixel gap between panes; pane content is offset by it
 
 # ---------------------------------------------------------------------------
 # Window size (CONFIG-011, WINDOW-001, WINDOW-011)

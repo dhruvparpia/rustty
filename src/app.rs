@@ -224,6 +224,24 @@ impl App {
         }
     }
 
+    /// Resize every tab to `cols` x `rows`. A per-profile font changes the
+    /// grid the window fits (SHELL-019), so all tabs have to follow. The
+    /// first ConPTY failure is returned; grids always resize.
+    pub fn resize_all_tabs(&mut self, cols: usize, rows: usize) -> Result<(), ShellError> {
+        let mut failed = None;
+        for tab in &mut self.tabs {
+            if let Err(e) = tab.resize(cols, rows)
+                && failed.is_none()
+            {
+                failed = Some(e);
+            }
+        }
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     /// Split the focused pane of the active tab (SPLIT-005):
     /// [`Dir::Vertical`] = new pane on the right, [`Dir::Horizontal`] = new
     /// pane below. The new pane is focused and returns its flatten index;
@@ -504,6 +522,18 @@ mod tests {
     fn close_out_of_range_is_false() {
         let mut app = App::new();
         assert!(!app.close_tab(3));
+    }
+
+    #[test]
+    fn resize_all_tabs_reaches_every_tab() {
+        let mut app = App::with_size(80, 24, 1000);
+        app.add_tab();
+        // Tab 2 has no shell, so the ConPTY resize reports an error; the
+        // grids of every tab must still follow.
+        assert!(app.resize_all_tabs(100, 30).is_err());
+        for tab in app.tabs() {
+            assert_eq!((tab.cols(), tab.rows()), (100, 30));
+        }
     }
 
     #[test]

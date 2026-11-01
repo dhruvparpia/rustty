@@ -66,6 +66,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   that is not 16 colors, and a color that is not `#RRGGBB` are reported on
   stderr and skipped, keeping the color that already worked (THEME-013/014).
 
+- `[split] padding` is drawn: pane content is offset by the configured pixel
+  gap, so the border sits inside it (SPLIT-014, CONFIG-013).
+- Per-profile `font`, `font-size` and `line-height` are applied: the renderer is
+  rebuilt and every tab is resized to the grid the window fits with the new
+  metrics — at startup, on tab creation, and on profile cycling (SHELL-019).
 - OSC 7 working-directory reporting: with `tab-bar.show-cwd` (TAB-011) a tab whose
   shell sets no title shows the last directory of the path the shell reported,
   percent-decoded and drive-path aware.

@@ -549,7 +549,20 @@ impl Renderer {
         self.cursor_blink_visible = visible;
     }
 
-    /// Configure split chrome.
+    /// Swap in a new font (SHELL-019 per-profile font): text formats, cell
+    /// metrics, font features and the glyph atlas are rebuilt. The grid the
+    /// window fits changes with the metrics, so the caller resizes every tab
+    /// to [`Renderer::grid_size`] afterwards.
+    pub fn set_font(&mut self, font: &FontConfig) -> anyhow::Result<()> {
+        let (_family, formats, metrics) = build_font_resources(&self.dwrite, self.dpi, font)?;
+        self.typography = build_typography(&self.dwrite, font)?;
+        self.formats = formats;
+        self.metrics = metrics;
+        self.atlas = None;
+        Ok(())
+    }
+
+    /// Configure split chrome (SPLIT-014, CONFIG-013).
     pub fn set_split_options(&mut self, border: bool, padding: u32) {
         self.split_border = border;
         self.split_padding = padding as f32;
@@ -864,8 +877,13 @@ impl Renderer {
             tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
                 let idx = pane_idx;
                 pane_idx += 1;
-                let left = self.grid_left() + rect.col as f32 * cw;
-                let top0 = self.grid_top() + rect.row as f32 * ch;
+                // `[split.padding]` is a visual gap: pane content starts
+                // `pad` DIPs in, so neighbours are separated by it.
+                // shortcut: content is offset, not reflowed; upgrade if a
+                // pane ever needs its own pixel size.
+                let pad = self.split_padding;
+                let left = self.grid_left() + rect.col as f32 * cw + pad;
+                let top0 = self.grid_top() + rect.row as f32 * ch + pad;
                 let grid = pane.grid();
                 let rows = rect.rows.min(grid.rows());
                 let cols = rect.cols.min(max_cols.saturating_sub(rect.col));
@@ -880,7 +898,7 @@ impl Renderer {
                     self.fill_rect(
                         left,
                         top,
-                        left + rect.cols as f32 * cw,
+                        left + rect.cols as f32 * cw - 2.0 * pad,
                         top + ch,
                         theme.background,
                     );
@@ -1518,8 +1536,9 @@ impl Renderer {
         if focused && self.cursor_blink && !self.cursor_blink_visible {
             return;
         }
-        let top = self.grid_top() + (rect.row + row) as f32 * self.metrics.cell_height;
-        let left = self.grid_left() + (rect.col + col) as f32 * self.metrics.cell_width;
+        let pad = self.split_padding;
+        let top = self.grid_top() + (rect.row + row) as f32 * self.metrics.cell_height + pad;
+        let left = self.grid_left() + (rect.col + col) as f32 * self.metrics.cell_width + pad;
         let right = left + self.metrics.cell_width;
         let bottom = top + self.metrics.cell_height;
         if !focused {
@@ -1553,10 +1572,11 @@ impl Renderer {
             let mut idx = 0usize;
             tab.for_each_pane_ref(&mut |_: &Pane, rect: Rect| {
                 if (idx == focused) == pass_focus {
-                    let x = self.grid_left() + rect.col as f32 * cw;
-                    let y = self.grid_top() + rect.row as f32 * ch;
-                    let w = rect.cols as f32 * cw;
-                    let pane_height = rect.rows as f32 * ch;
+                    let pad = self.split_padding;
+                    let x = self.grid_left() + rect.col as f32 * cw + pad;
+                    let y = self.grid_top() + rect.row as f32 * ch + pad;
+                    let w = rect.cols as f32 * cw - 2.0 * pad;
+                    let pane_height = rect.rows as f32 * ch - pad;
                     let color = if pass_focus {
                         theme.split_focus
                     } else {
@@ -1600,8 +1620,9 @@ impl Renderer {
                 idx += 1;
                 return;
             };
-            let x = self.grid_left() + rect.col as f32 * cw;
-            let y = self.grid_top() + rect.row as f32 * ch;
+            let pad = self.split_padding;
+            let x = self.grid_left() + rect.col as f32 * cw + pad;
+            let y = self.grid_top() + rect.row as f32 * ch + pad;
             let w = rect.cols as f32 * cw;
             label.clear();
             tabbar::fit_title_into(title, (w - 2.0).max(0.0) - TAB_CHROME, cw, &mut label);
