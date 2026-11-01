@@ -8,6 +8,7 @@
 //! tab, while the input operations (feed, spawn, send) target the focused
 //! pane of the active tab. See [`crate::tab`] for the `RefCell` borrow rule.
 
+use crate::color::Color;
 use crate::shell::{ShellError, SpawnOptions};
 use crate::split::{Dir, Rect, Side};
 use crate::tab::Tab;
@@ -87,6 +88,13 @@ impl App {
         self.tabs.get_mut(self.active)
     }
 
+    /// A tab by index, mutably (rename, reorder and profile changes land on
+    /// tabs other than the active one).
+    #[must_use]
+    pub fn tab_at_mut(&mut self, idx: usize) -> Option<&mut Tab> {
+        self.tabs.get_mut(idx)
+    }
+
     /// Append a new tab (sized like the current one) and make it active;
     /// returns its index.
     pub fn add_tab(&mut self) -> usize {
@@ -104,6 +112,46 @@ impl App {
         self.tabs.push(Tab::with_size(cols, rows, scrollback));
         self.active = self.tabs.len() - 1;
         self.active
+    }
+
+    /// Append a tab and set its profile label and tab color.
+    pub fn add_tab_profile(
+        &mut self,
+        cols: usize,
+        rows: usize,
+        scrollback: usize,
+        profile: impl Into<String>,
+        color: Option<Color>,
+    ) -> usize {
+        let mut tab = Tab::with_size(cols, rows, scrollback);
+        let profile = profile.into();
+        tab.set_profile(profile.clone());
+        tab.set_auto_title(profile);
+        tab.set_color(color);
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.active
+    }
+
+    /// Move the active tab left/right (TAB-017).
+    pub fn move_active_tab(&mut self, delta: isize) -> bool {
+        if self.tabs.is_empty() {
+            return false;
+        }
+        let len = self.tabs.len() as isize;
+        let to = (self.active as isize + delta).rem_euclid(len) as usize;
+        self.move_tab(self.active, to)
+    }
+
+    /// Move tab `from` to `to` (TAB-016/017).
+    pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
+            return false;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = to;
+        true
     }
 
     /// Select the tab at `idx`; returns `false` when out of range.

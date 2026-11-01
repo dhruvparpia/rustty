@@ -26,7 +26,7 @@
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromWindow, PAINTSTRUCT, ScreenToClient,
@@ -47,23 +47,25 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
     GetClientRect, GetCursorPos, GetMenu, GetMessageW, GetSubMenu, GetWindowLongPtrW,
-    GetWindowRect, HICON, HMENU, IDC_ARROW, IDC_IBEAM, IDYES, IsZoomed, LoadCursorW, MB_DEFBUTTON2,
-    MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, PostMessageW,
-    PostQuitMessage, RegisterClassW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SWP_FRAMECHANGED, SWP_NOZORDER, SetCursor, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    SetWindowTextW, ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
-    WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    GetWindowRect, HICON, HMENU, IDC_ARROW, IDC_IBEAM, IDYES, IsZoomed, LWA_ALPHA, LoadCursorW,
+    MB_DEFBUTTON2, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED,
+    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW,
+    PostMessageW, PostQuitMessage, RegisterClassW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+    SWP_FRAMECHANGED, SWP_NOZORDER, SetCursor, SetLayeredWindowAttributes, SetMenu, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu,
+    TranslateMessage, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY,
+    WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
+    WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_VISIBLE,
 };
 use windows::core::{PCWSTR, Result};
 
 use crate::app::{App, PaneClose};
 use crate::clipboard;
-use crate::config::{self, Config, FontConfig, TabBar};
+use crate::color::Color;
+use crate::config::{self, Config, FontConfig, KeyAction, TabBar, TabBarPlacement};
 use crate::keyboard::{self, Modifiers};
 use crate::pane::Pane;
 use crate::parser::{MouseProtocol, bracketed_paste_bytes, mouse_report_bytes};
@@ -72,7 +74,7 @@ use crate::search::SearchState;
 use crate::selection::{Pos, Selection};
 use crate::shell::SpawnOptions;
 use crate::split::{Dir, Rect, Side};
-use crate::tabbar::{self, Hit, TAB_BAR_HEIGHT};
+use crate::tabbar::TAB_BAR_HEIGHT;
 use crate::theme::{self, Theme};
 
 /// Window class name.
@@ -86,6 +88,12 @@ const POLL_MS: u32 = 33;
 
 /// Timer id for the shell-output poll.
 const POLL_TIMER: usize = 1;
+
+/// Timer id for the cursor blink (CONFIG-009).
+const BLINK_TIMER: usize = 2;
+
+/// Typical terminal cursor blink period.
+const BLINK_MS: u32 = 530;
 
 /// Lines scrolled per mouse-wheel notch.
 const WHEEL_LINES: usize = 3;
@@ -112,6 +120,9 @@ const MENU_PREV_TAB: usize = 0xE832;
 const MENU_MINIMIZE: usize = 0xE833;
 const MENU_MAXIMIZE: usize = 0xE834;
 const MENU_CLOSE_WINDOW: usize = 0xE835;
+const MENU_RENAME_TAB: usize = 0xE836;
+const MENU_TAB_LEFT: usize = 0xE837;
+const MENU_TAB_RIGHT: usize = 0xE838;
 const MENU_ABOUT: usize = 0xE841;
 const MENU_THEME_BASE: usize = 0xF000;
 const MENU_PROFILE_BASE: usize = 0xF100;
@@ -194,7 +205,7 @@ fn append_menu_submenu(parent: HMENU, text: &str, submenu: HMENU) -> Result<()> 
 
 /// Build the native menu bar (MENU-001..015). Menu labels carry the visible
 /// keyboard shortcut text; the app's existing keybindings execute them.
-fn build_menu() -> Result<HMENU> {
+fn build_menu(profiles: &[ProfileSpec]) -> Result<HMENU> {
     unsafe {
         let menu = CreateMenu()?;
 
@@ -205,15 +216,15 @@ fn build_menu() -> Result<HMENU> {
         append_menu_item(file, "&Split Right\tCtrl+Shift+Enter", MENU_SPLIT_RIGHT)?;
         append_menu_item(file, "Split &Below\tCtrl+Shift+-", MENU_SPLIT_DOWN)?;
         append_menu_separator(file)?;
-        let profiles = CreatePopupMenu()?;
-        for (idx, profile) in PROFILES.iter().enumerate() {
+        let profile_menu = CreatePopupMenu()?;
+        for (idx, profile) in profiles.iter().enumerate() {
             append_menu_item(
-                profiles,
+                profile_menu,
                 &format!("&{}", profile.name),
                 MENU_PROFILE_BASE + idx,
             )?;
         }
-        append_menu_submenu(file, "&Profiles", profiles)?;
+        append_menu_submenu(file, "&Profiles", profile_menu)?;
         append_menu_separator(file)?;
         append_menu_item(file, "&Preferences", MENU_PREFERENCES)?;
         append_menu_separator(file)?;
@@ -243,6 +254,9 @@ fn build_menu() -> Result<HMENU> {
         let window = CreatePopupMenu()?;
         append_menu_item(window, "&Next Tab\tCtrl+Shift+]", MENU_NEXT_TAB)?;
         append_menu_item(window, "&Previous Tab\tCtrl+Shift+[", MENU_PREV_TAB)?;
+        append_menu_item(window, "Move Tab &Left\tCtrl+Shift+PgUp", MENU_TAB_LEFT)?;
+        append_menu_item(window, "Move Tab &Right\tCtrl+Shift+PgDn", MENU_TAB_RIGHT)?;
+        append_menu_item(window, "&Rename Tab\tCtrl+Shift+R", MENU_RENAME_TAB)?;
         append_menu_separator(window)?;
         append_menu_item(window, "&Minimize", MENU_MINIMIZE)?;
         append_menu_item(window, "Maxi&mize / Restore", MENU_MAXIMIZE)?;
@@ -281,17 +295,87 @@ fn same_menu(a: HMENU, b: HMENU) -> bool {
     a.0 == b.0
 }
 
-fn active_profile(s: &WindowState) -> &BuiltinProfile {
-    &PROFILES[s.profile.min(PROFILES.len() - 1)]
+/// One entry of the profile selector: the built-in shells merged with the
+/// `[[profile]]` entries from config (SHELL-017..022, TAB-015, THEME-011).
+#[derive(Clone)]
+struct ProfileSpec {
+    name: String,
+    program: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    env: std::collections::BTreeMap<String, String>,
+    theme: Option<String>,
+    color: Option<Color>,
+    scrollback: Option<usize>,
 }
 
+impl ProfileSpec {
+    fn builtin(profile: &BuiltinProfile) -> Self {
+        Self {
+            name: profile.name.to_string(),
+            program: profile.program.to_string(),
+            args: profile.args.iter().map(|arg| (*arg).to_string()).collect(),
+            cwd: None,
+            env: std::collections::BTreeMap::new(),
+            theme: None,
+            color: None,
+            scrollback: None,
+        }
+    }
+}
+
+/// Built-in shells first, then config profiles; a config profile that uses
+/// a built-in's name overrides it.
+fn merge_profiles(cfg: &Config) -> Vec<ProfileSpec> {
+    let mut merged: Vec<ProfileSpec> = PROFILES.iter().map(ProfileSpec::builtin).collect();
+    for profile in &cfg.profiles {
+        let spec = ProfileSpec {
+            name: profile.name.clone(),
+            program: profile.command.clone(),
+            args: profile.args.clone(),
+            cwd: Some(config::expand_path(&profile.starting_directory)),
+            env: profile.env.clone(),
+            theme: (!profile.theme.is_empty()).then(|| profile.theme.clone()),
+            color: profile.tab_color.as_deref().and_then(parse_hex),
+            scrollback: profile.scrollback,
+        };
+        match merged.iter_mut().position(|e| e.name == spec.name) {
+            Some(idx) => merged[idx] = spec,
+            None => merged.push(spec),
+        }
+    }
+    merged
+}
+
+/// `#rrggbb`, as used by `tab-color` (TAB-015).
+fn parse_hex(text: &str) -> Option<Color> {
+    let hex = text.strip_prefix('#').unwrap_or(text);
+    if hex.len() != 6 {
+        return None;
+    }
+    let value = u32::from_str_radix(hex, 16).ok()?;
+    Some(Color::rgb(
+        (value >> 16) as u8,
+        (value >> 8) as u8,
+        value as u8,
+    ))
+}
+
+fn active_profile(s: &WindowState) -> ProfileSpec {
+    s.profiles[s.profile.min(s.profiles.len() - 1)].clone()
+}
+
+/// Spawn options for the selected profile at the given grid size, including
+/// its starting directory and environment (SHELL-019, SHELL-021).
 fn profile_opts(s: &WindowState, cols: usize, rows: usize) -> SpawnOptions {
     let profile = active_profile(s);
     SpawnOptions {
-        program: profile.program.to_string(),
-        args: profile.args.iter().map(|arg| (*arg).to_string()).collect(),
+        program: profile.program,
+        args: profile.args,
         cols,
         rows,
+        cwd: profile.cwd,
+        env: profile.env,
     }
 }
 
@@ -307,9 +391,9 @@ fn theme_command(id: usize) -> Option<usize> {
         .filter(|idx| *idx < theme::PRESETS.len())
 }
 
-fn profile_command(id: usize) -> Option<usize> {
+fn profile_command(s: &WindowState, id: usize) -> Option<usize> {
     id.checked_sub(MENU_PROFILE_BASE)
-        .filter(|idx| *idx < PROFILES.len())
+        .filter(|idx| *idx < s.profiles.len())
 }
 
 /// Update check marks and enabled state for the popup about to open.
@@ -329,7 +413,7 @@ fn update_menu_checks(hwnd: HWND, wparam: WPARAM) {
     {
         enable_menu_item(file, MENU_CLOSE_TAB, tabs > 0);
         if let Some(profiles) = submenu_of(file, 6) {
-            for idx in 0..PROFILES.len() {
+            for idx in 0..state.profiles.len() {
                 check_menu_item(profiles, MENU_PROFILE_BASE + idx, state.profile == idx);
             }
         }
@@ -363,7 +447,7 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         set_theme(hwnd, idx);
         return;
     }
-    if let Some(idx) = profile_command(id) {
+    if let Some(idx) = state_ref(hwnd).and_then(|s| profile_command(s, id)) {
         open_profile_tab(hwnd, idx);
         return;
     }
@@ -392,6 +476,9 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
             let _ = DestroyWindow(hwnd);
         },
         MENU_PREFERENCES => open_preferences(hwnd),
+        MENU_RENAME_TAB => start_rename_tab(hwnd),
+        MENU_TAB_LEFT => move_active_tab(hwnd, -1),
+        MENU_TAB_RIGHT => move_active_tab(hwnd, 1),
         MENU_ABOUT => show_about(hwnd),
         _ => {}
     }
@@ -408,13 +495,14 @@ fn set_theme(hwnd: HWND, idx: usize) {
 }
 
 fn open_profile_tab(hwnd: HWND, idx: usize) {
-    let Some(name) = PROFILES.get(idx).map(|p| p.name) else {
+    let Some(s) = state_mut(hwnd) else {
         return;
     };
-    if let Some(s) = state_mut(hwnd) {
-        s.profile = idx;
-    }
-    new_tab_with_title(hwnd, Some(name));
+    let Some(spec) = s.profiles.get(idx).cloned() else {
+        return;
+    };
+    s.profile = idx;
+    new_tab_with_profile(hwnd, spec);
 }
 
 fn open_preferences(hwnd: HWND) {
@@ -469,6 +557,18 @@ struct WindowState {
     spawn: SpawnOptions,
     font: FontConfig,
     tab_bar: TabBar,
+    /// Full configuration: tab bar placement, split, search, cursor,
+    /// keybindings, profiles (CONFIG-007..013).
+    cfg: Config,
+    /// Built-in shells merged with the config `[[profile]]` entries.
+    profiles: Vec<ProfileSpec>,
+    /// Tab whose title is being renamed inline (TAB-013), the buffer being
+    /// typed, `None` when not renaming.
+    renaming: Option<(usize, String)>,
+    /// Tab index being dragged to reorder (TAB-016).
+    tab_drag: Option<usize>,
+    /// Cursor blink phase: the timer flips it every `BLINK_MS`.
+    blink_on: bool,
     renderer: Option<Renderer>,
     metrics: CellMetrics,
     timer_id: usize,
@@ -507,6 +607,77 @@ impl WindowState {
             TabBar::Auto | TabBar::Hidden => 0.0,
         }
     }
+
+    /// Y of the tab-bar strip (TAB-022: top or bottom of the window).
+    fn bar_top(&self, height: f32) -> f32 {
+        if self.cfg.tab_bar.placement == TabBarPlacement::Bottom {
+            (height - self.bar_height()).max(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Y where the grid starts, i.e. below (or above) the tab bar, plus the
+    /// window padding (WINDOW-011).
+    fn grid_top(&self) -> f32 {
+        let bar = if self.cfg.tab_bar.placement == TabBarPlacement::Bottom {
+            0.0
+        } else {
+            self.bar_height()
+        };
+        bar + self.pad_y()
+    }
+
+    /// `[window.padding]` in DIPs, matched to what the renderer insets by.
+    fn pad_x(&self) -> f32 {
+        self.cfg.window.padding.x as f32
+    }
+
+    fn pad_y(&self) -> f32 {
+        self.cfg.window.padding.y as f32
+    }
+
+    /// `true` when `y` (client DIPs) lands on the tab-bar strip.
+    fn over_tab_bar(&self, y: f32, height: f32) -> bool {
+        let bar = self.bar_height();
+        bar > 0.0 && y >= self.bar_top(height) && y < self.bar_top(height) + bar
+    }
+
+    /// `true` when `(x, y)` (client DIPs) lands on tab `idx`, on the `+`
+    /// button, or on the close box of tab `idx` (TAB-021).
+    fn tab_hit(&self, x: f32, y: f32, height: f32) -> TabHit {
+        let bar = self.bar_height();
+        let top = self.bar_top(height);
+        if bar == 0.0 || y < top || y >= top + bar {
+            return TabHit::None;
+        }
+        let layout = match self.renderer.as_ref() {
+            Some(r) => r.tab_layout(),
+            None => return TabHit::None,
+        };
+        if x >= layout.plus.0 && x < layout.plus.1 {
+            return TabHit::Plus;
+        }
+        for (idx, &(lo, hi)) in layout.tabs.iter().enumerate() {
+            if x >= lo && x < hi {
+                let close_w = self.metrics.cell_width * 1.5;
+                if self.cfg.tab_bar.close_button && x >= hi - close_w {
+                    return TabHit::Close(idx);
+                }
+                return TabHit::Tab(idx);
+            }
+        }
+        TabHit::None
+    }
+}
+
+/// What a tab-bar click landed on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TabHit {
+    Tab(usize),
+    Close(usize),
+    Plus,
+    None,
 }
 
 /// Recover the state box from `GWLP_USERDATA`, for the whole lifetime of
@@ -579,8 +750,12 @@ unsafe extern "system" fn wnd_proc(
             if let Some(s) = state_mut(hwnd)
                 && let Some(r) = &mut s.renderer
             {
+                let prompt = s
+                    .renaming
+                    .as_ref()
+                    .map(|(_, buf)| format!("Rename tab: {buf}  (Enter to accept, Esc to cancel)"));
                 // NFR-216: paint() logs and swallows Direct2D failures.
-                r.paint(&s.app, &s.theme, s.search.as_ref());
+                r.paint(&s.app, &s.theme, s.search.as_ref(), prompt.as_deref());
             }
             let _ = unsafe { EndPaint(hwnd, &ps) };
             LRESULT(0)
@@ -656,6 +831,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(1)
         }
         WM_TIMER => {
+            if wparam.0 == BLINK_TIMER {
+                blink_cursor(hwnd);
+            }
             drain_and_cleanup(hwnd);
             LRESULT(0)
         }
@@ -713,7 +891,8 @@ fn reclaim_state(hwnd: HWND) -> Option<*mut WindowState> {
 fn init_window(hwnd: HWND) {
     // Native menu bar (MENU-001..005). A menu failure leaves the terminal
     // usable, matching the no-fatal-UI-failure rule.
-    if let Ok(menu) = build_menu() {
+    let menu = state_ref(hwnd).map(|s| build_menu(&s.profiles));
+    if let Some(menu) = menu.and_then(|r| r.ok()) {
         unsafe {
             let _ = SetMenu(hwnd, Some(menu));
         }
@@ -747,25 +926,80 @@ fn init_window(hwnd: HWND) {
     };
     if let Some(s) = state_mut(hwnd) {
         s.renderer = renderer;
+        if let Some(r) = &mut s.renderer {
+            // Config-driven chrome (TAB-022/023/021, CONFIG-009/010, SPLIT).
+            r.set_tab_bar_options(
+                s.cfg.tab_bar.placement,
+                s.cfg.tab_bar.show_profiles,
+                s.cfg.tab_bar.close_button,
+            );
+            r.set_cursor_options(s.cfg.cursor_shape, s.cfg.cursor_blink);
+            r.set_split_options(s.cfg.split.border, s.cfg.split.padding);
+            r.set_padding(s.cfg.window.padding.x, s.cfg.window.padding.y);
+        }
         let (cols, rows) = s
             .renderer
             .as_ref()
             .map_or((init_cols, init_rows), |r| r.grid_size());
         let cols = cols.max(MIN_COLS);
         let rows = rows.max(MIN_ROWS);
+        // The first tab belongs to the starting profile (CONFIG-013).
+        let spec = active_profile(s);
+        apply_profile_theme(s, &spec);
+        if let Some(tab) = s.app.active_tab_mut() {
+            tab.set_profile(spec.name.clone());
+            tab.set_auto_title(spec.name.clone());
+            tab.set_color(spec.color);
+        }
         // Spawn first, then resize: a resize must reach a live ConPTY, and
         // the shell must start at the window's real grid size (NFR-216:
         // these failures are logged, never fatal).
-        if let Err(e) = s.app.spawn_active(&s.spawn.clone()) {
+        if let Err(e) = s.app.spawn_active(&spec_opts(&spec, cols, rows)) {
             eprintln!("rusttyterm: shell spawn failed: {e}");
         }
         if let Err(e) = s.app.resize_active(cols, rows) {
             eprintln!("rusttyterm: initial resize failed: {e}");
         }
         s.timer_id = unsafe { SetTimer(Some(hwnd), POLL_TIMER, POLL_MS, Some(poll_timer)) };
+        if s.cfg.cursor_blink {
+            // CONFIG-009: blink the focused cursor.
+            s.blink_on = true;
+            unsafe { SetTimer(Some(hwnd), BLINK_TIMER, BLINK_MS, None) };
+        }
         set_title(hwnd, &s.app);
         let _ = unsafe { SetFocus(Some(hwnd)) };
     }
+    apply_opacity(hwnd);
+}
+
+/// CONFIG-011: window opacity through a layered window. A config value of
+/// 100 (the default) leaves the window non-layered, so nothing changes.
+fn apply_opacity(hwnd: HWND) {
+    let Some(opacity) = state_ref(hwnd).map(|s| s.cfg.opacity) else {
+        return;
+    };
+    if opacity >= 100 {
+        return;
+    }
+    let alpha = (u32::from(opacity) * 255 / 100) as u8;
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED.0 as isize;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
+    }
+}
+
+/// CONFIG-009: flip the cursor blink phase and repaint.
+fn blink_cursor(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    if !s.cfg.cursor_blink {
+        return;
+    }
+    s.blink_on = !s.blink_on;
+    if let Some(r) = &mut s.renderer {
+        r.set_cursor_blink_visible(s.blink_on);
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
 /// WM_SIZE follow-up: resize render target -> grid -> ConPTY (NFR resize
@@ -802,6 +1036,20 @@ fn sync_tab_bar(hwnd: HWND) {
 /// WM_KEYDOWN/WM_SYSKEYDOWN: app bindings first, then VT encoding.
 fn handle_keydown(hwnd: HWND, vk: u16) {
     let mods = read_mods();
+    // `[keybindings]` first: a user binding overrides the built-in shortcut
+    // (KEY-022..025, CONFIG-008).
+    let action = state_ref(hwnd).and_then(|s| s.cfg.keymap().get(&key_spec(vk, mods)).copied());
+    if let Some(action) = action {
+        run_key_action(hwnd, action);
+        if let Some(s) = state_mut(hwnd) {
+            s.suppress_char = true;
+        }
+        return;
+    }
+    // Tab rename mode: the keys edit the title, not the shell (TAB-013).
+    if state_ref(hwnd).is_some_and(|s| s.renaming.is_some()) && handle_rename_keydown(hwnd, vk) {
+        return;
+    }
     // Ctrl+F opens or closes the search overlay (SEARCH-002).
     if mods.ctrl && !mods.shift && !mods.alt && vk == 0x46 {
         toggle_search(hwnd);
@@ -940,6 +1188,16 @@ fn handle_char(hwnd: HWND, code: u32, sys: bool) {
     let Some(ch) = char::from_u32(code) else {
         return;
     };
+    // Renaming: typed text extends the tab title buffer (TAB-013).
+    if let Some(s) = state_mut(hwnd)
+        && let Some((_, buf)) = &mut s.renaming
+    {
+        if !ch.is_control() {
+            buf.push(ch);
+        }
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+        return;
+    }
     // VK_PACKET surrogates arrive as WM_CHAR; ignore unpaired halves.
     if (0xD800..0xDC00).contains(&code) {
         return;
@@ -973,8 +1231,14 @@ fn toggle_search(hwnd: HWND) {
     let Some(s) = state_mut(hwnd) else { return };
     if s.search.is_some() {
         s.search = None;
-    } else {
-        s.search = Some(SearchState::new());
+    } else if s.cfg.search.visible {
+        // `[search]` sets the starting options (SEARCH-007/008/009).
+        let defaults = s.cfg.search.clone();
+        s.search = Some(SearchState::with_defaults(
+            defaults.case_sensitive_default,
+            defaults.whole_word_default,
+            defaults.regex_default,
+        ));
     }
     s.suppress_char = true;
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -1117,7 +1381,7 @@ fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
             px_to_dips(pt.x.max(0) as u32, dpi),
             px_to_dips(pt.y.max(0) as u32, dpi),
         );
-        let cell = cell_at(s, pos.0, pos.1);
+        let cell = cell_at(s, pos.0, pos.1, client_height_dips(hwnd));
         let (proto, sgr, urxvt) = cell.map_or((MouseProtocol::Off, false, false), |(idx, _, _)| {
             s.app.active_tab().and_then(|t| t.pane_at(idx)).map_or(
                 (MouseProtocol::Off, false, false),
@@ -1169,26 +1433,27 @@ fn cursor_dips(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
     )
 }
 
-/// Client-area width in DIPs (tab-bar layout needs it for hit tests).
-fn client_width_dips(hwnd: HWND) -> f32 {
+/// Client-area height in DIPs (the tab bar can sit at the bottom, TAB-022).
+fn client_height_dips(hwnd: HWND) -> f32 {
     let mut r = RECT::default();
     let _ = unsafe { GetClientRect(hwnd, &mut r) };
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
-    px_to_dips((r.right - r.left).max(1) as u32, dpi)
+    px_to_dips((r.bottom - r.top).max(1) as u32, dpi)
 }
 
 /// Grid cell under a client-area DIP position, addressed by pane:
 /// `(pane flatten index, viewport row, viewport col)` inside that pane;
 /// `None` for the tab bar. Clamped to the grid bounds so drags past the
 /// edges extend the selection (WIN-004, SPLIT-004 hit-testing).
-fn cell_at(s: &WindowState, x: f32, y: f32) -> Option<(usize, usize, usize)> {
-    let bar = s.bar_height();
-    if y < bar {
+fn cell_at(s: &WindowState, x: f32, y: f32, height: f32) -> Option<(usize, usize, usize)> {
+    let top = s.grid_top();
+    let bottom = top + (height - s.bar_height() - 2.0 * s.pad_y()).max(0.0);
+    if y < top || y >= bottom {
         return None;
     }
     let tab = s.app.active_tab()?;
-    let col = (x / s.metrics.cell_width).floor().max(0.0) as usize;
-    let row = ((y - bar) / s.metrics.cell_height).floor().max(0.0) as usize;
+    let col = ((x - s.pad_x()) / s.metrics.cell_width).floor().max(0.0) as usize;
+    let row = ((y - top) / s.metrics.cell_height).floor().max(0.0) as usize;
     let (cols, rows) = (tab.cols(), tab.rows());
     let col = col.min(cols.saturating_sub(1));
     let row = row.min(rows.saturating_sub(1));
@@ -1247,7 +1512,8 @@ fn send_mouse_report(
 
 fn mouse_cell(hwnd: HWND, lparam: LPARAM) -> Option<(usize, usize, usize)> {
     let (x, y) = cursor_dips(hwnd, lparam);
-    state_ref(hwnd).and_then(|s| cell_at(s, x, y))
+    let height = client_height_dips(hwnd);
+    state_ref(hwnd).and_then(|s| cell_at(s, x, y, height))
 }
 
 fn handle_rbutton_down(hwnd: HWND, lparam: LPARAM) {
@@ -1299,28 +1565,37 @@ fn handle_context_menu(hwnd: HWND, lparam: LPARAM) {
 
 fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
     let (x, y) = cursor_dips(hwnd, lparam);
-    let bar = state_ref(hwnd).map_or(TAB_BAR_HEIGHT, |s| s.bar_height());
-    if y < bar {
-        let hit = state_ref(hwnd).map(|s| {
-            let titles: Vec<String> = s.app.tabs().iter().map(|t| t.title().to_string()).collect();
-            let layout = tabbar::layout(&titles, client_width_dips(hwnd), s.metrics.cell_width);
-            tabbar::hit_test(&layout, x)
-        });
-        match hit {
-            Some(Hit::Tab(i)) => {
-                if let Some(s) = state_mut(hwnd) {
-                    s.app.select_tab(i);
-                    set_title(hwnd, &s.app);
+    let hit = state_ref(hwnd).map(|s| s.tab_hit(x, y, client_height_dips(hwnd)));
+    match hit {
+        Some(TabHit::Tab(i)) => {
+            if let Some(s) = state_mut(hwnd) {
+                // Press-and-drag reorders the tab (TAB-016).
+                s.tab_drag = Some(i);
+                if s.app.select_tab(i) {
+                    apply_active_profile_theme(s);
                 }
-                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+                set_title(hwnd, &s.app);
             }
-            Some(Hit::Plus) => new_tab(hwnd),
-            Some(Hit::None) | None => {}
+            unsafe { SetCapture(hwnd) };
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            return;
         }
+        Some(TabHit::Close(i)) => {
+            close_tab(hwnd, i);
+            return;
+        }
+        Some(TabHit::Plus) => {
+            new_tab(hwnd);
+            return;
+        }
+        Some(TabHit::None) | None => {}
+    }
+    if state_ref(hwnd).is_some_and(|s| s.tab_hit(x, y, client_height_dips(hwnd)) != TabHit::None) {
         return;
     }
+    let height = client_height_dips(hwnd);
     let anchor = state_ref(hwnd).and_then(|s| {
-        let (idx, row, col) = cell_at(s, x, y)?;
+        let (idx, row, col) = cell_at(s, x, y, height)?;
         let abs = abs_row_in_pane(s, idx, row);
         Some((Pos { row: abs, col }, idx))
     });
@@ -1367,8 +1642,9 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
 /// lets a follow-up drag extend the word selection (WIN-004).
 fn handle_dblclick(hwnd: HWND, lparam: LPARAM) {
     let (x, y) = cursor_dips(hwnd, lparam);
+    let height = client_height_dips(hwnd);
     let cell = state_ref(hwnd).and_then(|s| {
-        let (idx, row, col) = cell_at(s, x, y)?;
+        let (idx, row, col) = cell_at(s, x, y, height)?;
         let abs = abs_row_in_pane(s, idx, row);
         Some((idx, abs, col))
     });
@@ -1411,7 +1687,29 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     const MK_MBUTTON: usize = 0x10;
     const MK_RBUTTON: usize = 0x02;
     let (x, y) = cursor_dips(hwnd, lparam);
-    if let Some((idx, row, col)) = state_ref(hwnd).and_then(|s| cell_at(s, x, y))
+    let height = client_height_dips(hwnd);
+    // Tab drag reorder (TAB-016): drop the dragged tab on the tab it crosses.
+    if let Some(from) = state_ref(hwnd).and_then(|s| s.tab_drag)
+        && let Some(to) = state_ref(hwnd).map(|s| s.tab_hit(x, y, height))
+    {
+        if let TabHit::Tab(idx) = to
+            && idx != from
+            && state_mut(hwnd).is_some_and(|s| {
+                let moved = s.app.move_tab(from, idx);
+                if moved {
+                    s.tab_drag = Some(idx);
+                }
+                moved
+            })
+        {
+            if let Some(s) = state_ref(hwnd) {
+                set_title(hwnd, &s.app);
+            }
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+        }
+        return;
+    }
+    if let Some((idx, row, col)) = state_ref(hwnd).and_then(|s| cell_at(s, x, y, height))
         && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
     {
         let protocol = state_ref(hwnd).map_or(MouseProtocol::Off, |s| mouse_protocol_at(s, idx));
@@ -1439,9 +1737,12 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     let Some((a, idx)) = s.drag_anchor else {
         return;
     };
-    // Dragging over the tab bar clamps the selection to the top row of
-    // the anchor pane.
-    let Some((_, row, col)) = cell_at(s, x, y.max(s.bar_height())) else {
+    // Dragging over the tab bar clamps the selection to the grid edge.
+    let height = client_height_dips(hwnd);
+    let top = s.grid_top();
+    let bottom = top + (height - s.bar_height()).max(0.0);
+    let y = y.clamp(top, (bottom - 0.001).max(top));
+    let Some((_, row, col)) = cell_at(s, x, y, height) else {
         return;
     };
     let row = row.min(
@@ -1472,6 +1773,11 @@ fn handle_lbutton_up(hwnd: HWND, lparam: LPARAM) {
     let _ = unsafe { ReleaseCapture() };
     if let Some(s) = state_mut(hwnd) {
         s.drag_anchor = None;
+        s.tab_drag = None;
+    }
+    // CONFIG-010: copy-on-select puts the selection on the clipboard.
+    if state_ref(hwnd).is_some_and(|s| s.cfg.copy_on_select) {
+        copy_selection(hwnd);
     }
 }
 
@@ -1485,8 +1791,8 @@ fn set_cursor_for_position(wparam: WPARAM) {
     let _ = unsafe { ScreenToClient(target, &mut pt) };
     let dpi = unsafe { GetDpiForWindow(target) }.max(96) as f32;
     let y = px_to_dips(pt.y.max(0) as u32, dpi);
-    let bar = state_ref(target).map_or(TAB_BAR_HEIGHT, |s| s.bar_height());
-    let idc = if y < bar { IDC_ARROW } else { IDC_IBEAM };
+    let over_bar = state_ref(target).is_some_and(|s| s.over_tab_bar(y, client_height_dips(target)));
+    let idc = if over_bar { IDC_ARROW } else { IDC_IBEAM };
     if let Ok(cursor) = unsafe { LoadCursorW(None, idc) } {
         let _ = unsafe { SetCursor(Some(cursor)) };
     }
@@ -1567,7 +1873,11 @@ fn drain_and_cleanup(hwnd: HWND) {
         // shell output costs one partial frame per tick (NFR-113/114).
         if s.app.take_dirty() {
             if let Some(r) = &mut s.renderer {
-                r.paint_damage(&s.app, &s.theme, s.search.as_ref());
+                let prompt = s
+                    .renaming
+                    .as_ref()
+                    .map(|(_, buf)| format!("Rename tab: {buf}  (Enter to accept, Esc to cancel)"));
+                r.paint_damage(&s.app, &s.theme, s.search.as_ref(), prompt.as_deref());
                 s.app.clear_grid_damage();
             } else {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -1701,15 +2011,33 @@ fn close_pane_or_tab(hwnd: HWND) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
-/// Ctrl+Shift+T: append a tab and spawn a shell at the current grid size.
+/// Ctrl+Shift+T: append a tab for the selected profile.
 fn new_tab(hwnd: HWND) {
-    new_tab_with_title(hwnd, None);
+    let spec = state_ref(hwnd).map(active_profile);
+    if let Some(spec) = spec {
+        new_tab_with_profile(hwnd, spec);
+    }
 }
 
-fn new_tab_with_title(hwnd: HWND, title: Option<&str>) {
-    if let Some(s) = state_mut(hwnd) {
-        s.app.add_tab();
-    }
+/// Append a tab for `spec`: profile label, tab colour (TAB-015), per-profile
+/// theme (THEME-011) and scrollback, then spawn its shell (SHELL-017..021).
+fn new_tab_with_profile(hwnd: HWND, spec: ProfileSpec) {
+    let Some(s) = state_mut(hwnd) else {
+        return;
+    };
+    let (cols, rows) = s
+        .app
+        .active_tab()
+        .map_or((s.spawn.cols, s.spawn.rows), |t| (t.cols(), t.rows()));
+    let scrollback = spec.scrollback.unwrap_or(s.cfg.scrollback);
+    s.app.add_tab_profile(
+        cols.max(MIN_COLS),
+        rows.max(MIN_ROWS),
+        scrollback,
+        spec.name.clone(),
+        spec.color,
+    );
+    apply_profile_theme(s, &spec);
     // Auto/hidden tab bars change the strip height when the count changes;
     // sync first so the new shell spawns at the grid the bar leaves room for.
     sync_tab_bar(hwnd);
@@ -1718,15 +2046,267 @@ fn new_tab_with_title(hwnd: HWND, title: Option<&str>) {
         .renderer
         .as_ref()
         .map_or((s.spawn.cols, s.spawn.rows), |r| r.grid_size());
-    let opts = profile_opts(s, cols.max(MIN_COLS), rows.max(MIN_ROWS));
+    let opts = spec_opts(&spec, cols.max(MIN_COLS), rows.max(MIN_ROWS));
     if let Err(e) = s.app.spawn_active(&opts) {
         eprintln!("rusttyterm: shell spawn failed: {e}");
     }
-    if let Some(title) = title
-        && let Some(tab) = s.app.active_tab_mut()
-    {
-        tab.set_title(title);
+    set_title(hwnd, &s.app);
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Spawn options from a profile: program, args, directory, environment.
+fn spec_opts(spec: &ProfileSpec, cols: usize, rows: usize) -> SpawnOptions {
+    SpawnOptions {
+        program: spec.program.clone(),
+        args: spec.args.clone(),
+        cols,
+        rows,
+        cwd: spec.cwd.clone(),
+        env: spec.env.clone(),
     }
+}
+
+/// The active tab's profile, falling back to the selector
+/// (SPLIT-007: a split pane inherits its tab's profile).
+fn tab_profile(s: &WindowState) -> ProfileSpec {
+    s.app
+        .active_tab()
+        .and_then(|t| s.profiles.iter().find(|p| p.name == t.profile()).cloned())
+        .unwrap_or_else(|| active_profile(s))
+}
+
+/// THEME-011: a profile's theme is the window theme while its tab lives.
+fn apply_profile_theme(s: &mut WindowState, spec: &ProfileSpec) {
+    let Some(name) = spec.theme.as_deref() else {
+        return;
+    };
+    s.theme = Theme::preset(name).unwrap_or_default();
+}
+
+/// THEME-011 for the tab the user just switched to.
+fn apply_active_profile_theme(s: &mut WindowState) {
+    let spec = tab_profile(s);
+    apply_profile_theme(s, &spec);
+}
+
+/// TAB-013: start an inline rename of the active tab.
+fn start_rename_tab(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else {
+        return;
+    };
+    let idx = s.app.active_index();
+    let title = s
+        .app
+        .active_tab()
+        .map(|t| t.title().to_string())
+        .unwrap_or_default();
+    s.renaming = Some((idx, title));
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Enter accepts, Esc cancels, Backspace deletes; printable keys arrive as
+/// WM_CHAR and extend the buffer (TAB-013).
+fn handle_rename_keydown(hwnd: HWND, vk: u16) -> bool {
+    let Some(s) = state_mut(hwnd) else {
+        return false;
+    };
+    let Some((idx, buf)) = s.renaming.take() else {
+        return false;
+    };
+    match vk {
+        0x1B => {}
+        0x0D => {
+            if let Some(tab) = s.app.tab_at_mut(idx) {
+                tab.set_title(buf);
+            }
+            set_title(hwnd, &s.app);
+        }
+        0x08 => {
+            let mut trimmed = buf;
+            trimmed.pop();
+            s.renaming = Some((idx, trimmed));
+        }
+        _ => {
+            s.renaming = Some((idx, buf));
+            return false;
+        }
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    true
+}
+
+/// TAB-017: keyboard tab reorder.
+fn move_active_tab(hwnd: HWND, delta: i32) {
+    if state_mut(hwnd).is_some_and(|s| s.app.move_active_tab(delta as isize)) {
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    }
+}
+
+/// Close tab `idx` (the tab bar's close box, TAB-021).
+fn close_tab(hwnd: HWND, idx: usize) {
+    if state_mut(hwnd).is_some_and(|s| s.app.close_tab(idx)) {
+        let _ = unsafe { DestroyWindow(hwnd) };
+        return;
+    }
+    sync_tab_bar(hwnd);
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// CONFIG-010: copy the current selection, when there is one.
+fn copy_selection(hwnd: HWND) {
+    let text = state_ref(hwnd).and_then(|s| {
+        let tab = s.app.active_tab()?;
+        tab.pane().selection_text()
+    });
+    if let Some(text) = text
+        && !text.is_empty()
+    {
+        let _ = clipboard::set_text(&text);
+    }
+}
+
+/// `[keybindings]` spec for a key event: "ctrl+shift+t" (CONFIG-008).
+fn key_spec(vk: u16, mods: Modifiers) -> String {
+    let mut spec = String::new();
+    if mods.ctrl {
+        spec.push_str("ctrl+");
+    }
+    if mods.alt {
+        spec.push_str("alt+");
+    }
+    if mods.shift {
+        spec.push_str("shift+");
+    }
+    spec.push_str(&key_name(vk));
+    spec
+}
+
+/// Key names accepted in `[keybindings]` specs.
+fn key_name(vk: u16) -> String {
+    let named = match vk {
+        0x08 => "backspace",
+        0x09 => "tab",
+        0x0D => "enter",
+        0x1B => "escape",
+        0x20 => "space",
+        0x21 => "pageup",
+        0x22 => "pagedown",
+        0x23 => "end",
+        0x24 => "home",
+        0x25 => "left",
+        0x26 => "up",
+        0x27 => "right",
+        0x28 => "down",
+        0x2D => "insert",
+        0x2E => "delete",
+        0x6D => "minus",
+        0xBB => "equal",
+        0xDB => "left-bracket",
+        0xDD => "right-bracket",
+        0xDC => "backslash",
+        _ => "",
+    };
+    if !named.is_empty() {
+        return named.to_string();
+    }
+    if (0x41..=0x5A).contains(&vk) {
+        return ((vk as u8 + 32) as char).to_string();
+    }
+    if (0x30..=0x39).contains(&vk) {
+        return char::from(u8::try_from(vk).unwrap_or(b'0') - 0x30 + b'0').to_string();
+    }
+    if (0x70..=0x87).contains(&vk) {
+        return format!("f{}", vk - 0x70 + 1);
+    }
+    String::new()
+}
+
+/// Run a `[keybindings]` action; every action maps to a menu command.
+fn run_key_action(hwnd: HWND, action: KeyAction) {
+    match action {
+        KeyAction::NewTab => new_tab(hwnd),
+        KeyAction::CloseTab => close_pane_or_tab(hwnd),
+        KeyAction::NextTab => switch_tab_rel(hwnd, 1),
+        KeyAction::PrevTab => switch_tab_rel(hwnd, -1),
+        KeyAction::MoveTabLeft => move_active_tab(hwnd, -1),
+        KeyAction::MoveTabRight => move_active_tab(hwnd, 1),
+        KeyAction::RenameTab => start_rename_tab(hwnd),
+        KeyAction::Copy => copy_screen(hwnd),
+        KeyAction::Paste => paste_clipboard(hwnd),
+        KeyAction::Search => toggle_search(hwnd),
+        KeyAction::SplitRight => split_pane(hwnd, Dir::Vertical),
+        KeyAction::SplitDown => split_pane(hwnd, Dir::Horizontal),
+        KeyAction::Fullscreen => toggle_fullscreen(hwnd),
+        KeyAction::Quit => {
+            let _ = unsafe { DestroyWindow(hwnd) };
+        }
+        KeyAction::FocusUp => focus_side(hwnd, Side::Up),
+        KeyAction::FocusDown => focus_side(hwnd, Side::Down),
+        KeyAction::FocusLeft => focus_side(hwnd, Side::Left),
+        KeyAction::FocusRight => focus_side(hwnd, Side::Right),
+        KeyAction::ResizeUp => resize_side(hwnd, Side::Up),
+        KeyAction::ResizeDown => resize_side(hwnd, Side::Down),
+        KeyAction::ResizeLeft => resize_side(hwnd, Side::Left),
+        KeyAction::ResizeRight => resize_side(hwnd, Side::Right),
+        KeyAction::PrevTheme => cycle_theme(hwnd, -1),
+        KeyAction::NextTheme => cycle_theme(hwnd, 1),
+        KeyAction::PrevProfile => cycle_profile(hwnd, -1),
+        KeyAction::NextProfile => cycle_profile(hwnd, 1),
+    }
+}
+
+/// Pane focus by keyboard (SPLIT-004).
+fn focus_side(hwnd: HWND, side: Side) {
+    if state_mut(hwnd).is_some_and(|s| s.app.focus_neighbor(side)) {
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    }
+}
+
+/// Pane resize by keyboard (SPLIT-005).
+fn resize_side(hwnd: HWND, side: Side) {
+    let resized = state_mut(hwnd).is_some_and(|s| {
+        let step = App::ratio_step();
+        let (dir, delta) = match side {
+            Side::Left => (Dir::Vertical, -step),
+            Side::Right => (Dir::Vertical, step),
+            Side::Up => (Dir::Horizontal, -step),
+            Side::Down => (Dir::Horizontal, step),
+        };
+        s.app.adjust_ratio(dir, delta)
+    });
+    if resized {
+        sync_tab_bar(hwnd);
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    }
+}
+
+/// THEME-010: cycle the built-in themes.
+fn cycle_theme(hwnd: HWND, delta: i32) {
+    let Some(s) = state_mut(hwnd) else {
+        return;
+    };
+    let n = theme::PRESETS.len() as i32;
+    let idx = (active_theme_index(s) as i32 + delta).rem_euclid(n) as usize;
+    s.theme = Theme::preset(theme::PRESETS[idx]).unwrap_or_default();
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// SHELL-022: cycle profiles; the selector moves and so does the active tab.
+fn cycle_profile(hwnd: HWND, delta: i32) {
+    let Some(s) = state_mut(hwnd) else {
+        return;
+    };
+    let n = s.profiles.len() as i32;
+    let idx = (s.profile as i32 + delta).rem_euclid(n) as usize;
+    s.profile = idx;
+    let spec = s.profiles[idx].clone();
+    let tab = s.app.active_index();
+    if let Some(tab) = s.app.tab_at_mut(tab) {
+        tab.set_profile(spec.name.clone());
+        tab.set_auto_title(spec.name.clone());
+        tab.set_color(spec.color);
+    }
+    apply_profile_theme(s, &spec);
     set_title(hwnd, &s.app);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -1800,7 +2380,7 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
     let cols = cfg.window.cols.max(MIN_COLS);
     let rows = cfg.window.rows.max(MIN_ROWS);
     // One tab at startup: "auto"/"hidden" bars start collapsed (TAB-010).
-    let bar = match cfg.tab_bar {
+    let bar = match cfg.tab_bar.visible {
         TabBar::Always => TAB_BAR_HEIGHT,
         TabBar::Auto | TabBar::Hidden => 0.0,
     };
@@ -1819,7 +2399,12 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         theme,
         spawn,
         font: font.clone(),
-        tab_bar: cfg.tab_bar,
+        tab_bar: cfg.tab_bar.visible,
+        profiles: merge_profiles(cfg),
+        cfg: cfg.clone(),
+        renaming: None,
+        tab_drag: None,
+        blink_on: true,
         renderer: None,
         metrics,
         timer_id: 0,
@@ -1828,7 +2413,14 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         suppress_char: false,
         fullscreen: None,
         search: None,
-        profile: 0,
+        // CONFIG-013: `starting-profile` picks the initial shell.
+        profile: {
+            let merged = merge_profiles(cfg);
+            merged
+                .iter()
+                .position(|p| p.name.eq_ignore_ascii_case(&cfg.starting_profile))
+                .unwrap_or(0)
+        },
     });
     let state_param = Box::into_raw(state) as *const c_void;
 
@@ -1898,7 +2490,43 @@ mod tests {
     fn menu_generated_command_ranges_stay_disjoint() {
         assert_eq!(theme_command(MENU_THEME_BASE + 1), Some(1));
         assert_eq!(theme_command(MENU_THEME_BASE + theme::PRESETS.len()), None);
-        assert_eq!(profile_command(MENU_PROFILE_BASE), Some(0));
-        assert_eq!(profile_command(MENU_THEME_BASE), None);
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn tab_colour_hex_accepts_hash_and_bare_forms() {
+        assert_eq!(parse_hex("#ff0000"), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(parse_hex("00ff00"), Some(Color::rgb(0, 255, 0)));
+        assert_eq!(parse_hex("nope"), None);
+    }
+
+    #[test]
+    fn a_config_profile_overrides_the_builtin_with_the_same_name() {
+        let cfg = Config::parse("[[profile]]\nname = \"PowerShell\"\ncommand = \"pwsh-preview\"\n")
+            .expect("parses");
+        let merged = merge_profiles(&cfg);
+        let ps = merged
+            .iter()
+            .find(|p| p.name == "PowerShell")
+            .expect("present");
+        assert_eq!(ps.program, "pwsh-preview");
+        assert_eq!(merged.iter().filter(|p| p.name == "PowerShell").count(), 1);
+    }
+
+    #[test]
+    fn key_names_match_the_keybinding_specs() {
+        assert_eq!(key_name(0x54), "t");
+        assert_eq!(key_name(0x21), "pageup");
+        assert_eq!(key_name(0x70), "f1");
+        let mods = Modifiers {
+            ctrl: true,
+            shift: true,
+            alt: false,
+        };
+        assert_eq!(key_spec(0x21, mods), "ctrl+shift+pageup");
     }
 }

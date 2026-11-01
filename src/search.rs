@@ -66,6 +66,19 @@ impl SearchState {
         Self::default()
     }
 
+    /// Open a search with the `[search]` defaults applied (SEARCH-007..009).
+    #[must_use]
+    pub fn with_defaults(case_sensitive: bool, whole_word: bool, regex: bool) -> Self {
+        Self {
+            options: SearchOptions {
+                case_sensitive,
+                whole_word,
+                regex,
+            },
+            ..Self::default()
+        }
+    }
+
     /// Recompute matches for `tab`; returns `true` when the result changed.
     ///
     /// A regex compile failure records [`SearchState::error`] and leaves no

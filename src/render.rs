@@ -26,10 +26,11 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
-    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory,
-    IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWriteCreateFactory, IDWriteFactory,
+    IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout, IDWriteTypography,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::PCWSTR;
@@ -37,7 +38,7 @@ use windows_numerics::Vector2;
 
 use crate::app::App;
 use crate::color::Color;
-use crate::config::FontConfig;
+use crate::config::{CursorShape, FontConfig, TabBarPlacement};
 use crate::glyph_cache::{self, GlyphAtlas, GlyphKey, Tile};
 use crate::grid::{Cell, CellAttribute, Grid};
 use crate::pane::Pane;
@@ -136,6 +137,46 @@ pub fn measure_cells(dpi: u32, font: &FontConfig) -> anyhow::Result<CellMetrics>
 /// Build the text formats for plain/bold/italic/bold-italic plus the cell
 /// metrics, picking the configured family when installed, else the first
 /// installed family from [`FONT_FAMILIES`] (FONT-002/018).
+fn font_feature_tag(tag: &str) -> Option<DWRITE_FONT_FEATURE_TAG> {
+    let bytes = tag.as_bytes();
+    if bytes.len() != 4 {
+        return None;
+    }
+    Some(DWRITE_FONT_FEATURE_TAG(u32::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3],
+    ])))
+}
+
+fn build_typography(
+    dwrite: &IDWriteFactory,
+    font: &FontConfig,
+) -> anyhow::Result<Option<IDWriteTypography>> {
+    let mut features: Vec<(DWRITE_FONT_FEATURE_TAG, u32)> = Vec::new();
+    let mut tokens = font.features.split_whitespace();
+    while let Some(tag) = tokens.next() {
+        let enabled = match tokens.next() {
+            Some(v) => matches!(v, "1" | "on" | "true" | "yes"),
+            None => true,
+        };
+        let Some(tag) = font_feature_tag(tag) else {
+            continue;
+        };
+        features.push((tag, u32::from(enabled)));
+    }
+    if features.is_empty() {
+        return Ok(None);
+    }
+    let typography: IDWriteTypography = unsafe { dwrite.CreateTypography() }?;
+    for (tag, parameter) in features {
+        let feature = DWRITE_FONT_FEATURE {
+            nameTag: tag,
+            parameter,
+        };
+        unsafe { typography.AddFontFeature(feature) }?;
+    }
+    Ok(Some(typography))
+}
+
 fn build_font_resources(
     dwrite: &IDWriteFactory,
     dpi: f32,
@@ -255,12 +296,26 @@ fn layout_height(
 /// A Direct2D render target bound to a terminal window.
 pub struct Renderer {
     target: ID2D1HwndRenderTarget,
+    dwrite: IDWriteFactory,
+    typography: Option<IDWriteTypography>,
     formats: [IDWriteTextFormat; 4],
     metrics: CellMetrics,
     dpi: f32,
     /// Tab-bar strip height in DIPs; 0.0 when the bar is hidden
     /// (`tab-bar = "auto"` with one tab, or `"hidden"`, TAB-010).
     tab_bar_height: f32,
+    tab_bar_placement: TabBarPlacement,
+    tab_show_profiles: bool,
+    tab_close_button: bool,
+    cursor_shape: CursorShape,
+    cursor_blink: bool,
+    cursor_blink_visible: bool,
+    split_border: bool,
+    split_padding: f32,
+    /// `[window.padding]` in DIPs: the grid is inset by this much, the tab
+    /// bar strip is not (WINDOW-011).
+    pad_x: f32,
+    pad_y: f32,
     brushes: HashMap<u32, ID2D1SolidColorBrush>,
     /// Reused UTF-16 buffer: the text paint path fills this instead of
     /// building a `String` + `Vec<u16>` per run (NFR-113: no allocations in
@@ -272,6 +327,8 @@ pub struct Renderer {
     label: String,
     /// Reused fitted label for the search bar (SEARCH-004 display).
     search_label: String,
+    /// Reused rename-prompt label (TAB-013).
+    prompt_label: String,
     /// Reused row-damage mask for [`Renderer::paint_damage`]: one entry per
     /// tab row (each leaf's viewport rows stacked in layout order).
     mask: Vec<bool>,
@@ -391,6 +448,7 @@ impl Renderer {
         let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
         // Family name is diagnostics-only; the formats carry the chosen face.
         let (_family, formats, metrics) = build_font_resources(&dwrite, dpi, font)?;
+        let typography = build_typography(&dwrite, font)?;
         let width = dips_to_px(cols.max(1) as f32 * metrics.cell_width, dpi).max(1);
         let height = dips_to_px(
             rows.max(1) as f32 * metrics.cell_height + tab_bar_height,
@@ -416,16 +474,29 @@ impl Renderer {
         let target = unsafe { factory.CreateHwndRenderTarget(&props, &hwnd_props) }?;
         Ok(Self {
             target,
+            dwrite,
+            typography,
             formats,
             metrics,
             dpi,
             tab_bar_height,
+            tab_bar_placement: TabBarPlacement::Top,
+            tab_show_profiles: true,
+            tab_close_button: true,
+            cursor_shape: CursorShape::Block,
+            cursor_blink: true,
+            cursor_blink_visible: true,
+            split_border: true,
+            split_padding: 1.0,
+            pad_x: 0.0,
+            pad_y: 0.0,
             brushes: HashMap::new(),
             utf16: Vec::with_capacity(cols.max(1) * 2),
             titles: Vec::new(),
             layout: tabbar::Layout::default(),
             label: String::new(),
             search_label: String::new(),
+            prompt_label: String::new(),
             mask: Vec::new(),
             damage: Damage::default(),
             pane_damage: Vec::new(),
@@ -454,6 +525,121 @@ impl Renderer {
         self.tab_bar_height = height.max(0.0);
     }
 
+    /// Configure tab-bar strip options.
+    pub fn set_tab_bar_options(
+        &mut self,
+        placement: TabBarPlacement,
+        show_profiles: bool,
+        close_button: bool,
+    ) {
+        self.tab_bar_placement = placement;
+        self.tab_show_profiles = show_profiles;
+        self.tab_close_button = close_button;
+    }
+
+    /// Configure cursor drawing.
+    pub fn set_cursor_options(&mut self, shape: CursorShape, blink: bool) {
+        self.cursor_shape = shape;
+        self.cursor_blink = blink;
+        self.cursor_blink_visible = true;
+    }
+
+    /// Toggle cursor blink state.
+    pub fn set_cursor_blink_visible(&mut self, visible: bool) {
+        self.cursor_blink_visible = visible;
+    }
+
+    /// Configure split chrome.
+    pub fn set_split_options(&mut self, border: bool, padding: u32) {
+        self.split_border = border;
+        self.split_padding = padding as f32;
+    }
+
+    /// `[window.padding]` (WINDOW-011). Callers re-read [`Renderer::grid_size`]
+    /// afterwards: the inset takes grid cells away.
+    /// shortcut: the inset arithmetic has no test (it needs a live render
+    /// target); add one when the renderer gets a software-target test.
+    pub fn set_padding(&mut self, x: u32, y: u32) {
+        self.pad_x = x as f32;
+        self.pad_y = y as f32;
+    }
+
+    /// Left edge of the grid in client DIPs (the window padding).
+    #[must_use]
+    pub fn grid_left(&self) -> f32 {
+        self.pad_x
+    }
+
+    /// Top padding above the grid, on top of the tab-bar strip (WINDOW-011).
+    #[must_use]
+    pub fn grid_pad_y(&self) -> f32 {
+        self.pad_y
+    }
+
+    fn grid_top(&self) -> f32 {
+        let bar = if self.tab_bar_placement == TabBarPlacement::Top {
+            self.tab_bar_height
+        } else {
+            0.0
+        };
+        bar + self.pad_y
+    }
+
+    fn draw_units(
+        &self,
+        units: &[u16],
+        format: &IDWriteTextFormat,
+        rect: D2D_RECT_F,
+        brush: &ID2D1SolidColorBrush,
+    ) {
+        if units.is_empty() {
+            return;
+        }
+        if let Some(typography) = self.typography.as_ref() {
+            let width = (rect.right - rect.left).max(1.0);
+            let height = (rect.bottom - rect.top).max(1.0);
+            if let Ok(layout) =
+                unsafe { self.dwrite.CreateTextLayout(units, format, width, height) }
+            {
+                let range = DWRITE_TEXT_RANGE {
+                    startPosition: 0,
+                    length: units.len() as u32,
+                };
+                unsafe {
+                    let _ = layout.SetTypography(typography, range);
+                    self.target.DrawTextLayout(
+                        Vector2 {
+                            X: rect.left,
+                            Y: rect.top,
+                        },
+                        &layout,
+                        brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                }
+                return;
+            }
+        }
+        unsafe {
+            self.target.DrawText(
+                units,
+                format,
+                &rect,
+                brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            )
+        };
+    }
+
+    fn tab_bar_top(&self, height: f32) -> f32 {
+        if self.tab_bar_placement == TabBarPlacement::Top {
+            0.0
+        } else {
+            (height - self.tab_bar_height).max(0.0)
+        }
+    }
+
     /// Resize the render target to a new client area in physical pixels.
     ///
     /// Direct2D invalidates the resources created from a resized target, so
@@ -479,8 +665,8 @@ impl Renderer {
     #[must_use]
     pub fn grid_size(&self) -> (usize, usize) {
         let px = unsafe { self.target.GetPixelSize() };
-        let w = px_to_dips(px.width, self.dpi);
-        let h = (px_to_dips(px.height, self.dpi) - self.tab_bar_height).max(0.0);
+        let w = (px_to_dips(px.width, self.dpi) - 2.0 * self.pad_x).max(0.0);
+        let h = (px_to_dips(px.height, self.dpi) - self.tab_bar_height - 2.0 * self.pad_y).max(0.0);
         (
             (w / self.metrics.cell_width).floor().max(1.0) as usize,
             (h / self.metrics.cell_height).floor().max(1.0) as usize,
@@ -491,8 +677,14 @@ impl Renderer {
     /// cursor, and the search overlay when `search` is active. This is the
     /// full repaint, used for system-initiated `WM_PAINT` (expose, resize,
     /// coming back from occluded). Never panics on Direct2D failure (NFR-216).
-    pub fn paint(&mut self, app: &App, theme: &Theme, search: Option<&SearchState>) {
-        self.paint_frame(app, theme, search, true);
+    pub fn paint(
+        &mut self,
+        app: &App,
+        theme: &Theme,
+        search: Option<&SearchState>,
+        prompt: Option<&str>,
+    ) {
+        self.paint_frame(app, theme, search, prompt, true);
     }
 
     /// Paint only what changed since the last frame (NFR-113 damage-only
@@ -504,8 +696,20 @@ impl Renderer {
     /// The caller clears the grid damage flags afterwards
     /// (see [`crate::app::App::clear_grid_damage`]); a dropped frame keeps
     /// them set, so the next call repaints everything.
-    pub fn paint_damage(&mut self, app: &App, theme: &Theme, search: Option<&SearchState>) {
-        self.paint_frame(app, theme, search, false);
+    pub fn paint_damage(
+        &mut self,
+        app: &App,
+        theme: &Theme,
+        search: Option<&SearchState>,
+        prompt: Option<&str>,
+    ) {
+        self.paint_frame(app, theme, search, prompt, false);
+    }
+
+    /// The tab-bar geometry the last frame painted, for hit testing.
+    #[must_use]
+    pub fn tab_layout(&self) -> tabbar::Layout {
+        self.layout.clone()
     }
 
     /// Rows the last frame painted, for the damage-only benchmark
@@ -613,7 +817,9 @@ impl Renderer {
     /// Columns this frame may paint: the client width measured in cells.
     /// Each leaf clamps this further to its own box (SPLIT-002).
     fn frame_cols(&self, width: f32) -> usize {
-        (width / self.metrics.cell_width).floor() as usize
+        ((width - 2.0 * self.pad_x).max(0.0) / self.metrics.cell_width)
+            .floor()
+            .max(1.0) as usize
     }
 
     fn paint_frame(
@@ -621,6 +827,7 @@ impl Renderer {
         app: &App,
         theme: &Theme,
         search: Option<&SearchState>,
+        prompt: Option<&str>,
         force_full: bool,
     ) {
         if unsafe { self.target.CheckWindowState() } == D2D1_WINDOW_STATE_OCCLUDED {
@@ -657,8 +864,8 @@ impl Renderer {
             tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
                 let idx = pane_idx;
                 pane_idx += 1;
-                let left = rect.col as f32 * cw;
-                let top0 = self.tab_bar_height + rect.row as f32 * ch;
+                let left = self.grid_left() + rect.col as f32 * cw;
+                let top0 = self.grid_top() + rect.row as f32 * ch;
                 let grid = pane.grid();
                 let rows = rect.rows.min(grid.rows());
                 let cols = rect.cols.min(max_cols.saturating_sub(rect.col));
@@ -699,11 +906,15 @@ impl Renderer {
             });
         }
         self.atlas = atlas;
-        if let Some(search) = search {
-            self.paint_search_bar(search, theme, width, height);
-        }
         if self.tab_bar_height > 0.0 {
-            self.paint_tab_bar(app, theme, width);
+            self.paint_tab_bar(app, theme, width, height);
+        }
+        // TAB-013: the rename prompt takes the overlay strip from search.
+        if let Some(prompt) = prompt {
+            self.prompt_label = prompt.to_string();
+            self.paint_prompt_bar(theme, width, height);
+        } else if let Some(search) = search {
+            self.paint_search_bar(search, theme, width, height);
         }
         unsafe {
             self.target
@@ -897,13 +1108,51 @@ impl Renderer {
     /// Paint the search overlay at the bottom of the client area
     /// (SEARCH-001..015): query, current match, match count, option states,
     /// and a regex error. It overlays the grid and does not resize it.
+    /// The inline tab-rename prompt (TAB-013), on the search strip.
+    fn paint_prompt_bar(&mut self, theme: &Theme, width: f32, height: f32) {
+        let bar_h = SEARCH_BAR_HEIGHT.min(height.max(0.0));
+        if bar_h <= 0.0 {
+            return;
+        }
+        let label = std::mem::take(&mut self.prompt_label);
+        let bottom = height - self.tab_bar_height.min(height.max(0.0));
+        let top = (bottom - bar_h).max(0.0);
+        self.fill_rect(0.0, top, width, bottom, theme.tab_bar);
+        tabbar::fit_title_into(
+            &label,
+            (width - 16.0).max(0.0),
+            self.metrics.cell_width,
+            &mut self.search_label,
+        );
+        if !self.search_label.is_empty() {
+            let mut units = std::mem::take(&mut self.utf16);
+            units.clear();
+            units.extend(self.search_label.encode_utf16());
+            let text_top = top + (bar_h - self.metrics.text_height) / 2.0;
+            let rect = D2D_RECT_F {
+                left: 8.0,
+                top: text_top,
+                right: width - 8.0,
+                bottom: text_top + self.metrics.text_height,
+            };
+            if let Some(brush) = self.brush(theme.foreground) {
+                let format = &self.formats[0];
+                self.draw_units(&units, format, rect, &brush);
+            }
+            self.utf16 = units;
+        }
+        self.prompt_label = label;
+    }
+
     fn paint_search_bar(&mut self, search: &SearchState, theme: &Theme, width: f32, height: f32) {
         let bar_h = SEARCH_BAR_HEIGHT.min(height.max(0.0));
         if bar_h <= 0.0 {
             return;
         }
-        let top = height - bar_h;
-        self.fill_rect(0.0, top, width, height, theme.tab_bar);
+        let tab_bottom = self.tab_bar_height.min(height.max(0.0));
+        let bottom = height - tab_bottom;
+        let top = (bottom - bar_h).max(0.0);
+        self.fill_rect(0.0, top, width, bottom, theme.tab_bar);
         let mut raw = std::mem::take(&mut self.label);
         raw.clear();
         raw.push_str("Search: ");
@@ -953,16 +1202,7 @@ impl Renderer {
             };
             if let Some(brush) = self.brush(theme.foreground) {
                 let format = &self.formats[0];
-                unsafe {
-                    self.target.DrawText(
-                        &units,
-                        format,
-                        &rect,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                }
+                self.draw_units(&units, format, rect, &brush);
             }
             self.utf16 = units;
         }
@@ -973,8 +1213,10 @@ impl Renderer {
     /// tab highlighted), and the `+` new-tab button (tab bar P0).
     /// Every buffer it needs is reused from the renderer, so a frame with
     /// the bar visible allocates nothing (NFR-113).
-    fn paint_tab_bar(&mut self, app: &App, theme: &Theme, width: f32) {
-        self.fill_rect(0.0, 0.0, width, self.tab_bar_height, theme.tab_bar);
+    fn paint_tab_bar(&mut self, app: &App, theme: &Theme, width: f32, height: f32) {
+        let bar_top = self.tab_bar_top(height);
+        let bar_bottom = bar_top + self.tab_bar_height;
+        self.fill_rect(0.0, bar_top, width, bar_bottom, theme.tab_bar);
         // Titles: fill the reused slots with the reused scratch String,
         // swapping buffers so each slot keeps its own capacity.
         let cw = self.metrics.cell_width;
@@ -984,7 +1226,14 @@ impl Renderer {
         titles.resize(app.tabs().len(), String::new());
         for (slot, tab) in titles.iter_mut().zip(app.tabs()) {
             label.clear();
+            if self.tab_show_profiles && !tab.profile().is_empty() {
+                label.push_str(tab.profile());
+                label.push_str(" Â· ");
+            }
             label.push_str(tab.title());
+            if self.tab_close_button {
+                label.push_str("  Ã");
+            }
             std::mem::swap(slot, &mut label);
         }
         tabbar::layout_into(
@@ -994,17 +1243,32 @@ impl Renderer {
             &mut self.layout,
         );
         let active = app.active_index();
-        let y_top = (self.tab_bar_height - self.metrics.text_height) / 2.0;
+        let y_top = bar_top + (self.tab_bar_height - self.metrics.text_height) / 2.0;
         let plus = self.layout.plus;
         let tabs = std::mem::take(&mut self.layout.tabs);
         for (i, &(lo, hi)) in tabs.iter().enumerate() {
             if hi <= lo {
                 continue;
             }
-            if i == active {
-                self.fill_rect(lo, 0.0, hi, self.tab_bar_height, theme.tab_active);
+            let tab = &app.tabs()[i];
+            if let Some(color) = tab.color() {
+                let bg = if i == active {
+                    mix(color, theme.tab_active, 0.25)
+                } else {
+                    color
+                };
+                self.fill_rect(lo, bar_top, hi, bar_bottom, bg);
             }
-            tabbar::fit_title_into(&self.titles[i], (hi - lo) - TAB_CHROME, cw, &mut label);
+            if i == active {
+                self.fill_rect(lo, bar_top, hi, bar_bottom, theme.tab_active);
+            }
+            let close_w = if self.tab_close_button { cw * 1.5 } else { 0.0 };
+            tabbar::fit_title_into(
+                &self.titles[i],
+                (hi - lo) - TAB_CHROME - close_w,
+                cw,
+                &mut label,
+            );
             if label.is_empty() {
                 continue;
             }
@@ -1025,15 +1289,18 @@ impl Renderer {
                 continue;
             };
             let format = &self.formats[0];
-            unsafe {
-                self.target.DrawText(
-                    &units,
-                    format,
-                    &rect,
-                    &brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
+            self.draw_units(&units, format, rect, &brush);
+            if self.tab_close_button {
+                let close_w = cw * 1.5;
+                units.clear();
+                units.extend("\u{d7}".encode_utf16());
+                let close_rect = D2D_RECT_F {
+                    left: hi - close_w,
+                    top: y_top,
+                    right: hi,
+                    bottom: y_top + self.metrics.text_height,
+                };
+                self.draw_units(&units, format, close_rect, &brush);
             }
         }
         self.layout.tabs = tabs;
@@ -1051,16 +1318,7 @@ impl Renderer {
             let color = mix(theme.foreground, theme.tab_bar, 0.35);
             if let Some(brush) = self.brush(color) {
                 let format = &self.formats[0];
-                unsafe {
-                    self.target.DrawText(
-                        &units,
-                        format,
-                        &rect,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                }
+                self.draw_units(&units, format, rect, &brush);
             }
         }
         units.clear();
@@ -1183,16 +1441,7 @@ impl Renderer {
                 continue;
             };
             let format = &self.formats[format_index(attrs)];
-            unsafe {
-                self.target.DrawText(
-                    &units,
-                    format,
-                    &rect,
-                    &brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
-            }
+            self.draw_units(&units, format, rect, &brush);
             i = end;
         }
         units.clear();
@@ -1266,18 +1515,26 @@ impl Renderer {
         if row >= rect.rows || col >= rect.cols {
             return;
         }
-        let top = self.tab_bar_height + (rect.row + row) as f32 * self.metrics.cell_height;
-        let left = (rect.col + col) as f32 * self.metrics.cell_width;
+        if focused && self.cursor_blink && !self.cursor_blink_visible {
+            return;
+        }
+        let top = self.grid_top() + (rect.row + row) as f32 * self.metrics.cell_height;
+        let left = self.grid_left() + (rect.col + col) as f32 * self.metrics.cell_width;
         let right = left + self.metrics.cell_width;
         let bottom = top + self.metrics.cell_height;
-        if focused {
-            self.fill_rect(left, top, right, bottom, theme.cursor);
-        } else {
-            // Hollow block: outline only, so the focused pane's block stands out.
+        if !focused {
             self.stroke_line(left, top, right, top, theme.cursor);
             self.stroke_line(left, bottom, right, bottom, theme.cursor);
             self.stroke_line(left, top, left, bottom, theme.cursor);
             self.stroke_line(right, top, right, bottom, theme.cursor);
+            return;
+        }
+        match self.cursor_shape {
+            CursorShape::Block => self.fill_rect(left, top, right, bottom, theme.cursor),
+            CursorShape::Bar => self.fill_rect(left, top, left + 2.0, bottom, theme.cursor),
+            CursorShape::Underline => {
+                self.fill_rect(left, bottom - 2.0, right, bottom, theme.cursor)
+            }
         }
     }
 
@@ -1286,6 +1543,9 @@ impl Renderer {
     /// pane's edges. Unfocused edges paint first so the focused color wins a
     /// shared boundary. Allocation-free.
     fn paint_split_borders(&mut self, tab: &Tab, theme: &Theme) {
+        if !self.split_border {
+            return;
+        }
         let cw = self.metrics.cell_width;
         let ch = self.metrics.cell_height;
         let focused = tab.focused_index().unwrap_or(usize::MAX);
@@ -1293,8 +1553,8 @@ impl Renderer {
             let mut idx = 0usize;
             tab.for_each_pane_ref(&mut |_: &Pane, rect: Rect| {
                 if (idx == focused) == pass_focus {
-                    let x = rect.col as f32 * cw;
-                    let y = self.tab_bar_height + rect.row as f32 * ch;
+                    let x = self.grid_left() + rect.col as f32 * cw;
+                    let y = self.grid_top() + rect.row as f32 * ch;
                     let w = rect.cols as f32 * cw;
                     let pane_height = rect.rows as f32 * ch;
                     let color = if pass_focus {
@@ -1340,8 +1600,8 @@ impl Renderer {
                 idx += 1;
                 return;
             };
-            let x = rect.col as f32 * cw;
-            let y = self.tab_bar_height + rect.row as f32 * ch;
+            let x = self.grid_left() + rect.col as f32 * cw;
+            let y = self.grid_top() + rect.row as f32 * ch;
             let w = rect.cols as f32 * cw;
             label.clear();
             tabbar::fit_title_into(title, (w - 2.0).max(0.0) - TAB_CHROME, cw, &mut label);

@@ -64,3 +64,14 @@ fn config_fills_missing_keys_with_defaults() {
     assert_eq!(cfg.window.rows, 24);
     assert_eq!(cfg.scrollback, 1000);
 }
+
+/// CONFIG-021: the documented example config must load, or the docs and the
+/// parser drift apart without anyone noticing.
+#[test]
+fn the_example_config_is_valid() {
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.example.toml"))
+        .expect("config.example.toml exists");
+    let cfg = Config::parse(&text).expect("config.example.toml parses");
+    assert_eq!(cfg.window.cols, 80);
+    assert!(cfg.tab_bar.close_button);
+}

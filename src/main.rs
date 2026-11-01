@@ -45,6 +45,8 @@ fn probe_shell(cfg: &Config) -> SpawnOptions {
         args,
         cols: cfg.window.cols,
         rows: cfg.window.rows,
+        cwd: None,
+        env: std::collections::BTreeMap::new(),
     }
 }
 

@@ -17,6 +17,7 @@
 //!   `windows::core::Owned<HANDLE>`, so every path — spawn failure
 //!   included — closes them; no leaks.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::mem::size_of;
 use std::ptr::null_mut;
@@ -38,7 +39,7 @@ use windows::Win32::System::Threading::{
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
-use windows::core::{HRESULT, Owned, PWSTR};
+use windows::core::{HRESULT, Owned, PCWSTR, PWSTR};
 
 /// An owned raw HANDLE safe to move onto a worker thread.
 ///
@@ -83,6 +84,8 @@ impl ConPty {
         args: &[String],
         cols: usize,
         rows: usize,
+        cwd: Option<&str>,
+        env: &BTreeMap<String, String>,
     ) -> Result<(Self, SendHandle, SendHandle), io::Error> {
         if cols == 0 || rows == 0 || cols > i16::MAX as usize || rows > i16::MAX as usize {
             return Err(io::Error::new(
@@ -177,6 +180,18 @@ impl ConPty {
             }
 
             let mut cmdline = wide_command_line(program, args);
+            // SHELL-019/021: working directory and environment overrides for
+            // this pane. The block starts from the inherited environment
+            // (SHELL-022: nothing is injected on top of what the user set).
+            let cwd_wide = cwd.map(|dir| {
+                dir.encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<u16>>()
+            });
+            let cwd_ptr = cwd_wide
+                .as_ref()
+                .map_or(std::ptr::null(), |dir| dir.as_ptr());
+            let env_block = wide_environment(env);
             let mut startup = STARTUPINFOEXW::default();
             startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
             startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -197,8 +212,8 @@ impl ConPty {
                 None,
                 false,
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                None,
-                PWSTR::null(),
+                Some(env_block.as_ptr() as *const core::ffi::c_void),
+                PCWSTR::from_raw(cwd_ptr),
                 core::ptr::from_ref(&startup.StartupInfo),
                 &mut process,
             );
@@ -408,6 +423,50 @@ fn wide_command_line(program: &str, args: &[String]) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// The `CreateProcessW` environment block: the inherited environment with
+/// the profile's overrides applied (case-insensitive, Windows convention),
+/// as `KEY=VALUE\0` pairs terminated by an extra NUL.
+fn wide_environment(env: &BTreeMap<String, String>) -> Vec<u16> {
+    let mut block = String::new();
+    for (key, value) in std::env::vars() {
+        if !env.iter().any(|(k, _)| k.eq_ignore_ascii_case(&key)) {
+            block.push_str(&key);
+            block.push('=');
+            block.push_str(&value);
+            block.push('\0');
+        }
+    }
+    for (key, value) in env {
+        block.push_str(key);
+        block.push('=');
+        block.push_str(value);
+        block.push('\0');
+    }
+    block.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 fn io_error(e: &windows::core::Error) -> io::Error {
     io::Error::from_raw_os_error(e.code().0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SHELL-021: the profile's environment replaces the inherited value
+    /// (case-insensitively) and the block stays double-NUL terminated.
+    #[test]
+    fn profile_env_replaces_inherited_and_terminates_the_block() {
+        let mut env = BTreeMap::new();
+        env.insert("rusttyterm_test_var".to_string(), "profile".to_string());
+        let block = wide_environment(&env);
+        let text: String = String::from_utf16_lossy(&block);
+        let pairs: Vec<&str> = text.split('\0').collect();
+        let hits: Vec<&&str> = pairs
+            .iter()
+            .filter(|p| p.to_ascii_lowercase().starts_with("rusttyterm_test_var="))
+            .collect();
+        assert_eq!(hits, vec![&"rusttyterm_test_var=profile"]);
+        assert!(text.ends_with("\0\0"), "block must end with an empty pair");
+    }
 }

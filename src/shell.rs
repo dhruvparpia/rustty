@@ -5,6 +5,7 @@
 //! code into a channel the UI polls. Off Windows the type compiles as an
 //! inert stub so `cargo test` stays cross-platform.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -45,6 +46,11 @@ pub struct SpawnOptions {
     pub cols: usize,
     /// Initial pseudo-console height in rows.
     pub rows: usize,
+    /// Working directory for the child process (SHELL-019/020).
+    pub cwd: Option<String>,
+    /// Environment variables added to the inherited environment
+    /// (SHELL-021).
+    pub env: BTreeMap<String, String>,
 }
 
 impl SpawnOptions {
@@ -55,6 +61,8 @@ impl SpawnOptions {
             args: Vec::new(),
             cols,
             rows,
+            cwd: None,
+            env: BTreeMap::new(),
         }
     }
 }
@@ -192,9 +200,15 @@ impl Shell {
             source: e,
         };
 
-        let (conpty, process, thread) =
-            conpty::ConPty::spawn(&opts.program, &opts.args, opts.cols, opts.rows)
-                .map_err(spawn_err)?;
+        let (conpty, process, thread) = conpty::ConPty::spawn(
+            &opts.program,
+            &opts.args,
+            opts.cols,
+            opts.rows,
+            opts.cwd.as_deref(),
+            &opts.env,
+        )
+        .map_err(spawn_err)?;
         // The primary thread handle is not needed after spawn (WIN-001:
         // no handle leaks); dropping the SendHandle closes it.
         drop(thread);

@@ -177,12 +177,12 @@ fn lines(from: usize, count: usize) -> String {
 fn present_floor(app: &mut App, renderer: &mut Renderer, theme: &Theme) -> Duration {
     app.clear_grid_damage();
     // Prime: the first frame of a fresh renderer is a full repaint.
-    renderer.paint_damage(app, theme, None);
+    renderer.paint_damage(app, theme, None, None);
     app.clear_grid_damage();
     let mut sum = Duration::ZERO;
     for _ in 0..20 {
         let start = Instant::now();
-        renderer.paint_damage(app, theme, None);
+        renderer.paint_damage(app, theme, None, None);
         sum += start.elapsed();
     }
     let floor = sum / 20;
@@ -204,7 +204,7 @@ fn prime_bench(app: &mut App, renderer: &mut Renderer, theme: &Theme) {
     app.feed_active(lines(0, LINES_PER_FRAME).as_bytes());
     let _ = app.take_dirty();
     for _ in 0..3 {
-        renderer.paint_damage(app, theme, None);
+        renderer.paint_damage(app, theme, None, None);
         app.clear_grid_damage();
     }
 }
@@ -241,7 +241,7 @@ fn paint_burst(
         // renderer's.
         ALLOCS.store(0, Ordering::Relaxed);
         let start = Instant::now();
-        renderer.paint_damage(app, theme, None);
+        renderer.paint_damage(app, theme, None, None);
         let elapsed = start.elapsed();
         allocations += ALLOCS.swap(0, Ordering::Relaxed);
         app.clear_grid_damage();
@@ -405,7 +405,7 @@ fn damage_frames_cover_only_the_dirty_rows() {
     // First frame is a full repaint: every row is in the mask.
     app.feed_active(lines(0, rows).as_bytes());
     let _ = app.take_dirty();
-    renderer.paint_damage(&app, &theme, None);
+    renderer.paint_damage(&app, &theme, None, None);
     assert_eq!(
         renderer.last_mask_rows(),
         rows,
@@ -417,7 +417,7 @@ fn damage_frames_cover_only_the_dirty_rows() {
     // cursor block moved between may be repainted.
     app.feed_active("\x1b[1;1Hone line\r\n".as_bytes());
     let _ = app.take_dirty();
-    renderer.paint_damage(&app, &theme, None);
+    renderer.paint_damage(&app, &theme, None, None);
     let damaged = renderer.last_mask_rows();
     app.clear_grid_damage();
     let atlas = renderer.atlas_stats();

@@ -1,9 +1,11 @@
 # rusttyterm config — %APPDATA%\rusttyterm\config.toml
+# (portable mode: a `config.toml` next to rusttyterm.exe wins)
 #
 # Every key below is optional; the defaults shown are what the app uses
 # when the file or a key is missing. Unknown keys are rejected with an
 # error at startup (no silent clamps: a bad value is an error, not a
-# surprise).
+# surprise). Keep the plain keys above the first `[section]` header —
+# in TOML a key after a header belongs to that section.
 
 # Built-in theme preset. Known: predawn, catppuccin-mocha, gruvbox-dark,
 # one-dark, solarized-dark. An unknown name warns and falls back to predawn.
@@ -21,11 +23,90 @@ line-height = 1.2
 # Scrollback lines kept per tab, 0..1000000.
 scrollback = 1000
 
-# Tab bar visibility: "always", "auto" (only when more than one tab),
-# or "hidden" (Ctrl+Shift+T still makes tabs, the strip stays gone).
-tab-bar = "always"
+# OpenType ligatures (calt/liga/clig/dlig).
+ligatures = true
+
+# Extra DirectWrite font features, "tag index" pairs, e.g. "calt 0 ss01 1".
+font-features = ""
+
+# Window opacity in percent, 1..100. 100 keeps the window non-layered.
+opacity = 100
+
+# Focused cursor: "block", "underline" or "bar".
+cursor-shape = "block"
+
+# Blink the focused cursor.
+cursor-blink = true
+
+# Copy a mouse selection to the clipboard as soon as the button is released.
+copy-on-select = false
+
+# Profile the first tab uses; empty = the first profile in the list below.
+starting-profile = ""
+
+# Tab bar: a bare string, or the [tab-bar] table. Use one form, not both.
+# tab-bar = "auto"
+
+[tab-bar]
+# "always", "auto" (only when more than one tab), "hidden".
+visible = "always"
+# Strip above ("top") or below ("bottom") the terminal.
+placement = "top"
+# Prefix each tab with its profile name.
+show-profiles = true
+# Append the working directory to the tab title (parsed only for now: it
+# needs shell integration, which v0.2 does not implement).
+show-cwd = false
+# Draw the x close button on the hovered tab.
+close-button = true
 
 [window]
 # Initial grid size in cells, 1..4000 columns and 1..1000 rows.
 cols = 80
 rows = 24
+
+# Padding around the grid, in pixels (0..1000 each).
+[window.padding]
+x = 0
+y = 0
+
+[split]
+# Split panes are on; borders carry the drag-to-resize.
+visible = true
+# Pixels between panes (parsed for now: panes are laid out on the cell grid,
+# so no pixel gap is drawn between them yet).
+padding = 2
+# Draw the split borders.
+border = true
+
+[search]
+# Ctrl+F opens the search strip.
+visible = true
+# Search options the strip starts with.
+case-sensitive-default = false
+whole-word-default = false
+regex-default = false
+
+# Rebind keys: "Ctrl+Shift+T" = "new-tab". A user binding wins over the
+# built-in one. Keys are modifier chains joined by "+": Ctrl, Shift, Alt
+# (Win/Super cannot be bound). Names: letters, digits, F1..F24, Enter, Esc,
+# Space, Tab, Backspace, PageUp, PageDown, Home, End, Insert, Delete, arrows.
+[keybindings]
+# "Ctrl+Shift+K" = "close-tab"
+# "Ctrl+Shift+PageUp" = "move-tab-left"
+# "Ctrl+Shift+J" = "next-theme"
+
+# Shell profiles: the built-in list (cmd, PowerShell, pwsh, Git Bash, WSL)
+# plus these. A `[[profile]]` whose name matches a built-in replaces it.
+# [[profile]]
+# name = "PowerShell"
+# command = "pwsh"
+# args = ["-NoLogo"]
+# env = { RUST_LOG = "debug" }
+# starting-directory = "%USERPROFILE%\\src"   # "" = the inherited cwd
+# theme = "gruvbox-dark"                      # theme for tabs of this profile
+# tab-color = "#ff8800"                       # tab strip accent
+# font = "Cascadia Mono"                      # applied at startup only
+# font-size = 12
+# line-height = 1.2
+# scrollback = 5000

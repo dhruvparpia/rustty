@@ -10,9 +10,12 @@ no web UI, no bundled interpreted runtime.
 > **Early development.** `rusttyterm` runs today as a native Windows terminal:
 > ConPTY shells in tabs, Direct2D/DirectWrite rendering with a glyph atlas,
 > mouse selection, clipboard, fullscreen, and a TOML config with theme presets.
-> `packaging/build-portable.ps1` builds the portable ZIP. Splits, search, and
-> native menus and mouse reporting are built; session restore is not built yet.
-> See [`ROADMAP.md`](ROADMAP.md) for what ships in each version.
+> `packaging/build-portable.ps1` builds the portable ZIP. Splits, search, native
+> menus, mouse reporting, tab rename/reorder/close, shell profiles (per-profile
+> theme, tab colour, working directory, environment), custom key bindings,
+> window opacity and cursor shape/blink are built; session restore, notifications
+> and the quick terminal are not built yet. See [`ROADMAP.md`](ROADMAP.md) for
+> what ships in each version.
 
 ## Vision
 

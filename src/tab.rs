@@ -17,6 +17,7 @@
 use std::cell::{Ref, RefCell, RefMut};
 use std::rc::Rc;
 
+use crate::color::Color;
 use crate::pane::Pane;
 use crate::shell::{ShellError, ShellState, SpawnOptions};
 use crate::split::{DEFAULT_RATIO, Dir, PaneTree, RATIO_STEP, Rect, Side, neighbor};
@@ -36,6 +37,12 @@ pub struct Tab {
     rows: usize,
     scrollback: usize,
     title: String,
+    /// True when `set_title` pinned the title against OSC/profile updates.
+    title_fixed: bool,
+    /// Configured profile name shown in the tab bar and used for new splits.
+    profile: String,
+    /// Tab color from the profile/theme.
+    color: Option<Color>,
 }
 
 impl Tab {
@@ -61,6 +68,9 @@ impl Tab {
             rows,
             scrollback,
             title: String::from("New Tab"),
+            title_fixed: false,
+            profile: String::new(),
+            color: None,
         }
     }
 
@@ -70,9 +80,52 @@ impl Tab {
         &self.title
     }
 
-    /// Set a user-fixed title (wins over auto-titles).
+    /// Set a user-fixed title (wins over auto-titles, TAB-013).
     pub fn set_title(&mut self, title: impl Into<String>) {
         self.title = title.into();
+        self.title_fixed = true;
+    }
+
+    /// Set an automatic title (profile, cwd, shell title). Ignored once the
+    /// user renamed the tab.
+    pub fn set_auto_title(&mut self, title: impl Into<String>) {
+        if !self.title_fixed {
+            self.title = title.into();
+        }
+    }
+
+    /// True after a user rename.
+    #[must_use]
+    pub fn title_is_fixed(&self) -> bool {
+        self.title_fixed
+    }
+
+    /// Profile label for the tab bar (TAB-024).
+    #[must_use]
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    /// Set profile label.
+    pub fn set_profile(&mut self, profile: impl Into<String>) {
+        self.profile = profile.into();
+    }
+
+    /// Tab color (TAB-014/015/021).
+    #[must_use]
+    pub fn color(&self) -> Option<Color> {
+        self.color
+    }
+
+    /// Set tab color.
+    pub fn set_color(&mut self, color: Option<Color>) {
+        self.color = color;
+    }
+
+    /// Scrollback used for new panes in this tab.
+    #[must_use]
+    pub fn scrollback(&self) -> usize {
+        self.scrollback
     }
 
     // ---- panes ----------------------------------------------------------
