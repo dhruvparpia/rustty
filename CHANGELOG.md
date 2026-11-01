@@ -71,14 +71,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Per-profile `font`, `font-size` and `line-height` are applied: the renderer is
   rebuilt and every tab is resized to the grid the window fits with the new
   metrics — at startup, on tab creation, and on profile cycling (SHELL-019).
-- OSC 7 working-directory reporting: with `tab-bar.show-cwd` (TAB-011) a tab whose
+- OSC 7 working-directory reporting: with `tab-bar.show-cwd` (TAB-025) a tab whose
   shell sets no title shows the last directory of the path the shell reported,
   percent-decoded and drive-path aware.
 - OSC 133 prompt markers: a pane knows when its shell is at a prompt, when a command
   is running, and the exit code of the last command.
-- Per-profile confirmations (TAB-014/021): `confirm-close` and `confirm-new-process`
-  in `[[profile]]`. Closing a tab whose shell is busy, closing the last tab, and
-  quitting ask in a native dialog; the busy wording comes from the OSC 133 state.
+- Close confirmations (TAB-018, SPLIT-006, WINDOW-014): `confirm-close` in
+  `[[profile]]`. Closing a tab whose shell is busy, closing a split pane whose shell
+  runs, closing the last tab, and quitting ask in a native dialog; the busy wording
+  comes from the OSC 133 state.
 - Bell: `BEL` is decoded and announced. `bell = "silent" | "visual" | "audible" |
   "both"` picks the mode (BELL-002/006/007/008); the visual bell flashes the tabs
   that rang and the focused pane's border for 300 ms (BELL-003/004), the audible
@@ -112,6 +113,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   it is now a startup error, because the dispatcher matches Ctrl/Shift/Alt.
 - `config.example.toml` is now covered by a test, so the documented keys and
   the parser cannot drift apart.
+- Close confirmations were labelled `TAB-014`/`TAB-021` in code and docs. The spec
+  spells tab close confirmation `TAB-018`, pane close `SPLIT-006` and window close
+  `WINDOW-014` (`TAB-014` is tab colours, `TAB-021` is tab-bar theming). The
+  `confirm-new-process` key went with them: nothing ever prompted on it and no
+  requirement asks for it.
 
 ## [0.1.0] — v0.1 MVP (planned)
 

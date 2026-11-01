@@ -178,7 +178,7 @@ impl Pane {
     }
 
     /// SHELL-003: is the shell sitting at a prompt (after the first prompt
-    /// marker)? TAB-014/021 and the notification plan use this.
+    /// marker)? TAB-018, WINDOW-014 and the notification plan use this.
     #[must_use]
     pub fn prompt_ready(&self) -> bool {
         self.at_prompt

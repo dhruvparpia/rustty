@@ -33,7 +33,7 @@ pub enum PaneClose {
 pub struct App {
     tabs: Vec<Tab>,
     active: usize,
-    /// TAB-011: a pane that sets no title shows the directory it reported
+    /// TAB-025: a pane that sets no title shows the directory it reported
     /// with OSC 7.
     show_cwd: bool,
 }
@@ -60,7 +60,7 @@ impl App {
         }
     }
 
-    /// TAB-014: the active tab asks before its shells are closed.
+    /// TAB-018: the active tab asks before its shells are closed.
     #[must_use]
     pub fn tab_confirm_close(&self) -> bool {
         self.active_tab().is_some_and(Tab::confirm_close)
@@ -444,7 +444,7 @@ impl App {
 
     /// Copy the focused pane's OSC title onto its tab (tab-bar titles,
     /// spec §11, SPLIT-011/012: the tab shows what its focused pane runs).
-    /// With `show_cwd` (TAB-011) a pane that sets no title shows the
+    /// With `show_cwd` (TAB-025) a pane that sets no title shows the
     /// directory it reported with OSC 7.
     pub fn sync_tab_titles(&mut self) {
         let show_cwd = self.show_cwd;
@@ -468,7 +468,7 @@ impl App {
     }
 }
 
-/// Last directory component of a path, `/` or `\` separated (TAB-011).
+/// Last directory component of a path, `/` or `\` separated (TAB-025).
 fn last_path_component(path: &str) -> Option<String> {
     path.split(['/', '\\'])
         .rfind(|part| !part.is_empty() && !part.ends_with(':'))

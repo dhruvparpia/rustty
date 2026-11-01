@@ -159,8 +159,7 @@ bell = "audible"
 # theme = "gruvbox-dark"              # preset name, or themes\<name>.toml
 # tab-color = "#ff8800"               # accent stripe on the tab
 # scrollback = 20000
-# confirm-close = true         # TAB-014: ask before a tab of this profile closes
-# confirm-new-process = true   # TAB-021: warn when a command starts in a tab unasked
+# confirm-close = true         # TAB-018: ask before a tab of this profile closes
 # font = "Consolas"                   # applied when a tab of this profile is
 # font-size = 12                      # created, or when profiles are cycled:
 # line-height = 1.2                   # one renderer serves the whole window,
@@ -194,7 +193,7 @@ bell = "audible"
 # padding = { x = 4, y = 4 }   # grid inset; the tab bar spans full width
 
 # ---------------------------------------------------------------------------
-# Tab bar (CONFIG-012, TAB-011/015/021/022/023)
+# Tab bar (CONFIG-012, TAB-011/015/022/023/024/025)
 # ---------------------------------------------------------------------------
 # As a table it carries the rest of the tab-bar options; `visible` is the same
 # value as the plain `tab-bar` key above (use one form, not both).
@@ -204,7 +203,7 @@ bell = "audible"
 # placement = "top"                # top | bottom
 # show-profiles = "auto"           # always | auto | never — prefix "name:"
 # close-button = true              # the hover box (TAB-021)
-# show-cwd = true                  # TAB-011: last directory of the OSC 7 cwd
+# show-cwd = true                  # TAB-025: last directory of the OSC 7 cwd
 
 # ---------------------------------------------------------------------------
 # Font (CONFIG-004..006)

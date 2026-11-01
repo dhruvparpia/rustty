@@ -322,10 +322,8 @@ struct ProfileSpec {
     font: Option<String>,
     font_size: Option<f32>,
     line_height: Option<f32>,
-    /// TAB-014: ask before this tab's shells are closed.
+    /// TAB-018: ask before this tab's shells are closed.
     confirm_close: bool,
-    /// TAB-021: warn when a new process starts unasked.
-    confirm_new_process: bool,
 }
 
 impl ProfileSpec {
@@ -343,7 +341,6 @@ impl ProfileSpec {
             font_size: None,
             line_height: None,
             confirm_close: true,
-            confirm_new_process: true,
         }
     }
 }
@@ -369,7 +366,6 @@ fn merge_profiles(cfg: &Config) -> Vec<ProfileSpec> {
             font_size: profile.font_size,
             line_height: profile.line_height,
             confirm_close: profile.confirm_close.unwrap_or(true),
-            confirm_new_process: profile.confirm_new_process.unwrap_or(true),
         };
         match merged.iter_mut().position(|e| e.name == spec.name) {
             Some(idx) => merged[idx] = spec,
@@ -735,7 +731,7 @@ impl WindowState {
     }
 
     /// `true` when `(x, y)` (client DIPs) lands on tab `idx`, on the `+`
-    /// button, or on the close box of tab `idx` (TAB-021).
+    /// button, or on the close box of tab `idx` (CONFIG-010).
     fn tab_hit(&self, x: f32, y: f32, height: f32) -> TabHit {
         let bar = self.bar_height();
         let top = self.bar_top(height);
@@ -962,7 +958,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CLOSE => {
-            // TAB-014: quitting asks first when the profile wants it.
+            // WINDOW-014: quitting asks first when the profile wants it.
             let ask = state_ref(hwnd).is_some_and(|s| s.app.tab_confirm_close());
             if ask && !confirm_yes_no(hwnd, "Quit rusttyterm?") {
                 return LRESULT(0);
@@ -2137,7 +2133,7 @@ fn close_pane_or_tab(hwnd: HWND) {
             s.app
                 .active_tab()
                 .is_some_and(|t| t.pane().shell().state() == crate::shell::ShellState::Running),
-            // TAB-014 "shell is busy": OSC 133 reported a command start and
+            // TAB-018 "shell is busy": OSC 133 reported a command start and
             // no prompt has come back yet.
             s.app
                 .active_tab()
@@ -2146,8 +2142,8 @@ fn close_pane_or_tab(hwnd: HWND) {
         ),
         None => return,
     };
-    // TAB-014: confirm when the profile asks and the close would kill a
-    // running shell, or would quit (it is the last tab).
+    // TAB-018 / SPLIT-006: confirm when the profile asks and the close would
+    // kill a running shell, or would quit (it is the last tab).
     if confirm && (live || !multi) {
         let text = if busy {
             "A command is running in this tab. Close it and kill the shell?"
@@ -2205,7 +2201,7 @@ fn new_tab_with_profile(hwnd: HWND, spec: ProfileSpec) {
     apply_profile_theme(s, &spec);
     apply_profile_font(s, &spec);
     if let Some(tab) = s.app.active_tab_mut() {
-        tab.set_confirm(spec.confirm_close, spec.confirm_new_process);
+        tab.set_confirm(spec.confirm_close);
     }
     // Auto/hidden tab bars change the strip height when the count changes;
     // sync first so the new shell spawns at the grid the bar leaves room for.
@@ -2696,7 +2692,7 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
     let state = Box::new(WindowState {
         app: {
             let mut app = App::with_size(cols, rows, cfg.scrollback);
-            // TAB-011: tab titles fall back to the pane's OSC 7 cwd.
+            // TAB-025: tab titles fall back to the pane's OSC 7 cwd.
             app.set_show_cwd(cfg.tab_bar.show_cwd);
             app
         },
