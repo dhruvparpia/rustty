@@ -8,6 +8,7 @@
 //! - Writes when scrolled back do not move the viewport.
 
 use crate::color::Color;
+use crate::selection::Selection;
 
 /// A single character cell in the grid
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +153,10 @@ pub struct Grid {
     lines: Vec<Line>,
     head: usize,
     total: usize,
+    /// Lines evicted from the front of the buffer. Absolute line ids are
+    /// `evicted + virtual_index`, so they only ever grow and stay valid
+    /// for scrollback consumers (selection).
+    evicted: usize,
     scroll_offset: usize,
     full_dirty: bool,
 }
@@ -168,6 +173,7 @@ impl Grid {
             lines: (0..capacity).map(|_| Line::blank(cols)).collect(),
             head: 0,
             total: rows,
+            evicted: 0,
             scroll_offset: 0,
             full_dirty: true,
         }
@@ -232,6 +238,7 @@ impl Grid {
         } else {
             let idx = self.head;
             self.head = (self.head + 1) % self.capacity();
+            self.evicted += 1;
             idx
         };
         self.lines[idx] = line;
@@ -270,8 +277,8 @@ impl Grid {
             self.append_line(Line::blank(self.cols));
         }
         let slot = self.slot(virtual_index);
-        if col < self.cols {
-            self.lines[slot].cells[col] = cell;
+        if let Some(dest) = self.lines[slot].cells.get_mut(col) {
+            *dest = cell;
         }
         self.lines[slot].is_dirty = true;
         self.full_dirty = false;
@@ -304,6 +311,118 @@ impl Grid {
                 .trim_end()
                 .to_string(),
         )
+    }
+
+    /// Absolute (monotonic) line id of viewport row `row`, `None` when the
+    /// row has no backing line.
+    #[must_use]
+    pub fn abs_of_view(&self, row: usize) -> Option<usize> {
+        if row >= self.rows {
+            return None;
+        }
+        let v = self.top() + row;
+        if v >= self.total {
+            return None;
+        }
+        Some(self.evicted + v)
+    }
+
+    /// Viewport row that shows absolute line `abs`, `None` when the line
+    /// is scrolled off-screen or already evicted.
+    #[must_use]
+    pub fn view_of_abs(&self, abs: usize) -> Option<usize> {
+        let v = abs.checked_sub(self.evicted)?;
+        let top = self.top();
+        if v >= self.total || v < top || v >= top + self.rows {
+            return None;
+        }
+        Some(v - top)
+    }
+
+    /// Oldest absolute line id still held in the buffer.
+    #[must_use]
+    pub fn first_abs(&self) -> usize {
+        self.evicted
+    }
+
+    /// Newest absolute line id held in the buffer.
+    #[must_use]
+    pub fn last_abs(&self) -> usize {
+        self.evicted + self.total.saturating_sub(1)
+    }
+
+    /// Reference to the line with absolute id `abs`, `None` once evicted.
+    #[must_use]
+    pub fn line_abs(&self, abs: usize) -> Option<&Line> {
+        let v = abs.checked_sub(self.evicted)?;
+        if v >= self.total {
+            return None;
+        }
+        Some(&self.lines[self.slot(v)])
+    }
+
+    /// Trimmed text of absolute line `abs`, `None` once evicted.
+    #[must_use]
+    pub fn line_text_abs(&self, abs: usize) -> Option<String> {
+        Some(
+            self.line_abs(abs)?
+                .cells
+                .iter()
+                .map(|c| c.char)
+                .collect::<String>()
+                .trim_end()
+                .to_string(),
+        )
+    }
+
+    /// Word bounds `[lo, hi)` around column `col` of absolute line `abs`
+    /// (double-click selection). Word characters are alphanumerics plus
+    /// `_ - . / \ : @`; a blank column selects itself.
+    #[must_use]
+    pub fn word_range_abs(&self, abs: usize, col: usize) -> Option<(usize, usize)> {
+        let line = self.line_abs(abs)?;
+        let len = line.cells.len();
+        let col = col.min(len.saturating_sub(1));
+        let in_word =
+            |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '\\' | ':' | '@');
+        if !in_word(line.cells.get(col)?.char) {
+            return Some((col, col + 1));
+        }
+        let mut lo = col;
+        while lo > 0 && line.cells[lo - 1].char != ' ' && in_word(line.cells[lo - 1].char) {
+            lo -= 1;
+        }
+        let mut hi = col + 1;
+        while hi < len && line.cells[hi].char != ' ' && in_word(line.cells[hi].char) {
+            hi += 1;
+        }
+        Some((lo, hi))
+    }
+
+    /// Plain-text copy of `sel`: rows joined with `\n`, each row's trailing
+    /// blanks trimmed, trailing empty lines dropped. Rows evicted from the
+    /// scrollback are skipped; a fully evicted selection yields "".
+    #[must_use]
+    pub fn selection_text(&self, sel: &Selection) -> String {
+        let start = sel.start.row.max(self.first_abs());
+        let end = sel.end.row.min(self.last_abs());
+        let mut out = String::new();
+        for abs in start..=end {
+            let Some((lo, hi)) = sel.cols_on(abs, self.cols) else {
+                continue;
+            };
+            let Some(line) = self.line_abs(abs) else {
+                continue;
+            };
+            let hi = hi.min(line.cells.len());
+            let text: String = line.cells[lo.min(hi)..hi].iter().map(|c| c.char).collect();
+            out.push_str(text.trim_end());
+            out.push('\n');
+        }
+        while out.ends_with('\n') {
+            out.pop();
+        }
+        out
     }
 
     /// Get a mutable reference to a viewport line, marking it dirty
@@ -345,7 +464,17 @@ impl Grid {
         let start = content.len() - keep;
 
         let mut lines = Vec::with_capacity(new_capacity);
-        lines.extend(content.into_iter().skip(start));
+        // Every retained line must match the new width: pad truncated lines
+        // with blanks, trim widened ones. Skipping this lets a line keep a
+        // shorter cell vector than `self.cols`, and column-indexed writes
+        // then run out of bounds.
+        lines.extend(content.into_iter().skip(start).map(|mut line| {
+            let mut cells = std::mem::take(&mut line.cells);
+            cells.resize(cols, Cell::blank());
+            line.cells = cells;
+            line.is_dirty = true;
+            line
+        }));
         while lines.len() < new_capacity {
             lines.push(Line::blank(cols));
         }
@@ -354,7 +483,12 @@ impl Grid {
         self.rows = rows;
         self.lines = lines;
         self.head = 0;
-        self.total = keep;
+        // The viewport must always have `rows` backing lines: when the
+        // buffer holds fewer lines than the new viewport (a fresh grow),
+        // the extra bottom slots come back blank.
+        self.total = keep.max(rows);
+        // The lines we dropped are gone forever: keep absolute ids monotonic.
+        self.evicted += start;
         self.clamp_scroll();
         self.mark_all_dirty();
     }
@@ -496,6 +630,7 @@ impl Default for Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selection::Pos;
 
     fn make_line(content: &str, cols: usize) -> Line {
         let mut line = Line::blank(cols);
@@ -637,6 +772,74 @@ mod tests {
         // total is 60 now, max offset = 60 - 10 = 50; 40 fits, viewport at top
         assert_eq!(grid.scroll_offset(), 40);
         assert_eq!(row_text(&grid, 0), "line 1");
+    }
+
+    #[test]
+    fn test_resize_widens_retained_lines() {
+        // Regression: after widening, writes/selections must index the
+        // widened lines, not the old 80-cell layout (was an OOB panic).
+        let mut grid = Grid::with_size(80, 4, 10);
+        append_lines(&mut grid, 4);
+        grid.resize(120, 4);
+        for v in 0..4 {
+            let line = grid.line_abs(grid.evicted + v).unwrap();
+            assert_eq!(line.cells.len(), 120);
+        }
+        // Write at a column beyond the old width: used to panic.
+        let w = Cell {
+            char: 'W',
+            ..Cell::blank()
+        };
+        let z = Cell {
+            char: 'Z',
+            ..Cell::blank()
+        };
+        grid.write_cell(0, 100, w);
+        grid.write_cell(1, 119, z);
+        assert_eq!(
+            grid.line_text(0).unwrap(),
+            "line 1".to_string() + &" ".repeat(94) + "W"
+        );
+        assert!(grid.line_text(1).unwrap().ends_with('Z'));
+        // Selections spanning the widened area stay in bounds. Pos.row is an
+        // absolute line id: the viewport shows abs 4..7.
+        let sel = Selection::between(Pos { row: 4, col: 0 }, Pos { row: 5, col: 119 });
+        let text = grid.selection_text(&sel);
+        assert!(text.starts_with("line 1"));
+        assert!(text.ends_with('Z'));
+        // Word range past the old width is safe.
+        let abs = grid.abs_of_view(1).unwrap();
+        assert_eq!(grid.word_range_abs(abs, 119), Some((119, 120)));
+    }
+
+    #[test]
+    fn test_resize_grow_backfills_blank_viewport_rows() {
+        // Fresh window with little output, then grow the viewport: every
+        // viewport row must have a backing line (was: total stayed at the
+        // content count, so abs_of_view(bottom rows) was None and mouse
+        // selection on the bottom rows silently died).
+        let mut grid = Grid::with_size(80, 10, 100);
+        grid.write_cell(
+            0,
+            0,
+            Cell {
+                char: 'x',
+                ..Cell::blank()
+            },
+        );
+        // total is 10 here (the initial viewport). Shrink, add nothing,
+        // then grow: content (10) < new rows (20).
+        grid.resize(80, 5);
+        grid.resize(80, 20);
+        assert_eq!(grid.rows, 20);
+        assert!(grid.total_lines() >= 20);
+        for r in 0..20 {
+            assert!(grid.abs_of_view(r).is_some(), "row {r} has no backing line");
+            assert_eq!(grid.row(r).map(|l| l.cells.len()), Some(80));
+        }
+        // Content stays at the top, blanks fill the bottom.
+        assert_eq!(grid.row(0).unwrap().cells[0].char, 'x');
+        assert_eq!(grid.row(19).unwrap().cells[0].char, ' ');
     }
 
     #[test]
@@ -786,5 +989,53 @@ mod tests {
         grid.take_dirty_rows();
         grid.erase_rows(4, 4);
         assert_eq!(grid.dirty_rows(), vec![4]);
+    }
+
+    #[test]
+    fn absolute_line_ids_survive_eviction() {
+        let mut grid = Grid::with_size(10, 4, 2); // capacity 6; blanks abs 0..3
+        append_lines(&mut grid, 4); // "line 1..4" = abs 4..7, evicts abs 0..1
+        assert_eq!(grid.abs_of_view(0), Some(4)); // viewport shows abs 4..7
+        assert_eq!(grid.last_abs(), 7);
+        append_lines(&mut grid, 2); // "line 5..6" = abs 8..9, evicts abs 2..3
+        assert_eq!(grid.first_abs(), 4);
+        assert!(grid.line_abs(2).is_none());
+        assert_eq!(grid.line_text_abs(4).as_deref(), Some("line 1"));
+        // The viewport's top row is the oldest line still in the viewport.
+        let top_abs = grid.abs_of_view(0).unwrap();
+        assert_eq!(grid.view_of_abs(top_abs), Some(0));
+        assert_eq!(grid.view_of_abs(0), None);
+    }
+
+    #[test]
+    fn selection_text_joins_rows_and_trims_trailing_blanks() {
+        let mut grid = Grid::with_size(10, 4, 20);
+        grid.write_line(0, make_line("abc       ", 10));
+        grid.write_line(1, make_line("de", 10));
+        grid.write_line(2, make_line("   xyz    ", 10));
+        let sel = Selection::between(Pos { row: 0, col: 1 }, Pos { row: 2, col: 4 });
+        assert_eq!(grid.selection_text(&sel), "bc\nde\n   xy");
+    }
+
+    #[test]
+    fn selection_text_drops_evicted_rows_and_trailing_newlines() {
+        let mut grid = Grid::with_size(10, 4, 2); // capacity 6; blanks abs 0..3
+        append_lines(&mut grid, 8); // abs 4..11; capacity keeps abs 6..11
+        let sel = Selection::between(Pos { row: 0, col: 0 }, Pos { row: 9, col: 3 });
+        let text = grid.selection_text(&sel);
+        // Absolute lines 0..5 are evicted; 6..9 remain. Interior lines are
+        // taken whole; the last line is clamped to col 3 ("line").
+        assert_eq!(text, "line 3\nline 4\nline 5\nline");
+        assert!(!text.ends_with('\n'));
+    }
+
+    #[test]
+    fn word_range_expands_over_path_like_tokens() {
+        let mut grid = Grid::with_size(20, 4, 10);
+        grid.write_line(0, make_line("cd src/main.rs  x", 20));
+        let abs = grid.abs_of_view(0).unwrap();
+        assert_eq!(grid.word_range_abs(abs, 3), Some((3, 14))); // src/main.rs
+        assert_eq!(grid.word_range_abs(abs, 0), Some((0, 2)));
+        assert_eq!(grid.word_range_abs(abs, 14), Some((14, 15)));
     }
 }

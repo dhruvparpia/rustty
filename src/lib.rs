@@ -31,6 +31,7 @@ pub mod clipboard;
 pub mod keyboard;
 pub mod pane;
 pub mod parser;
+pub mod selection;
 pub mod shell;
 // Direct2D/DirectWrite renderer FFI boundary (spec WIN-002, WIN-003).
 #[cfg(windows)]
@@ -40,6 +41,7 @@ pub mod shell;
 )]
 pub mod render;
 pub mod tab;
+pub mod tabbar;
 pub mod theme;
 // Win32 window + message loop FFI boundary (spec WIN-001, WIN-005).
 #[cfg(windows)]

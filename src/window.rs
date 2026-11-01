@@ -9,30 +9,41 @@
 //! Key handling (WIN-005): special keys arrive through `WM_KEYDOWN`/
 //! `WM_SYSKEYDOWN` and are encoded by [`crate::keyboard`]; text,
 //! Enter/Escape/Backspace and Ctrl-control characters arrive through
-//! `WM_CHAR`/`WM_SYSCHAR`. App bindings are Ctrl+Shift+T (new tab),
-//! Ctrl+Shift+W (close tab), Ctrl+Shift+C (copy screen), Ctrl+Shift+V
-//! (bracketed paste).
+//! `WM_CHAR`/`WM_SYSCHAR`. App bindings: Ctrl+Shift+T (new tab),
+//! Ctrl+Shift+W (close tab), Ctrl+Shift+T/W/C/V, Ctrl+Shift+]/[
+//! (next/prev tab), Ctrl+Shift+Q (quit), F11 (fullscreen),
+//! Ctrl+Shift+C (copy selection, else screen), Ctrl+Shift+V (paste).
+//! Mouse (WIN-004): drag-selects text, double-click selects a word,
+//! middle-click pastes, tab-bar clicks switch tabs / press `+`.
 
 use std::ffi::c_void;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow, PAINTSTRUCT, ScreenToClient,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
     SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SetFocus, VK_CONTROL, VK_MENU, VK_SHIFT,
+    GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_MENU,
+    VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
-    DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW,
-    HICON, IDC_ARROW, LoadCursorW, MINMAXINFO, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-    SW_SHOW, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage,
-    WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_COPY, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_SETFOCUS, WM_SIZE,
-    WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
+    GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, HICON, IDC_ARROW,
+    IDC_IBEAM, LoadCursorW, MINMAXINFO, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
+    SW_SHOW, SWP_FRAMECHANGED, SWP_NOZORDER, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_COPY,
+    WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
@@ -41,8 +52,10 @@ use crate::clipboard;
 use crate::config::Config;
 use crate::keyboard::{self, Modifiers};
 use crate::parser::bracketed_paste_bytes;
-use crate::render::{CellMetrics, Renderer, measure_cells};
+use crate::render::{CellMetrics, Renderer, measure_cells, px_to_dips};
+use crate::selection::{Pos, Selection};
 use crate::shell::SpawnOptions;
+use crate::tabbar::{self, Hit, TAB_BAR_HEIGHT};
 use crate::theme::Theme;
 
 /// Window class name.
@@ -90,6 +103,19 @@ struct WindowState {
     renderer: Option<Renderer>,
     metrics: CellMetrics,
     timer_id: usize,
+    /// Anchor cell of the in-progress mouse text selection drag
+    /// (absolute grid coordinates); `None` when not dragging (WIN-004).
+    drag_anchor: Option<Pos>,
+    /// Last grid click as (absolute row, col, GetTickCount64 ms): used to
+    /// detect double clicks the system does not coalesce into
+    /// `WM_LBUTTONDBLCLK` (injected/synthesized input never coalesces).
+    last_click: Option<(usize, usize, i64)>,
+    /// Set when an app key binding consumed a `WM_KEYDOWN`; the matching
+    /// `WM_CHAR` Windows posts afterwards must not reach the PTY.
+    suppress_char: bool,
+    /// Saved window rect + styles while fullscreen (F11), `None` in
+    /// windowed mode.
+    fullscreen: Option<(RECT, isize, isize)>,
 }
 
 /// Recover the state box from `GWLP_USERDATA`, for the whole lifetime of
@@ -161,10 +187,9 @@ unsafe extern "system" fn wnd_proc(
             let _dc = unsafe { BeginPaint(hwnd, &mut ps) };
             if let Some(s) = state_mut(hwnd)
                 && let Some(r) = &mut s.renderer
-                && let Some(tab) = s.app.active_tab()
             {
                 // NFR-216: paint() logs and swallows Direct2D failures.
-                r.paint(tab.pane(), &s.theme);
+                r.paint(&s.app, &s.theme);
             }
             let _ = unsafe { EndPaint(hwnd, &ps) };
             LRESULT(0)
@@ -184,6 +209,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CHAR => {
+            if take_suppressed_char(hwnd) {
+                return LRESULT(0);
+            }
             handle_char(hwnd, wparam.0 as u32, false);
             LRESULT(0)
         }
@@ -194,6 +222,31 @@ unsafe extern "system" fn wnd_proc(
         WM_MOUSEWHEEL => {
             handle_wheel(hwnd, ((wparam.0 >> 16) & 0xFFFF) as u16);
             LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            handle_lbutton_down(hwnd, lparam);
+            LRESULT(0)
+        }
+        WM_LBUTTONDBLCLK => {
+            handle_dblclick(hwnd, lparam);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            handle_mouse_move(hwnd, wparam, lparam);
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            handle_lbutton_up(hwnd);
+            LRESULT(0)
+        }
+        WM_MBUTTONDOWN => {
+            // Middle-click paste (xterm convention, WIN-004).
+            paste_clipboard(hwnd);
+            LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            set_cursor_for_position(wparam);
+            LRESULT(1)
         }
         WM_TIMER => {
             drain_and_cleanup(hwnd);
@@ -306,29 +359,57 @@ fn resize_window(hwnd: HWND, width_px: u32, height_px: u32) {
 /// WM_KEYDOWN/WM_SYSKEYDOWN: app bindings first, then VT encoding.
 fn handle_keydown(hwnd: HWND, vk: u16) {
     let mods = read_mods();
+    if vk == 0x7A {
+        // F11: fullscreen toggle
+        toggle_fullscreen(hwnd);
+        return;
+    }
     if mods.ctrl && mods.shift {
-        match vk {
+        let consumed = match vk {
             0x54 => {
                 // Ctrl+Shift+T: new tab
                 new_tab(hwnd);
-                return;
+                true
             }
             0x57 => {
                 // Ctrl+Shift+W: close tab
                 close_tab(hwnd);
-                return;
+                true
             }
             0x43 => {
-                // Ctrl+Shift+C: copy the visible screen
+                // Ctrl+Shift+C: copy selection (else visible screen)
                 copy_screen(hwnd);
-                return;
+                true
             }
             0x56 => {
                 // Ctrl+Shift+V: bracketed paste
                 paste_clipboard(hwnd);
-                return;
+                true
             }
-            _ => {}
+            0x51 => {
+                // Ctrl+Shift+Q: quit (closes the window, WM_DESTROY quits)
+                let _ = unsafe { DestroyWindow(hwnd) };
+                true
+            }
+            0xDD => {
+                // Ctrl+Shift+]: next tab
+                switch_tab_rel(hwnd, 1);
+                true
+            }
+            0xDB => {
+                // Ctrl+Shift+[: previous tab
+                switch_tab_rel(hwnd, -1);
+                true
+            }
+            _ => false,
+        };
+        if consumed {
+            // Swallow the WM_CHAR Windows posts for this key so the
+            // shortcut's control byte never reaches the PTY.
+            if let Some(s) = state_mut(hwnd) {
+                s.suppress_char = true;
+            }
+            return;
         }
     }
     let Some(s) = state_ref(hwnd) else { return };
@@ -342,6 +423,12 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
     {
         let _ = s.app.send_input_active(&bytes);
     }
+}
+
+/// Consume a pending "this WM_CHAR belongs to a consumed key binding"
+/// flag, so `WM_CHAR` dispatch can drop it.
+fn take_suppressed_char(hwnd: HWND) -> bool {
+    state_mut(hwnd).is_some_and(|s| std::mem::take(&mut s.suppress_char))
 }
 
 /// WM_CHAR/WM_SYSCHAR: text, Enter, Escape, Backspace, Ctrl-control.
@@ -381,6 +468,266 @@ fn handle_wheel(hwnd: HWND, delta_u16: u16) {
         } else {
             grid.scroll_down(lines);
         }
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Client-area pointer position (from a mouse-message `lparam`) in DIPs.
+/// The windows crate has no `GET_X_LPARAM`; decode the signed 16-bit
+/// pair ourselves (the mouse coordinates fit in the low/high words).
+fn cursor_dips(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+    let x = (lparam.0 & 0xFFFF) as u16 as i16 as i32;
+    let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+    (
+        px_to_dips(x.max(0) as u32, dpi),
+        px_to_dips(y.max(0) as u32, dpi),
+    )
+}
+
+/// Client-area width in DIPs (tab-bar layout needs it for hit tests).
+fn client_width_dips(hwnd: HWND) -> f32 {
+    let mut r = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut r) };
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+    px_to_dips((r.right - r.left).max(1) as u32, dpi)
+}
+
+/// Grid cell under a client-area DIP position; `None` for the tab bar.
+/// Clamped to the grid bounds so drags past the edges extend the selection.
+fn cell_at(s: &WindowState, x: f32, y: f32) -> Option<(usize, usize)> {
+    if y < TAB_BAR_HEIGHT {
+        return None;
+    }
+    let grid = s.app.active_tab()?.pane().grid();
+    let col = (x / s.metrics.cell_width).floor().max(0.0) as usize;
+    let row = ((y - TAB_BAR_HEIGHT) / s.metrics.cell_height)
+        .floor()
+        .max(0.0) as usize;
+    Some((
+        row.min(grid.rows().saturating_sub(1)),
+        col.min(grid.cols().saturating_sub(1)),
+    ))
+}
+
+/// WM_LBUTTONDOWN: tab bar hit (switch tab / press `+`) or start a
+/// text-selection drag anchored on the clicked cell (WIN-004).
+fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
+    let (x, y) = cursor_dips(hwnd, lparam);
+    if y < TAB_BAR_HEIGHT {
+        let hit = state_ref(hwnd).map(|s| {
+            let titles: Vec<String> = s.app.tabs().iter().map(|t| t.title().to_string()).collect();
+            let layout = tabbar::layout(&titles, client_width_dips(hwnd), s.metrics.cell_width);
+            tabbar::hit_test(&layout, x)
+        });
+        match hit {
+            Some(Hit::Tab(i)) => {
+                if let Some(s) = state_mut(hwnd) {
+                    s.app.select_tab(i);
+                    set_title(hwnd, &s.app);
+                }
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            }
+            Some(Hit::Plus) => new_tab(hwnd),
+            Some(Hit::None) | None => {}
+        }
+        return;
+    }
+    let anchor = state_ref(hwnd).and_then(|s| {
+        let (row, col) = cell_at(s, x, y)?;
+        s.app
+            .active_tab()?
+            .pane()
+            .grid()
+            .abs_of_view(row)
+            .map(|a| Pos { row: a, col })
+    });
+    let Some(a) = anchor else { return };
+    // Synthetic double-click detection: the system coalesces real mouse
+    // clicks into WM_LBUTTONDBLCLK, but injected/synthesized input never
+    // coalesces, so detect the second fast click on the same cell here.
+    let tick = unsafe { GetTickCount64() } as i64;
+    let dbl = state_ref(hwnd)
+        .and_then(|s| s.last_click)
+        .is_some_and(|(r, c, t)| {
+            r == a.row && c == a.col && tick - t < unsafe { GetDoubleClickTime() } as i64
+        });
+    if let Some(s) = state_mut(hwnd) {
+        s.last_click = Some((a.row, a.col, tick));
+    }
+    if dbl {
+        select_word(hwnd, a.row, a.col);
+        return;
+    }
+    // Do NOT SetCapture here: taking capture on the button-down suppresses
+    // the system's WM_LBUTTONDBLCLK coalescing. Capture is taken on the
+    // first drag move instead. The selection stays empty until the drag
+    // extends (a plain click must not leave a one-cell selection behind).
+    if let Some(s) = state_mut(hwnd) {
+        s.drag_anchor = Some(a);
+        if let Some(tab) = s.app.active_tab_mut() {
+            tab.pane_mut().set_selection(None);
+        }
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// WM_LBUTTONDBLCLK: select the word under the pointer; the drag anchor
+/// lets a follow-up drag extend the word selection (WIN-004).
+fn handle_dblclick(hwnd: HWND, lparam: LPARAM) {
+    let (x, y) = cursor_dips(hwnd, lparam);
+    let cell = state_ref(hwnd).and_then(|s| {
+        let (row, col) = cell_at(s, x, y)?;
+        let abs = s.app.active_tab()?.pane().grid().abs_of_view(row)?;
+        Some((abs, col))
+    });
+    if let Some((abs, col)) = cell {
+        if let Some(s) = state_mut(hwnd) {
+            s.last_click = Some((abs, col, unsafe { GetTickCount64() } as i64));
+        }
+        select_word(hwnd, abs, col);
+    }
+}
+
+/// Select the whole word at absolute grid position (`abs`, `col`) (WIN-004).
+fn select_word(hwnd: HWND, abs: usize, col: usize) {
+    let word = state_ref(hwnd).and_then(|s| {
+        let grid = s.app.active_tab()?.pane().grid();
+        let (lo, hi) = grid.word_range_abs(abs, col)?;
+        Some((lo, hi))
+    });
+    let Some((lo, hi)) = word else { return };
+    if let Some(s) = state_mut(hwnd) {
+        s.drag_anchor = Some(Pos { row: abs, col: lo });
+        if let Some(tab) = s.app.active_tab_mut() {
+            tab.pane_mut().set_selection(Some(Selection::between(
+                Pos { row: abs, col: lo },
+                Pos {
+                    row: abs,
+                    col: hi - 1,
+                },
+            )));
+        }
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// WM_MOUSEMOVE with the left button down: extend the selection drag.
+fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    const MK_LBUTTON: usize = 0x01;
+    if wparam.0 & MK_LBUTTON == 0 {
+        return;
+    }
+    let (x, y) = cursor_dips(hwnd, lparam);
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(a) = s.drag_anchor else { return };
+    // Dragging over the tab bar clamps the selection to the top row.
+    let Some((row, col)) = cell_at(s, x, y.max(TAB_BAR_HEIGHT)) else {
+        return;
+    };
+    let abs = s
+        .app
+        .active_tab()
+        .and_then(|t| t.pane().grid().abs_of_view(row))
+        .unwrap_or(a.row);
+    let cur = Pos { row: abs, col };
+    // First drag move: take capture now (see handle_lbutton_down) so the
+    // drag keeps delivering moves even past the window edges.
+    unsafe { SetCapture(hwnd) };
+    if let Some(tab) = s.app.active_tab_mut() {
+        tab.pane_mut()
+            .set_selection(Some(Selection::between(a, cur)));
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// WM_LBUTTONUP: end the selection drag (the selection stays visible
+/// and copyable until the next click).
+fn handle_lbutton_up(hwnd: HWND) {
+    let _ = unsafe { ReleaseCapture() };
+    if let Some(s) = state_mut(hwnd) {
+        s.drag_anchor = None;
+    }
+}
+
+/// WM_SETCURSOR: I-beam over the grid, arrow over the tab bar.
+fn set_cursor_for_position(wparam: WPARAM) {
+    let target = HWND(wparam.0 as _);
+    let mut pt = POINT::default();
+    if unsafe { GetCursorPos(&mut pt) }.is_err() {
+        return;
+    }
+    let _ = unsafe { ScreenToClient(target, &mut pt) };
+    let dpi = unsafe { GetDpiForWindow(target) }.max(96) as f32;
+    let y = px_to_dips(pt.y.max(0) as u32, dpi);
+    let idc = if y < TAB_BAR_HEIGHT {
+        IDC_ARROW
+    } else {
+        IDC_IBEAM
+    };
+    if let Ok(cursor) = unsafe { LoadCursorW(None, idc) } {
+        let _ = unsafe { SetCursor(Some(cursor)) };
+    }
+}
+
+/// Ctrl+Shift+]/[: move the active tab by `delta` (wrapping).
+fn switch_tab_rel(hwnd: HWND, delta: i32) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let n = s.app.tab_count();
+    if n < 2 {
+        return;
+    }
+    let idx = ((s.app.active_index() as i32 + delta).rem_euclid(n as i32)) as usize;
+    s.app.select_tab(idx);
+    set_title(hwnd, &s.app);
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// F11: toggle borderless fullscreen over the nearest monitor,
+/// restoring the saved window rect and styles on the second press.
+fn toggle_fullscreen(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    if let Some((rect, style, exstyle)) = s.fullscreen.take() {
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exstyle);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOZORDER | SWP_FRAMECHANGED,
+            );
+        }
+    } else {
+        let mut rect = RECT::default();
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+        let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+        unsafe {
+            let _ = GetWindowRect(hwnd, &mut rect);
+            let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                let area = mi.rcMonitor;
+                // Keep WS_VISIBLE: a bare WS_POPUP style hides the window.
+                SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_POPUP | WS_VISIBLE).0 as isize);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    area.left,
+                    area.top,
+                    area.right - area.left,
+                    area.bottom - area.top,
+                    SWP_NOZORDER | SWP_FRAMECHANGED,
+                );
+            }
+        }
+        s.fullscreen = Some((rect, style, exstyle));
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -447,13 +794,17 @@ fn close_tab(hwnd: HWND) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
-/// Ctrl+Shift+C: copy the visible viewport text (WIN-004 MVP).
+/// Ctrl+Shift+C: copy the mouse selection; the whole visible viewport
+/// when nothing is selected (WIN-004).
 fn copy_screen(hwnd: HWND) {
     let Some(s) = state_ref(hwnd) else { return };
     let Some(tab) = s.app.active_tab() else {
         return;
     };
-    let text = Renderer::visible_text(tab.pane().grid());
+    let text = tab
+        .pane()
+        .selection_text()
+        .unwrap_or_else(|| Renderer::visible_text(tab.pane().grid()));
     if !text.is_empty() && !clipboard::set_text(&text) {
         eprintln!("rusttyterm: clipboard copy failed");
     }
@@ -486,10 +837,10 @@ fn set_title(hwnd: HWND, app: &App) {
     let _ = unsafe { SetWindowTextW(hwnd, PCWSTR::from_raw(wide.as_ptr())) };
 }
 
-/// Client-area pixel size for a `cols` x `rows` grid.
+/// Client-area pixel size for a `cols` x `rows` grid plus the tab bar.
 fn px_size(metrics: CellMetrics, cols: usize, rows: usize) -> (i32, i32) {
     let w = (cols.max(1) as f32 * metrics.cell_width).ceil() as i32;
-    let h = (rows.max(1) as f32 * metrics.cell_height).ceil() as i32;
+    let h = (rows.max(1) as f32 * metrics.cell_height + TAB_BAR_HEIGHT).ceil() as i32;
     (w.max(16), h.max(16))
 }
 
@@ -527,6 +878,10 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         renderer: None,
         metrics,
         timer_id: 0,
+        drag_anchor: None,
+        last_click: None,
+        suppress_char: false,
+        fullscreen: None,
     });
     let state_param = Box::into_raw(state) as *const c_void;
 

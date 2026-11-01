@@ -28,9 +28,11 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::PCWSTR;
 use windows_numerics::Vector2;
 
+use crate::app::App;
 use crate::color::Color;
 use crate::grid::{Cell, CellAttribute, Grid};
 use crate::pane::Pane;
+use crate::tabbar::{self, TAB_BAR_HEIGHT, TAB_CHROME};
 use crate::theme::Theme;
 
 /// Font families tried in order (WIN-003): Cascadia first, Consolas last.
@@ -87,6 +89,18 @@ fn color_f(c: Color) -> D2D1_COLOR_F {
 
 fn color_key(c: Color) -> u32 {
     (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)
+}
+
+/// Blend two colors: `t` is the fraction of `to` (0 = `from`, 1 = `to`).
+/// Used for dimmed tab-bar labels on the predawn palette.
+fn mix(from: Color, to: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let blend = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color {
+        r: blend(from.r, to.r),
+        g: blend(from.g, to.g),
+        b: blend(from.b, to.b),
+    }
 }
 
 /// Measure cell geometry for the chosen monospace font at `dpi`.
@@ -238,7 +252,11 @@ impl Renderer {
         // Family name is diagnostics-only; the formats carry the chosen face.
         let (_family, formats, metrics) = build_font_resources(&dwrite, dpi)?;
         let width = dips_to_px(cols.max(1) as f32 * metrics.cell_width, dpi).max(1);
-        let height = dips_to_px(rows.max(1) as f32 * metrics.cell_height, dpi).max(1);
+        let height = dips_to_px(
+            rows.max(1) as f32 * metrics.cell_height + TAB_BAR_HEIGHT,
+            dpi,
+        )
+        .max(1);
         let props = D2D1_RENDER_TARGET_PROPERTIES {
             r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
             pixelFormat: D2D1_PIXEL_FORMAT {
@@ -285,20 +303,22 @@ impl Renderer {
         }
     }
 
-    /// Grid size that fits the current client area.
+    /// Grid size that fits the current client area (the tab bar strip is
+    /// carved off the top).
     #[must_use]
     pub fn grid_size(&self) -> (usize, usize) {
         let px = unsafe { self.target.GetPixelSize() };
         let w = px_to_dips(px.width, self.dpi);
-        let h = px_to_dips(px.height, self.dpi);
+        let h = (px_to_dips(px.height, self.dpi) - TAB_BAR_HEIGHT).max(0.0);
         (
             (w / self.metrics.cell_width).floor().max(1.0) as usize,
             (h / self.metrics.cell_height).floor().max(1.0) as usize,
         )
     }
 
-    /// Paint the pane's viewport. Never panics on Direct2D failure (NFR-216).
-    pub fn paint(&mut self, pane: &Pane, theme: &Theme) {
+    /// Paint the app: tab bar strip, active pane viewport, cursor.
+    /// Never panics on Direct2D failure (NFR-216).
+    pub fn paint(&mut self, app: &App, theme: &Theme) {
         if unsafe { self.target.CheckWindowState() } == D2D1_WINDOW_STATE_OCCLUDED {
             return;
         }
@@ -306,20 +326,25 @@ impl Renderer {
         let width = px_to_dips(px.width, self.dpi);
         let height = px_to_dips(px.height, self.dpi);
         unsafe { self.target.BeginDraw() };
-        let grid = pane.grid();
-        let rows = grid.rows();
-        let cols = (grid.cols()).min((width / self.metrics.cell_width).floor() as usize);
         self.fill_rect(0.0, 0.0, width, height, theme.background);
         unsafe { self.target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED) };
-        for y in 0..rows {
-            let Some(line) = grid.row(y) else { continue };
-            let n = line.cells.len().min(cols);
-            let cells = &line.cells[..n];
-            self.paint_row_backgrounds(y, cells, theme);
-            self.paint_row_text(y, cells, theme);
-            self.paint_row_decorations(y, cells, theme);
+        if let Some(tab) = app.active_tab() {
+            let pane = tab.pane();
+            let grid = pane.grid();
+            let rows = grid.rows();
+            let cols = (grid.cols()).min((width / self.metrics.cell_width).floor() as usize);
+            for y in 0..rows {
+                let Some(line) = grid.row(y) else { continue };
+                let n = line.cells.len().min(cols);
+                let cells = &line.cells[..n];
+                self.paint_row_backgrounds(y, cells, theme);
+                self.paint_row_selection(y, grid.abs_of_view(y), n, pane.selection(), theme);
+                self.paint_row_text(y, cells, theme);
+                self.paint_row_decorations(y, cells, theme);
+            }
+            self.paint_cursor(pane, grid, theme);
         }
-        self.paint_cursor(pane, grid, theme);
+        self.paint_tab_bar(app, theme, width);
         unsafe {
             self.target
                 .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
@@ -349,6 +374,107 @@ impl Renderer {
         out
     }
 
+    /// Fill the mouse-selection span on viewport row `y` (drawn between
+    /// the row background and the row text, so glyphs stay legible).
+    /// `abs` is the row's absolute line id; `n_cols` is the painted width.
+    fn paint_row_selection(
+        &mut self,
+        y: usize,
+        abs: Option<usize>,
+        n_cols: usize,
+        sel: Option<crate::selection::Selection>,
+        theme: &Theme,
+    ) {
+        let Some((lo, hi)) = sel.and_then(|s| abs.and_then(|a| s.cols_on(a, n_cols))) else {
+            return;
+        };
+        if hi <= lo {
+            return;
+        }
+        let top = TAB_BAR_HEIGHT + y as f32 * self.metrics.cell_height;
+        self.fill_rect(
+            lo as f32 * self.metrics.cell_width,
+            top,
+            hi as f32 * self.metrics.cell_width,
+            top + self.metrics.cell_height,
+            theme.selection,
+        );
+    }
+
+    /// Paint the tab bar strip: bar background, per-tab titles (active
+    /// tab highlighted), and the `+` new-tab button (tab bar P0).
+    fn paint_tab_bar(&mut self, app: &App, theme: &Theme, width: f32) {
+        self.fill_rect(0.0, 0.0, width, TAB_BAR_HEIGHT, theme.tab_bar);
+        let titles: Vec<String> = app.tabs().iter().map(|t| t.title().to_string()).collect();
+        let layout = tabbar::layout(&titles, width, self.metrics.cell_width);
+        let active = app.active_index();
+        let y_top = (TAB_BAR_HEIGHT - self.metrics.text_height) / 2.0;
+        for (i, &(lo, hi)) in layout.tabs.iter().enumerate() {
+            if hi <= lo {
+                continue;
+            }
+            if i == active {
+                self.fill_rect(lo, 0.0, hi, TAB_BAR_HEIGHT, theme.tab_active);
+            }
+            let label =
+                tabbar::fit_title(&titles[i], (hi - lo) - TAB_CHROME, self.metrics.cell_width);
+            if label.is_empty() {
+                continue;
+            }
+            let units = utf16(&label);
+            let rect = D2D_RECT_F {
+                left: lo + TAB_CHROME / 2.0,
+                top: y_top,
+                right: hi - TAB_CHROME / 2.0,
+                bottom: y_top + self.metrics.text_height,
+            };
+            let color = if i == active {
+                theme.foreground
+            } else {
+                mix(theme.foreground, theme.tab_bar, 0.45)
+            };
+            let Some(brush) = self.brush(color) else {
+                continue;
+            };
+            let format = &self.formats[0];
+            unsafe {
+                self.target.DrawText(
+                    &units,
+                    format,
+                    &rect,
+                    &brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+        }
+        let (lo, hi) = layout.plus;
+        if hi > lo {
+            let cx = (lo + hi) / 2.0;
+            let units = utf16("+");
+            let rect = D2D_RECT_F {
+                left: cx - self.metrics.cell_width / 2.0,
+                top: y_top,
+                right: cx + self.metrics.cell_width / 2.0,
+                bottom: y_top + self.metrics.text_height,
+            };
+            let color = mix(theme.foreground, theme.tab_bar, 0.35);
+            if let Some(brush) = self.brush(color) {
+                let format = &self.formats[0];
+                unsafe {
+                    self.target.DrawText(
+                        &units,
+                        format,
+                        &rect,
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+            }
+        }
+    }
+
     fn effective_colors(cell: &Cell, theme: &Theme) -> (Color, Color) {
         let fg = cell.fg.unwrap_or(theme.foreground);
         let bg = cell.bg.unwrap_or(theme.background);
@@ -371,7 +497,7 @@ impl Renderer {
             while end < cells.len() && Self::effective_colors(&cells[end], theme).1 == bg {
                 end += 1;
             }
-            let top = y as f32 * self.metrics.cell_height;
+            let top = TAB_BAR_HEIGHT + y as f32 * self.metrics.cell_height;
             self.fill_rect(
                 x as f32 * self.metrics.cell_width,
                 top,
@@ -386,7 +512,7 @@ impl Renderer {
     fn paint_row_text(&mut self, y: usize, cells: &[Cell], theme: &Theme) {
         let cw = self.metrics.cell_width;
         let ch = self.metrics.cell_height;
-        let y_top = y as f32 * ch + (ch - self.metrics.text_height) / 2.0;
+        let y_top = TAB_BAR_HEIGHT + y as f32 * ch + (ch - self.metrics.text_height) / 2.0;
         let mut i = 0;
         while i < cells.len() {
             let cell = &cells[i];
@@ -446,11 +572,11 @@ impl Renderer {
             let left = x as f32 * cw;
             let right = left + cw;
             if cell.attributes.contains(CellAttribute::UNDERLINE) {
-                let yline = y as f32 * ch + ch - 1.0;
+                let yline = TAB_BAR_HEIGHT + y as f32 * ch + ch - 1.0;
                 self.stroke_line(left, yline, right, yline, fg);
             }
             if cell.attributes.contains(CellAttribute::STRIKE) {
-                let yline = y as f32 * ch + ch / 2.0;
+                let yline = TAB_BAR_HEIGHT + y as f32 * ch + ch / 2.0;
                 self.stroke_line(left, yline, right, yline, fg);
             }
         }
@@ -465,7 +591,7 @@ impl Renderer {
         if row >= grid.rows() || col >= grid.cols() {
             return;
         }
-        let top = row as f32 * self.metrics.cell_height;
+        let top = TAB_BAR_HEIGHT + row as f32 * self.metrics.cell_height;
         let left = col as f32 * self.metrics.cell_width;
         self.fill_rect(
             left,

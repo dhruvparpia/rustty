@@ -12,6 +12,7 @@
 
 use crate::grid::Grid;
 use crate::parser::{Parser, ParserEvent};
+use crate::selection::Selection;
 use crate::shell::{Shell, ShellError, ShellEvent, SpawnOptions};
 
 /// A single terminal pane (one grid, one parser, one shell process).
@@ -26,6 +27,8 @@ pub struct Pane {
     in_alt: bool,
     /// Grid changed since the renderer last asked (repaint hint).
     dirty: bool,
+    /// Mouse text selection, in absolute grid coordinates (WIN-004).
+    selection: Option<Selection>,
 }
 
 impl Pane {
@@ -40,6 +43,7 @@ impl Pane {
             main_grid: None,
             in_alt: false,
             dirty: true,
+            selection: None,
         }
     }
 
@@ -53,6 +57,27 @@ impl Pane {
     #[must_use]
     pub fn grid_mut(&mut self) -> &mut Grid {
         &mut self.grid
+    }
+
+    /// Current mouse selection, if any (absolute grid coordinates).
+    #[must_use]
+    pub fn selection(&self) -> Option<Selection> {
+        self.selection
+    }
+
+    /// Set the mouse selection (the renderer repaints the highlight).
+    pub fn set_selection(&mut self, sel: Option<Selection>) {
+        self.selection = sel;
+        self.dirty = true;
+    }
+
+    /// Plain text of the current selection, `None` when nothing is
+    /// selected (Ctrl+Shift+C copy source of truth).
+    #[must_use]
+    pub fn selection_text(&self) -> Option<String> {
+        let sel = self.selection?;
+        let text = self.grid.selection_text(&sel);
+        (!text.is_empty()).then_some(text)
     }
 
     /// The pane's parser (cursor position, modes) for the renderer.

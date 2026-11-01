@@ -16,6 +16,12 @@ pub struct Theme {
     pub foreground: Color,
     /// Cursor color.
     pub cursor: Color,
+    /// Selection highlight background (WIN-004 mouse selection).
+    pub selection: Color,
+    /// Tab bar strip background (tab bar P0).
+    pub tab_bar: Color,
+    /// Active tab background.
+    pub tab_active: Color,
     /// ANSI-16 palette (indices 0..=15).
     pub palette: [Color; 16],
 }
@@ -29,6 +35,9 @@ impl Theme {
             background: Color::from_hex(0x23212E),
             foreground: Color::from_hex(0xEAE6E3),
             cursor: Color::from_hex(0x61C0FF),
+            selection: Color::from_hex(0x4C465C),
+            tab_bar: Color::from_hex(0x1A1822),
+            tab_active: Color::from_hex(0x3A3646),
             palette: ansi_palette(),
         }
     }
