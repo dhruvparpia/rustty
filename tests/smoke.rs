@@ -7,18 +7,15 @@ use rusttyterm::config::Config;
 use rusttyterm::shell::ShellState;
 
 #[test]
-fn fresh_app_has_one_running_shape_tab() {
+fn fresh_app_has_one_tab_and_a_live_grid() {
     let mut app = App::new();
     assert_eq!(app.tab_count(), 1);
 
     let tab = app.active_tab_mut();
     assert!(tab.is_some(), "app must always have an active tab");
 
-    // Drive the grid through the tab like the parser will.
-    if let Some(tab) = app.active_tab_mut() {
-        tab.pane_mut().grid_mut().write_line_stub(0, "smoke");
-        tab.pane_mut().shell_mut().spawn();
-    }
+    // Drive the grid through the pane parser, the way shell output will.
+    app.feed_active(b"smoke");
 
     let grid = app.active_tab().map(|t| t.pane().grid());
     let shell = app.active_tab().map(|t| t.pane().shell().state());
@@ -31,7 +28,11 @@ fn fresh_app_has_one_running_shape_tab() {
         grid.map(|g| g.line_text(0).unwrap()),
         Some("smoke".to_string())
     );
-    assert_eq!(shell, Some(ShellState::Spawning));
+    assert_eq!(
+        shell,
+        Some(ShellState::Inactive),
+        "no process is spawned by the data model alone"
+    );
 }
 
 #[test]

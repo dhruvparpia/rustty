@@ -88,6 +88,12 @@ impl CellAttribute {
         Self(self.0 & other.0)
     }
 
+    /// Remove `other`'s flags from this set (used by SGR resets, e.g. 22 clears
+    /// bold and dim at once)
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
     /// True if every flag in `other` is set in `self`
     pub const fn contains(self, other: Self) -> bool {
         (self.0 & other.0) == other.0
@@ -364,6 +370,58 @@ impl Grid {
         self.mark_all_dirty();
     }
 
+    /// Fill viewport rows `top..=bottom` with blank lines (ED / EL / ECH use this)
+    pub fn erase_rows(&mut self, top: usize, bottom: usize) {
+        let top = top.min(self.rows.saturating_sub(1));
+        let bottom = bottom.min(self.rows.saturating_sub(1));
+        for row in top..=bottom {
+            self.write_line(row, Line::blank(self.cols));
+        }
+    }
+
+    /// Shift viewport rows `top..=bottom` up by one line; the region's bottom
+    /// row becomes blank. Used by DL, ESC M and SU on partial scroll regions.
+    ///
+    /// On the full viewport the content leaving the top goes into scrollback,
+    /// so this appends a blank line at the live edge instead of cloning rows.
+    pub fn scroll_region_up(&mut self, top: usize, bottom: usize) {
+        let bottom = bottom.min(self.rows.saturating_sub(1));
+        if top > bottom {
+            return;
+        }
+        if top == 0 && bottom == self.rows - 1 {
+            self.append_line(Line::blank(self.cols));
+            return;
+        }
+        for row in top..bottom {
+            let next = self
+                .row(row + 1)
+                .cloned()
+                .unwrap_or_else(|| Line::blank(self.cols));
+            self.write_line(row, next);
+        }
+        self.write_line(bottom, Line::blank(self.cols));
+    }
+
+    /// Shift viewport rows `top..=bottom` down by one line; the region's top
+    /// row becomes blank and the bottom row of the region is discarded.
+    /// Used by IL and SD.
+    pub fn scroll_region_down(&mut self, top: usize, bottom: usize) {
+        let top = top.min(self.rows.saturating_sub(1));
+        let bottom = bottom.min(self.rows.saturating_sub(1));
+        if top > bottom {
+            return;
+        }
+        for row in (top + 1..=bottom).rev() {
+            let prev = self
+                .row(row - 1)
+                .cloned()
+                .unwrap_or_else(|| Line::blank(self.cols));
+            self.write_line(row, prev);
+        }
+        self.write_line(top, Line::blank(self.cols));
+    }
+
     /// Mark every row in the viewport dirty (full repaint)
     pub fn mark_all_dirty(&mut self) {
         self.full_dirty = true;
@@ -636,5 +694,87 @@ mod tests {
         assert!(attrs.contains(CellAttribute::UNDERLINE));
         assert!(!attrs.contains(CellAttribute::ITALIC));
         assert!(CellAttribute::empty().flags() == 0);
+        // `without` clears exactly the requested flags
+        let cleared = attrs.without(CellAttribute::BOLD);
+        assert!(!cleared.contains(CellAttribute::BOLD));
+        assert!(cleared.contains(CellAttribute::UNDERLINE));
+    }
+
+    #[test]
+    fn test_erase_rows() {
+        let mut grid = Grid::with_size(10, 5, 20);
+        for r in 0..5 {
+            grid.write_line(r, make_line(&format!("row {r}"), 10));
+        }
+        grid.erase_rows(1, 3);
+        assert_eq!(row_text(&grid, 0), "row 0");
+        assert_eq!(grid.line_text(1).unwrap(), "");
+        assert_eq!(grid.line_text(2).unwrap(), "");
+        assert_eq!(grid.line_text(3).unwrap(), "");
+        assert_eq!(row_text(&grid, 4), "row 4");
+    }
+
+    #[test]
+    fn test_scroll_region_up_partial() {
+        let mut grid = Grid::with_size(10, 5, 20);
+        for r in 0..5 {
+            grid.write_line(r, make_line(&format!("row {r}"), 10));
+        }
+        // Region rows 1..=3: content shifts up, bottom of region blanks,
+        // rows outside the region are untouched.
+        grid.scroll_region_up(1, 3);
+        assert_eq!(row_text(&grid, 0), "row 0");
+        assert_eq!(row_text(&grid, 1), "row 2");
+        assert_eq!(row_text(&grid, 2), "row 3");
+        assert_eq!(grid.line_text(3).unwrap(), "");
+        assert_eq!(row_text(&grid, 4), "row 4");
+    }
+
+    #[test]
+    fn test_scroll_region_up_full_pushes_into_scrollback() {
+        let mut grid = Grid::with_size(10, 5, 20);
+        for r in 0..5 {
+            grid.write_line(r, make_line(&format!("row {r}"), 10));
+        }
+        let before = grid.total_lines();
+        grid.scroll_region_up(0, 4);
+        // The full-viewport path appends at the live edge (scrollback grows).
+        assert_eq!(grid.total_lines(), before + 1);
+        assert_eq!(row_text(&grid, 0), "row 1");
+        assert_eq!(row_text(&grid, 3), "row 4");
+        assert_eq!(grid.line_text(4).unwrap(), "");
+        // Scroll up one line: the viewport shows the oldest five buffer
+        // lines, "row 0" through "row 4"; the appended blank sits below
+        // the viewport.
+        grid.scroll_up(1);
+        assert_eq!(row_text(&grid, 0), "row 0");
+        assert_eq!(row_text(&grid, 4), "row 4");
+    }
+
+    #[test]
+    fn test_scroll_region_down() {
+        let mut grid = Grid::with_size(10, 5, 20);
+        for r in 0..5 {
+            grid.write_line(r, make_line(&format!("row {r}"), 10));
+        }
+        // Region rows 1..=3: content shifts down, top of region blanks,
+        // the region's bottom row is discarded.
+        grid.scroll_region_down(1, 3);
+        assert_eq!(row_text(&grid, 0), "row 0");
+        assert_eq!(grid.line_text(1).unwrap(), "");
+        assert_eq!(row_text(&grid, 2), "row 1");
+        assert_eq!(row_text(&grid, 3), "row 2");
+        assert_eq!(row_text(&grid, 4), "row 4");
+    }
+
+    #[test]
+    fn test_region_scroll_marks_dirty() {
+        let mut grid = Grid::with_size(10, 5, 20);
+        grid.take_dirty_rows();
+        grid.scroll_region_up(0, 2);
+        assert_eq!(grid.dirty_rows(), vec![0, 1, 2]);
+        grid.take_dirty_rows();
+        grid.erase_rows(4, 4);
+        assert_eq!(grid.dirty_rows(), vec![4]);
     }
 }

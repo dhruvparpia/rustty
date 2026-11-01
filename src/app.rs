@@ -4,6 +4,7 @@
 //! drive. No windowing code lives here (spec §32 Step 4: data model
 //! first).
 
+use crate::shell::{ShellError, SpawnOptions};
 use crate::tab::Tab;
 
 /// The application state: tabs plus the active-tab index.
@@ -89,10 +90,67 @@ impl App {
         false
     }
 
-    /// Resize the active tab's grid (window resize handler entry point).
-    pub fn resize_active(&mut self, cols: usize, rows: usize) {
+    /// Resize the active tab's grid and pseudo-console (window resize
+    /// handler entry point, spec §17).
+    ///
+    /// The grid always resizes; the error only reports a ConPTY resize
+    /// failure, which the window layer logs and never panics on.
+    pub fn resize_active(&mut self, cols: usize, rows: usize) -> Result<(), ShellError> {
+        match self.active_tab_mut() {
+            Some(tab) => tab.pane_mut().resize(cols, rows),
+            None => Ok(()),
+        }
+    }
+
+    /// Feed shell output bytes into the active pane, then sync tab titles.
+    pub fn feed_active(&mut self, bytes: &[u8]) {
         if let Some(tab) = self.active_tab_mut() {
-            tab.pane_mut().resize(cols, rows);
+            tab.pane_mut().feed(bytes);
+        }
+        self.sync_tab_titles();
+    }
+
+    /// Start a shell in the active pane (TTY-001).
+    pub fn spawn_active(&mut self, opts: &SpawnOptions) -> Result<(), ShellError> {
+        match self.active_tab_mut() {
+            Some(tab) => tab.pane_mut().spawn_shell(opts),
+            None => Err(ShellError::NotRunning),
+        }
+    }
+
+    /// Send keyboard/paste bytes to the active pane's shell.
+    pub fn send_input_active(&mut self, bytes: &[u8]) -> Result<(), ShellError> {
+        match self.active_tab_mut() {
+            Some(tab) => tab.pane_mut().send_input(bytes),
+            None => Err(ShellError::NotRunning),
+        }
+    }
+
+    /// Drain every tab's shell reader events (the UI's periodic poll).
+    ///
+    /// Background tabs keep parsing while you work in another tab, so no
+    /// output is lost and no tab blocks the UI thread.
+    pub fn drain_shells(&mut self) {
+        for tab in &mut self.tabs {
+            tab.pane_mut().drain_shell();
+        }
+        self.sync_tab_titles();
+    }
+
+    /// Ask every shell to exit (window close, tab close — TTY-024).
+    pub fn close_all_shells(&mut self) {
+        for tab in &mut self.tabs {
+            tab.pane_mut().close_shell();
+        }
+    }
+
+    /// Copy each pane's OSC title onto its tab (tab-bar titles, spec §11).
+    pub fn sync_tab_titles(&mut self) {
+        for tab in &mut self.tabs {
+            if let Some(title) = tab.pane().title() {
+                let title = title.to_string();
+                tab.set_title(title);
+            }
         }
     }
 }
@@ -157,8 +215,33 @@ mod tests {
     #[test]
     fn resize_reaches_active_grid() {
         let mut app = App::new();
-        app.resize_active(120, 30);
+        // No shell attached yet: the grid resizes and the ConPTY leg
+        // reports NotRunning (spec §17 chain, never a panic).
+        assert!(matches!(
+            app.resize_active(120, 30),
+            Err(ShellError::NotRunning)
+        ));
         let grid = app.active_tab().map(|t| t.pane().grid());
         assert_eq!(grid.map(|g| (g.cols, g.rows)), Some((120, 30)));
+    }
+
+    #[test]
+    fn feed_active_writes_grid_and_syncs_title() {
+        let mut app = App::new();
+        app.feed_active(b"ls\x1b]0; ~/src\x07");
+        assert_eq!(app.active_tab().map(|t| t.title()), Some(" ~/src"));
+        assert_eq!(
+            app.active_tab().map(|t| t.pane().grid().line_text(0)),
+            Some(Some("ls".to_string()))
+        );
+    }
+
+    #[test]
+    fn drain_and_close_are_safe_with_no_processes() {
+        let mut app = App::new();
+        app.add_tab();
+        app.drain_shells();
+        app.close_all_shells();
+        assert_eq!(app.tab_count(), 2);
     }
 }

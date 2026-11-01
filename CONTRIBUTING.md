@@ -15,8 +15,12 @@ in [`ROADMAP.md`](ROADMAP.md). The non-negotiables:
 
 ## Dev setup
 
-1. Install a current Rust toolchain (MSRV **1.92**): <https://rustup.rs>.
+1. Install the **latest stable** Rust toolchain (`rustup update stable`, MSRV **1.99**):
+   <https://rustup.rs>.
 2. `git clone` the repo, then `cargo build`.
+
+Every dependency must be the latest stable release — see [AGENTS.md](AGENTS.md),
+Rule 1. Check with `cargo outdated` before each milestone and release.
 
 Windows GNU-toolchain users need MinGW-w64 in `PATH` (MSVC is the default and is
 what CI uses: `x86_64-pc-windows-msvc`).
