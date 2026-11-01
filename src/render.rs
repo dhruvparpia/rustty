@@ -31,6 +31,7 @@ use windows_numerics::Vector2;
 use crate::app::App;
 use crate::color::Color;
 use crate::config::FontConfig;
+use crate::glyph_cache::{self, GlyphAtlas, GlyphKey, Tile};
 use crate::grid::{Cell, CellAttribute, Grid};
 use crate::pane::Pane;
 use crate::tabbar::{self, TAB_CHROME};
@@ -75,7 +76,7 @@ fn wstr(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn color_f(c: Color) -> D2D1_COLOR_F {
+pub(crate) fn color_f(c: Color) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
         r: c.r as f32 / 255.0,
         g: c.g as f32 / 255.0,
@@ -84,8 +85,12 @@ fn color_f(c: Color) -> D2D1_COLOR_F {
     }
 }
 
-fn color_key(c: Color) -> u32 {
-    (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)
+/// Pack a color into the 24-bit key the brush and atlas caches use.
+///
+/// `const` so [`crate::glyph_cache::GlyphKey::new`] stays `const`.
+pub(crate) const fn color_key(c: Color) -> u32 {
+    // `as` casts: `u32::from` is not a const trait yet.
+    (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32
 }
 
 /// Blend two colors: `t` is the fraction of `to` (0 = `from`, 1 = `to`).
@@ -253,6 +258,11 @@ pub struct Renderer {
     mask: Vec<bool>,
     /// Last painted frame, used to work out what a damage repaint must cover.
     damage: Damage,
+    /// Glyph atlas (spec §20): created on the first paint, when the target
+    /// exists. `None` = no atlas, glyphs go through the `DrawText` path.
+    atlas: Option<GlyphAtlas>,
+    /// Atlas creation failed: stop retrying per frame and stop logging.
+    atlas_failed: bool,
 }
 
 /// What the last painted frame looked like: enough to decide which rows a
@@ -363,6 +373,8 @@ impl Renderer {
             label: String::new(),
             mask: vec![true; rows.max(1)],
             damage: Damage::default(),
+            atlas: None,
+            atlas_failed: false,
         })
     }
 
@@ -387,7 +399,10 @@ impl Renderer {
 
     /// Resize the render target to a new client area in physical pixels.
     ///
-    /// Direct2D errors are ignored: the next `WM_PAINT` retries.
+    /// Direct2D invalidates the resources created from a resized target, so
+    /// the glyph atlas and the brush cache go with it; the next paint
+    /// recreates them. Direct2D errors are ignored: the next `WM_PAINT`
+    /// retries.
     pub fn resize(&mut self, width_px: u32, height_px: u32) {
         let size = D2D_SIZE_U {
             width: width_px.max(1),
@@ -397,6 +412,9 @@ impl Renderer {
         if res.is_err() {
             eprintln!("rusttyterm: Direct2D resize failed");
         }
+        self.atlas = None;
+        self.atlas_failed = false;
+        self.brushes.clear();
     }
 
     /// Grid size that fits the current client area (the tab bar strip is
@@ -439,6 +457,69 @@ impl Renderer {
         self.mask.iter().filter(|&&row| row).count()
     }
 
+    /// Atlas counters for the benchmark ([`crate::perf_bench`]). Not API.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn atlas_stats(&self) -> glyph_cache::AtlasStats {
+        self.atlas
+            .as_ref()
+            .map_or(glyph_cache::AtlasStats::default(), GlyphAtlas::stats)
+    }
+
+    /// Create the glyph atlas on the current render target (lazily, from the
+    /// paint path: the target only exists once the window is up). A creation
+    /// failure is permanent for this renderer: the frame paints through the
+    /// `DrawText` path and the failure is logged once (NFR-216).
+    ///
+    /// `true` when an atlas is available.
+    fn ensure_atlas(&mut self) -> bool {
+        if self.atlas.is_some() {
+            return true;
+        }
+        if self.atlas_failed {
+            return false;
+        }
+        match GlyphAtlas::new(&self.target, &self.metrics, self.dpi) {
+            Ok(atlas) => {
+                self.atlas = Some(atlas);
+                true
+            }
+            Err(e) => {
+                self.atlas_failed = true;
+                eprintln!("rusttyterm: glyph atlas unavailable: {e}");
+                false
+            }
+        }
+    }
+
+    /// Collect pass: queue every glyph the masked rows of this frame will
+    /// draw. [`crate::glyph_cache::GlyphAtlas::request`] deduplicates, so a
+    /// frame of 80 x 24 identical cells queues one tile.
+    fn collect_atlas_tiles(
+        &mut self,
+        atlas: &mut GlyphAtlas,
+        pane: &Pane,
+        rows: usize,
+        cols: usize,
+        theme: &Theme,
+    ) {
+        let grid = pane.grid();
+        let rows = rows.min(grid.rows()).min(self.mask.len());
+        for y in 0..rows {
+            if !self.mask[y] {
+                continue;
+            }
+            let Some(line) = grid.row(y) else { continue };
+            let n = line.cells.len().min(cols);
+            let span = Self::row_selection(pane, y, n);
+            for (x, cell) in line.cells[..n].iter().enumerate() {
+                if let Some(key) = Self::cell_key(cell, x, span, theme) {
+                    let _ = atlas.request(&key);
+                }
+            }
+        }
+    }
+
     fn paint_frame(&mut self, app: &App, theme: &Theme, force_full: bool) {
         if unsafe { self.target.CheckWindowState() } == D2D1_WINDOW_STATE_OCCLUDED {
             return;
@@ -456,6 +537,21 @@ impl Renderer {
                     || self.damage.grid_rows != grid.rows()
             });
         self.build_mask(app, full);
+        // Glyph atlas (spec §20): queue every glyph this frame wants, render
+        // the new tiles into the atlas bitmap, then paint the frame with
+        // blits. `render_pending` runs *before* the target's `BeginDraw`:
+        // the atlas is its own draw session.
+        let rows = app.active_tab().map_or(0, |tab| tab.pane().grid().rows());
+        let cols = app.active_tab().map_or(0, |tab| {
+            (tab.pane().grid().cols()).min((width / self.metrics.cell_width).floor() as usize)
+        });
+        let mut atlas = self.ensure_atlas().then(|| self.atlas.take()).flatten();
+        if let Some(atlas) = atlas.as_mut() {
+            if let Some(tab) = app.active_tab() {
+                self.collect_atlas_tiles(atlas, tab.pane(), rows, cols, theme);
+            }
+            atlas.render_pending(&self.formats, self.metrics.text_height);
+        }
         unsafe { self.target.BeginDraw() };
         if full {
             self.fill_rect(0.0, 0.0, width, height, theme.background);
@@ -464,8 +560,6 @@ impl Renderer {
         if let Some(tab) = app.active_tab() {
             let pane = tab.pane();
             let grid = pane.grid();
-            let rows = grid.rows();
-            let cols = (grid.cols()).min((width / self.metrics.cell_width).floor() as usize);
             for y in 0..rows {
                 if !self.mask[y] {
                     continue;
@@ -482,12 +576,14 @@ impl Renderer {
                     theme.background,
                 );
                 self.paint_row_backgrounds(y, cells, theme);
-                self.paint_row_selection(y, grid.abs_of_view(y), n, pane.selection(), theme);
-                self.paint_row_text(y, cells, theme);
+                let span = Self::row_selection(pane, y, n);
+                self.paint_row_selection(y, span, theme);
+                self.paint_row_text(y, cells, span, theme);
                 self.paint_row_decorations(y, cells, theme);
             }
             self.paint_cursor(pane, grid, theme);
         }
+        self.atlas = atlas;
         if self.tab_bar_height > 0.0 {
             self.paint_tab_bar(app, theme, width);
         }
@@ -497,10 +593,14 @@ impl Renderer {
         };
         // EndDraw flushes the frame; a failure here drops the frame only
         // (NFR-216): log it, keep the damage flags set, and let the next
-        // paint start from a full repaint.
+        // paint start from a full repaint. The target's device-dependent
+        // resources (atlas, brushes) go with it and are recreated.
         if unsafe { self.target.EndDraw(None, None) }.is_err() {
             eprintln!("rusttyterm: Direct2D EndDraw failed");
             self.damage.painted = false;
+            self.atlas = None;
+            self.atlas_failed = false;
+            self.brushes.clear();
             return;
         }
         if let Some(tab) = app.active_tab() {
@@ -584,23 +684,23 @@ impl Renderer {
         out
     }
 
+    /// The mouse-selection column span painted on viewport row `y`
+    /// (`None` when the row has no selection). Computed once per row in
+    /// [`Renderer::paint_frame`] and shared by the overlay fill and the
+    /// glyph keys, so a blitted tile's baked highlight and the overlay
+    /// cannot disagree.
+    fn row_selection(pane: &Pane, y: usize, n_cols: usize) -> Option<(usize, usize)> {
+        let abs = pane.grid().abs_of_view(y)?;
+        let (lo, hi) = pane.selection()?.cols_on(abs, n_cols)?;
+        (hi > lo).then_some((lo, hi))
+    }
+
     /// Fill the mouse-selection span on viewport row `y` (drawn between
     /// the row background and the row text, so glyphs stay legible).
-    /// `abs` is the row's absolute line id; `n_cols` is the painted width.
-    fn paint_row_selection(
-        &mut self,
-        y: usize,
-        abs: Option<usize>,
-        n_cols: usize,
-        sel: Option<crate::selection::Selection>,
-        theme: &Theme,
-    ) {
-        let Some((lo, hi)) = sel.and_then(|s| abs.and_then(|a| s.cols_on(a, n_cols))) else {
+    fn paint_row_selection(&mut self, y: usize, span: Option<(usize, usize)>, theme: &Theme) {
+        let Some((lo, hi)) = span else {
             return;
         };
-        if hi <= lo {
-            return;
-        }
         let top = self.tab_bar_height + y as f32 * self.metrics.cell_height;
         self.fill_rect(
             lo as f32 * self.metrics.cell_width,
@@ -744,18 +844,43 @@ impl Renderer {
         }
     }
 
-    /// Paint one row's glyphs by runs of identical style + colour. The
-    /// UTF-16 text is built into the reused `self.utf16` buffer: the hot
-    /// path allocates nothing per frame (NFR-113).
-    fn paint_row_text(&mut self, y: usize, cells: &[Cell], theme: &Theme) {
+    /// Paint one row's glyphs. With an atlas, a cell whose tile is already
+    /// rendered is a single `DrawBitmap`; glyphs the atlas has not finished
+    /// yet fall back to style+colour runs of `DrawText`. The UTF-16 text is
+    /// built into the reused `self.utf16` buffer: the hot path allocates
+    /// nothing per frame (NFR-113).
+    fn paint_row_text(
+        &mut self,
+        y: usize,
+        cells: &[Cell],
+        span: Option<(usize, usize)>,
+        theme: &Theme,
+    ) {
         let cw = self.metrics.cell_width;
         let ch = self.metrics.cell_height;
         let y_top = self.tab_bar_height + y as f32 * ch + (ch - self.metrics.text_height) / 2.0;
+        let atlas = self.atlas.take();
         let mut units = std::mem::take(&mut self.utf16);
         let mut i = 0;
         while i < cells.len() {
             let cell = &cells[i];
             if cell.char == ' ' || cell.attributes.contains(CellAttribute::HIDDEN) {
+                i += 1;
+                continue;
+            }
+            let key = Self::cell_key(cell, i, span, theme);
+            let tile = key
+                .as_ref()
+                .and_then(|key| atlas.as_ref().and_then(|atlas| atlas.lookup(key)));
+            if let Some(tile) = tile {
+                if let Some(atlas) = atlas.as_ref() {
+                    self.blit_glyph(
+                        atlas,
+                        tile,
+                        i as f32 * cw,
+                        self.tab_bar_height + y as f32 * ch,
+                    );
+                }
                 i += 1;
                 continue;
             }
@@ -769,6 +894,16 @@ impl Renderer {
                     || next.attributes != attrs
                     || Self::effective_colors(next, theme).0 != fg
                 {
+                    break;
+                }
+                // A neighbour with a ready tile is blitted on its own: do
+                // not fold it into the text run.
+                let blitted = Self::cell_key(next, end, span, theme).is_some_and(|key| {
+                    atlas
+                        .as_ref()
+                        .is_some_and(|atlas| atlas.lookup(&key).is_some())
+                });
+                if blitted {
                     break;
                 }
                 end += 1;
@@ -806,6 +941,40 @@ impl Renderer {
         }
         units.clear();
         self.utf16 = units;
+        self.atlas = atlas;
+    }
+
+    /// Blit one cached tile into the cell box at `left`/`top`.
+    fn blit_glyph(&self, atlas: &GlyphAtlas, tile: Tile, left: f32, top: f32) {
+        atlas.blit(
+            &self.target,
+            tile,
+            left,
+            top,
+            self.metrics.cell_width,
+            self.metrics.cell_height,
+        );
+    }
+
+    /// Atlas key for one cell: its character, text format, and effective
+    /// colours, with the mouse-selection highlight baked into the
+    /// background. `None` for cells that carry no glyph.
+    fn cell_key(
+        cell: &Cell,
+        x: usize,
+        span: Option<(usize, usize)>,
+        theme: &Theme,
+    ) -> Option<GlyphKey> {
+        if cell.char == ' ' || cell.attributes.contains(CellAttribute::HIDDEN) {
+            return None;
+        }
+        let (fg, bg) = Self::effective_colors(cell, theme);
+        let bg = match span {
+            Some((lo, hi)) if x >= lo && x < hi => theme.selection,
+            _ => bg,
+        };
+        let format = u8::try_from(format_index(cell.attributes)).unwrap_or(0);
+        Some(GlyphKey::new(cell.char, format, fg, bg))
     }
 
     fn paint_row_decorations(&mut self, y: usize, cells: &[Cell], theme: &Theme) {

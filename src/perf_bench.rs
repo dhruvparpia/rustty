@@ -10,6 +10,8 @@
 //! "no allocations in the render hot path" rule shows up as a number in the
 //! report instead of as a code-reading exercise. Direct2D's own heap is not
 //! Rust's allocator, so what is measured here is this crate's hot path.
+//! The glyph-atlas counters come from [`crate::render::Renderer::atlas_stats`]:
+//! they show the frames where the atlas rendered tiles (cache misses).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -191,9 +193,26 @@ fn present_floor(app: &mut App, renderer: &mut Renderer, theme: &Theme) -> Durat
     floor
 }
 
+/// Warm the renderer up: fill the reused buffers (mask, tab-bar titles,
+/// UTF-16 scratch, brushes) and bake the tiles the benchmark lines use.
+///
+/// The glyph atlas bakes one tile per (character, style, fg, bg), so a
+/// priming screen of the benchmark's own alphabet closes the tile set: the
+/// frames that are measured afterwards ask for tiles that already exist.
+/// The buffers' *first* frame may grow a Vec; the steady state may not.
+fn prime_bench(app: &mut App, renderer: &mut Renderer, theme: &Theme) {
+    app.feed_active(lines(0, LINES_PER_FRAME).as_bytes());
+    let _ = app.take_dirty();
+    for _ in 0..3 {
+        renderer.paint_damage(app, theme);
+        app.clear_grid_damage();
+    }
+}
+
 /// Paint `frames` damage frames over `lines` worth of fresh output and
 /// report the wall time, the paint time (wall minus the `Present` floor),
-/// and the allocations the paint calls make (NFR-113/NFR-114).
+/// the allocations the paint calls make, and what the glyph atlas did while
+/// painting (NFR-113/NFR-114).
 fn paint_burst(
     app: &mut App,
     renderer: &mut Renderer,
@@ -201,22 +220,20 @@ fn paint_burst(
     frames: usize,
     floor: Duration,
 ) -> BenchReport {
-    // Warm the reused buffers first (mask, tab-bar titles, UTF-16 scratch,
-    // brushes): their first frame may grow a Vec, the steady state may not.
-    app.feed_active(b"warm-up\r\n");
-    let _ = app.take_dirty();
-    for _ in 0..3 {
-        renderer.paint_damage(app, theme);
-        app.clear_grid_damage();
-    }
+    prime_bench(app, renderer, theme);
 
     let mut wall = Duration::ZERO;
     let mut paint = Duration::ZERO;
     let mut worst = Duration::ZERO;
     let mut allocations = 0usize;
+    // The priming screen already used lines `0..LINES_PER_FRAME`, so the
+    // measured frames continue the numbering from there.
+    let mut index = LINES_PER_FRAME;
     let mut fed = 0usize;
+    let atlas_before = renderer.atlas_stats();
     for _ in 0..frames {
-        let chunk = lines(fed, LINES_PER_FRAME);
+        let chunk = lines(index, LINES_PER_FRAME);
+        index += LINES_PER_FRAME;
         fed += LINES_PER_FRAME;
         app.feed_active(chunk.as_bytes());
         let _ = app.take_dirty();
@@ -233,6 +250,7 @@ fn paint_burst(
         paint += frame_paint;
         worst = worst.max(frame_paint);
     }
+    let atlas = renderer.atlas_stats();
     BenchReport {
         frames,
         fed,
@@ -240,6 +258,9 @@ fn paint_burst(
         paint,
         worst,
         allocations,
+        tiles: atlas.tiles,
+        inserts: atlas.inserts.saturating_sub(atlas_before.inserts),
+        evictions: atlas.evictions.saturating_sub(atlas_before.evictions),
     }
 }
 
@@ -250,6 +271,13 @@ struct BenchReport {
     paint: Duration,
     worst: Duration,
     allocations: usize,
+    /// Glyph tiles living in the atlas at the end of the run (spec §20).
+    tiles: usize,
+    /// Tiles the atlas rendered during the measured frames: 0 in the steady
+    /// state, i.e. every glyph hit the cache.
+    inserts: u64,
+    /// Atlas clears during the measured frames (tile budget overflow).
+    evictions: u64,
 }
 
 impl BenchReport {
@@ -266,6 +294,10 @@ impl BenchReport {
             per_frame * 1_000.0,
             self.worst.as_secs_f64() * 1_000.0,
             self.allocations,
+        );
+        eprintln!(
+            "rusttyterm bench {label}: atlas {} tiles, {} new, {} evictions",
+            self.tiles, self.inserts, self.evictions,
         );
     }
 }
@@ -325,7 +357,8 @@ fn burst_of_10000_lines_paints_inside_the_budget() {
     let _ = unsafe { DestroyWindow(hwnd) };
 }
 
-/// NFR-113 hot-path rule: a steady-state damage frame allocates nothing.
+/// NFR-113 hot-path rules: a steady-state damage frame allocates nothing and
+/// renders no new glyph tiles (every glyph hits the atlas cache, spec §20).
 #[test]
 #[ignore = "needs a desktop session: cargo test --release -- --ignored"]
 fn damage_frames_allocate_nothing() {
@@ -342,6 +375,18 @@ fn damage_frames_allocate_nothing() {
         report.allocations, 0,
         "bench: the render hot path allocated {} times in {} frames (NFR-113)",
         report.allocations, report.frames,
+    );
+    assert_eq!(
+        report.inserts, 0,
+        "bench: the glyph atlas rendered {} new tiles in {} steady-state frames \
+         (NFR-113: a steady stream of output must hit the cache)",
+        report.inserts, report.frames,
+    );
+    assert_eq!(
+        report.evictions, 0,
+        "bench: the glyph atlas overflowed {} times in {} steady-state frames \
+         (NFR-113: {} tiles is inside the atlas' budget)",
+        report.evictions, report.frames, report.tiles,
     );
     let _ = unsafe { DestroyWindow(hwnd) };
 }
@@ -375,7 +420,12 @@ fn damage_frames_cover_only_the_dirty_rows() {
     renderer.paint_damage(&app, &theme);
     let damaged = renderer.last_mask_rows();
     app.clear_grid_damage();
+    let atlas = renderer.atlas_stats();
     eprintln!("rusttyterm bench damage rows: {damaged} of {rows}");
+    eprintln!(
+        "rusttyterm bench damage atlas: {} tiles, {} rendered, {} evictions",
+        atlas.tiles, atlas.inserts, atlas.evictions,
+    );
 
     assert!(
         damaged < rows / 2,

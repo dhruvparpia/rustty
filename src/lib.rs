@@ -14,6 +14,14 @@ pub mod app;
 pub mod color;
 pub mod config;
 pub mod grid;
+// Glyph atlas FFI boundary (spec §20 "custom glyph cache / custom font
+// atlas", §21): Direct2D calls on the atlas' bitmap render target.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "SPEC §20: the glyph atlas is a Direct2D COM FFI boundary"
+)]
+pub mod glyph_cache;
 // ConPTY FFI boundary (spec WIN-001). The crate-level `deny(unsafe_code)`
 // below is lifted only for this module, so every unsafe block in the crate
 // lives inside the FFI-boundary files.
