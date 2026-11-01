@@ -11,7 +11,7 @@ no web UI, no bundled interpreted runtime.
 > ConPTY shells in tabs, Direct2D/DirectWrite rendering with a glyph atlas,
 > mouse selection, clipboard, fullscreen, and a TOML config with theme presets.
 > `packaging/build-portable.ps1` builds the portable ZIP. Splits, search, and
-> native menus are built; session restore is not built yet.
+> native menus and mouse reporting are built; session restore is not built yet.
 > See [`ROADMAP.md`](ROADMAP.md) for what ships in each version.
 
 ## Vision
@@ -41,7 +41,7 @@ Full requirement set: `docs/SPEC.md` §13.
 | Version | Theme | Headline features |
 |---|---|---|
 | v0.1 (MVP) | Native terminal works | Tabs, ConPTY, Direct2D rendering, TOML config, keybindings |
-| v0.2 | Ghostty basics | Splits, search, native menus, themes, tab colors, ligatures, mouse reporting |
+| v0.2 | Ghostty basics | Splits, search, native menus, mouse reporting, themes, tab colors, ligatures |
 | v0.3 | Linux | Wayland (TBC) + X11 backends, Wayland protocol parity |
 | v0.4 | Ghostty parity | Full parity feature set |
 | v0.5+ | Ecosystem | Graphics protocols, plugin system, mobile/tablet |

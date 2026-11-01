@@ -33,6 +33,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   built-in shell/profile selector, theme selector, split commands, copy/paste,
   search, window controls, Preferences, About, and visible shortcuts
   (MENU-001..015).
+- Mouse reporting: `1000`/`1002`/`1003` click, drag, and motion modes; SGR and
+  urxvt coordinate encodings; press, release, drag, scroll, right-click context
+  menu, and middle-click reporting routing (MOUSE-006..013, PARSER-026,
+  TTY-020).
 
 ## [0.1.0] — v0.1 MVP (planned)
 

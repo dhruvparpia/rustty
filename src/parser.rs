@@ -8,7 +8,8 @@
 //!
 //! Out of MVP scope (spec §4): OSC 8 hyperlinks (payload consumed, so link
 //! text is swallowed), OSC 4/10/11 palette writes, OSC 52 clipboard,
-//! mouse-tracking sequences (accepted and ignored), soft reset (`CSI !p`).
+//! soft reset (`CSI !p`). Mouse tracking is decoded for reporting modes
+//! `1000`, `1002`, `1003`, `1006`, and `1015` (MOUSE-009..012).
 
 use crate::color::{Color, ansi_palette};
 use crate::grid::{Cell, CellAttribute, Grid};
@@ -60,6 +61,20 @@ struct SavedCursor {
     attrs: CellAttribute,
 }
 
+/// Mouse reporting protocol requested by the shell (MOUSE-009).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseProtocol {
+    /// Mouse reporting disabled.
+    #[default]
+    Off,
+    /// `1000`: button press/release.
+    Click,
+    /// `1002`: button press/release plus drags.
+    Drag,
+    /// `1003`: button press/release plus all motion.
+    Any,
+}
+
 /// Streaming VT parser plus the terminal state for one pane.
 #[derive(Debug, Clone)]
 pub struct Parser {
@@ -81,6 +96,12 @@ pub struct Parser {
     pub bracketed_paste: bool,
     /// `CSI ?1`: application cursor keys (the keyboard layer encodes keys).
     pub application_cursor_keys: bool,
+    /// `CSI ?1000/?1002/?1003`: requested mouse reporting protocol.
+    pub mouse_protocol: MouseProtocol,
+    /// `CSI ?1006`: SGR coordinate mouse encoding.
+    pub mouse_sgr_coordinates: bool,
+    /// `CSI ?1015`: urxvt coordinate mouse encoding.
+    pub mouse_urxvt_coordinates: bool,
     scroll_top: usize,
     /// `usize::MAX` until the first grid contact; [`Parser::fit`] clamps it.
     scroll_bottom: usize,
@@ -109,6 +130,9 @@ impl Parser {
             auto_wrap: true,
             bracketed_paste: false,
             application_cursor_keys: false,
+            mouse_protocol: MouseProtocol::Off,
+            mouse_sgr_coordinates: false,
+            mouse_urxvt_coordinates: false,
             scroll_top: 0,
             scroll_bottom: usize::MAX,
             saved: None,
@@ -662,6 +686,29 @@ impl Parser {
                         self.restore_saved();
                     }
                 }
+                1000 | 1002 | 1003 => {
+                    if m == 1000 {
+                        self.mouse_protocol = if set {
+                            MouseProtocol::Click
+                        } else {
+                            MouseProtocol::Off
+                        };
+                    } else if m == 1002 {
+                        self.mouse_protocol = if set {
+                            MouseProtocol::Drag
+                        } else {
+                            self.mouse_protocol
+                        };
+                    } else {
+                        self.mouse_protocol = if set {
+                            MouseProtocol::Any
+                        } else {
+                            self.mouse_protocol
+                        };
+                    }
+                }
+                1006 => self.mouse_sgr_coordinates = set,
+                1015 => self.mouse_urxvt_coordinates = set,
                 2004 => self.bracketed_paste = set,
                 _ => {}
             }
@@ -815,6 +862,34 @@ pub fn ansi256(n: u8) -> Color {
 impl Default for Parser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Encode one mouse report for the pane's active protocol.
+#[must_use]
+pub fn mouse_report_bytes(
+    button: u16,
+    col: usize,
+    row: usize,
+    release: bool,
+    sgr: bool,
+    urxvt: bool,
+) -> Vec<u8> {
+    let col = col.saturating_add(1);
+    let row = row.saturating_add(1);
+    if sgr {
+        format!("[{button};{col};{row}{}", if release { 'm' } else { 'M' }).into_bytes()
+    } else if urxvt {
+        format!("[{};{col};{row}M", button.saturating_add(32)).into_bytes()
+    } else {
+        vec![
+            0x1b,
+            b'[',
+            b'M',
+            32u8.saturating_add(u8::try_from(button).unwrap_or(0)),
+            33u8.saturating_add(u8::try_from(col).unwrap_or(255)),
+            33u8.saturating_add(u8::try_from(row).unwrap_or(255)),
+        ]
     }
 }
 

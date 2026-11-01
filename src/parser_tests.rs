@@ -383,4 +383,26 @@ mod tests {
         assert!(!p.advance(&mut g, b"\x1b[2;2H").printed);
         assert!(p.advance(&mut g, b"x").printed);
     }
+    #[test]
+    fn mouse_reporting_modes_and_encoding() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        feed(&mut p, &mut g, "[?1000h[?1006h");
+        assert_eq!(p.mouse_protocol, MouseProtocol::Click);
+        assert!(p.mouse_sgr_coordinates);
+        feed(&mut p, &mut g, "[?1002h[?1003h");
+        assert_eq!(p.mouse_protocol, MouseProtocol::Any);
+        assert_eq!(
+            mouse_report_bytes(0, 2, 3, false, true, false),
+            b"[0;3;4M".to_vec()
+        );
+        assert_eq!(
+            mouse_report_bytes(0, 2, 3, true, true, false),
+            b"[0;3;4m".to_vec()
+        );
+        assert_eq!(
+            mouse_report_bytes(2, 0, 0, false, false, true),
+            b"[34;1;1M".to_vec()
+        );
+    }
 }

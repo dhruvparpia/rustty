@@ -291,6 +291,14 @@ impl App {
         }
     }
 
+    /// Route bytes to pane `idx` in the active tab.
+    pub fn send_input_pane(&mut self, idx: usize, bytes: &[u8]) -> Result<(), ShellError> {
+        match self.active_tab_mut().and_then(|tab| tab.pane_at_mut(idx)) {
+            Some(mut pane) => pane.send_input(bytes),
+            None => Err(ShellError::NotRunning),
+        }
+    }
+
     // ---- all-pane operations -------------------------------------------
 
     /// Drain every pane's shell reader events (the UI's periodic poll).

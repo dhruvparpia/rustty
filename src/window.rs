@@ -44,17 +44,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClientRect,
-    GetCursorPos, GetMenu, GetMessageW, GetSubMenu, GetWindowLongPtrW, GetWindowRect, HICON, HMENU,
-    IDC_ARROW, IDC_IBEAM, IDYES, IsZoomed, LoadCursorW, MB_DEFBUTTON2, MB_ICONWARNING, MB_OK,
-    MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOZORDER, SetCursor,
-    SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_COPY, WM_CREATE,
-    WM_DESTROY, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE,
+    CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    DestroyWindow, DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
+    GetClientRect, GetCursorPos, GetMenu, GetMessageW, GetSubMenu, GetWindowLongPtrW,
+    GetWindowRect, HICON, HMENU, IDC_ARROW, IDC_IBEAM, IDYES, IsZoomed, LoadCursorW, MB_DEFBUTTON2,
+    MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, PostMessageW,
+    PostQuitMessage, RegisterClassW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+    SWP_FRAMECHANGED, SWP_NOZORDER, SetCursor, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    SetWindowTextW, ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
+    WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP,
     WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
@@ -65,7 +66,7 @@ use crate::clipboard;
 use crate::config::{self, Config, FontConfig, TabBar};
 use crate::keyboard::{self, Modifiers};
 use crate::pane::Pane;
-use crate::parser::bracketed_paste_bytes;
+use crate::parser::{MouseProtocol, bracketed_paste_bytes, mouse_report_bytes};
 use crate::render::{CellMetrics, Renderer, measure_cells, px_to_dips};
 use crate::search::SearchState;
 use crate::selection::{Pos, Selection};
@@ -629,12 +630,25 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            handle_lbutton_up(hwnd);
+            handle_lbutton_up(hwnd, lparam);
             LRESULT(0)
         }
+        WM_RBUTTONDOWN => {
+            handle_rbutton_down(hwnd, lparam);
+            LRESULT(0)
+        }
+        WM_RBUTTONUP => LRESULT(0),
         WM_MBUTTONDOWN => {
-            // Middle-click paste (xterm convention, WIN-004).
-            paste_clipboard(hwnd);
+            if handle_mbutton_down(hwnd, lparam) {
+                LRESULT(0)
+            } else {
+                // Middle-click paste (xterm convention, WIN-004).
+                paste_clipboard(hwnd);
+                LRESULT(0)
+            }
+        }
+        WM_CONTEXTMENU => {
+            handle_context_menu(hwnd, lparam);
             LRESULT(0)
         }
         WM_SETCURSOR => {
@@ -1096,14 +1110,40 @@ fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32,
     };
     let _ = unsafe { ScreenToClient(hwnd, &mut pt) };
-    let Some(s) = state_mut(hwnd) else { return };
-    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
-    let pos = (
-        px_to_dips(pt.x.max(0) as u32, dpi),
-        px_to_dips(pt.y.max(0) as u32, dpi),
-    );
-    let pane = cell_at(s, pos.0, pos.1).map(|(idx, _, _)| idx);
-    if let Some(idx) = pane
+    let (cell, proto, sgr, urxvt) = {
+        let Some(s) = state_mut(hwnd) else { return };
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+        let pos = (
+            px_to_dips(pt.x.max(0) as u32, dpi),
+            px_to_dips(pt.y.max(0) as u32, dpi),
+        );
+        let cell = cell_at(s, pos.0, pos.1);
+        let (proto, sgr, urxvt) = cell.map_or((MouseProtocol::Off, false, false), |(idx, _, _)| {
+            s.app.active_tab().and_then(|t| t.pane_at(idx)).map_or(
+                (MouseProtocol::Off, false, false),
+                |p| {
+                    (
+                        p.parser().mouse_protocol,
+                        p.parser().mouse_sgr_coordinates,
+                        p.parser().mouse_urxvt_coordinates,
+                    )
+                },
+            )
+        });
+        (cell, proto, sgr, urxvt)
+    };
+    if let Some((idx, row, col)) = cell
+        && proto != MouseProtocol::Off
+    {
+        let bytes =
+            mouse_report_bytes(if delta < 0 { 64 } else { 65 }, col, row, false, sgr, urxvt);
+        if let Some(s) = state_mut(hwnd) {
+            let _ = s.app.send_input_pane(idx, &bytes);
+        }
+        return;
+    }
+    if let Some((idx, _, _)) = cell
+        && let Some(s) = state_mut(hwnd)
         && let Some(mut pane) = s.app.active_tab_mut().and_then(|t| t.pane_at_mut(idx))
     {
         let grid = pane.grid_mut();
@@ -1169,6 +1209,94 @@ fn abs_row_in_pane(s: &WindowState, idx: usize, row: usize) -> usize {
 /// WM_LBUTTONDOWN: tab bar hit (switch tab / press `+`) or focus the pane
 /// under the pointer and start a text-selection drag anchored on the
 /// clicked cell (WIN-004, SPLIT-003).
+/// Mouse protocol active under the pointer (MOUSE-009..012).
+fn mouse_protocol_at(s: &WindowState, idx: usize) -> MouseProtocol {
+    s.app
+        .active_tab()
+        .and_then(|t| t.pane_at(idx))
+        .map_or(MouseProtocol::Off, |p| p.parser().mouse_protocol)
+}
+
+/// Send a mouse report to pane `idx` if the pane requested reporting.
+fn send_mouse_report(
+    hwnd: HWND,
+    idx: usize,
+    row: usize,
+    col: usize,
+    button: u16,
+    release: bool,
+    drag: bool,
+) {
+    let (sgr, urxvt) = state_ref(hwnd).map_or((false, false), |s| {
+        s.app
+            .active_tab()
+            .and_then(|t| t.pane_at(idx))
+            .map_or((false, false), |p| {
+                (
+                    p.parser().mouse_sgr_coordinates,
+                    p.parser().mouse_urxvt_coordinates,
+                )
+            })
+    });
+    let code = button.saturating_add(if drag { 32 } else { 0 });
+    let bytes = mouse_report_bytes(code, col, row, release, sgr, urxvt);
+    if let Some(s) = state_mut(hwnd) {
+        let _ = s.app.send_input_pane(idx, &bytes);
+    }
+}
+
+fn mouse_cell(hwnd: HWND, lparam: LPARAM) -> Option<(usize, usize, usize)> {
+    let (x, y) = cursor_dips(hwnd, lparam);
+    state_ref(hwnd).and_then(|s| cell_at(s, x, y))
+}
+
+fn handle_rbutton_down(hwnd: HWND, lparam: LPARAM) {
+    if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
+        && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
+    {
+        send_mouse_report(hwnd, idx, row, col, 2, false, false);
+        return;
+    }
+    handle_context_menu(hwnd, LPARAM(0));
+}
+
+fn handle_mbutton_down(hwnd: HWND, lparam: LPARAM) -> bool {
+    if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
+        && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
+    {
+        send_mouse_report(hwnd, idx, row, col, 1, false, false);
+        return true;
+    }
+    false
+}
+
+fn handle_context_menu(hwnd: HWND, lparam: LPARAM) {
+    let mut pt = POINT {
+        x: (lparam.0 & 0xFFFF) as u16 as i16 as i32,
+        y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32,
+    };
+    if pt.x < 0 || pt.y < 0 {
+        let _ = unsafe { GetCursorPos(&mut pt) };
+    }
+    unsafe {
+        let menu = match CreatePopupMenu() {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let _ = append_menu_item(menu, "Copy	Ctrl+Shift+C", MENU_COPY);
+        let _ = append_menu_item(menu, "Paste	Ctrl+Shift+V", MENU_PASTE);
+        let _ = append_menu_separator(menu);
+        let _ = append_menu_item(menu, "Search	Ctrl+F", MENU_SEARCH);
+        let _ = append_menu_item(menu, "Split Right	Ctrl+Shift+Enter", MENU_SPLIT_RIGHT);
+        let _ = append_menu_item(menu, "Split Below	Ctrl+Shift+-", MENU_SPLIT_DOWN);
+        let _ = append_menu_separator(menu);
+        let _ = append_menu_item(menu, "New Tab	Ctrl+Shift+T", MENU_NEW_TAB);
+        let _ = append_menu_item(menu, "Close Tab	Ctrl+Shift+W", MENU_CLOSE_TAB);
+        let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, None, hwnd, None);
+        let _ = DestroyMenu(menu);
+    }
+}
+
 fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
     let (x, y) = cursor_dips(hwnd, lparam);
     let bar = state_ref(hwnd).map_or(TAB_BAR_HEIGHT, |s| s.bar_height());
@@ -1201,6 +1329,10 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
     // follow-up selection drag then belong to that pane.
     if let Some(s) = state_mut(hwnd) {
         s.app.focus_pane(idx);
+    }
+    if state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off) {
+        send_mouse_report(hwnd, idx, a.row, a.col, 0, false, false);
+        return;
     }
     // Synthetic double-click detection: the system coalesces real mouse
     // clicks into WM_LBUTTONDBLCLK, but injected/synthesized input never
@@ -1276,10 +1408,33 @@ fn select_word(hwnd: HWND, idx: usize, abs: usize, col: usize) {
 /// pane; crossing a border clamps to that pane's edges).
 fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     const MK_LBUTTON: usize = 0x01;
+    const MK_MBUTTON: usize = 0x10;
+    const MK_RBUTTON: usize = 0x02;
+    let (x, y) = cursor_dips(hwnd, lparam);
+    if let Some((idx, row, col)) = state_ref(hwnd).and_then(|s| cell_at(s, x, y))
+        && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
+    {
+        let protocol = state_ref(hwnd).map_or(MouseProtocol::Off, |s| mouse_protocol_at(s, idx));
+        let buttons = wparam.0;
+        let button = if buttons & MK_LBUTTON != 0 {
+            0
+        } else if buttons & MK_MBUTTON != 0 {
+            1
+        } else if buttons & MK_RBUTTON != 0 {
+            2
+        } else {
+            3
+        };
+        let press = button != 3;
+        let drag = protocol == MouseProtocol::Drag || protocol == MouseProtocol::Any;
+        if protocol == MouseProtocol::Any || (press && drag) {
+            send_mouse_report(hwnd, idx, row, col, button, false, press);
+        }
+        return;
+    }
     if wparam.0 & MK_LBUTTON == 0 {
         return;
     }
-    let (x, y) = cursor_dips(hwnd, lparam);
     let Some(s) = state_mut(hwnd) else { return };
     let Some((a, idx)) = s.drag_anchor else {
         return;
@@ -1308,7 +1463,12 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
 
 /// WM_LBUTTONUP: end the selection drag (the selection stays visible
 /// and copyable until the next click).
-fn handle_lbutton_up(hwnd: HWND) {
+fn handle_lbutton_up(hwnd: HWND, lparam: LPARAM) {
+    if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
+        && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
+    {
+        send_mouse_report(hwnd, idx, row, col, 0, true, false);
+    }
     let _ = unsafe { ReleaseCapture() };
     if let Some(s) = state_mut(hwnd) {
         s.drag_anchor = None;
