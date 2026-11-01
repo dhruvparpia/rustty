@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use rusttyterm::config::Config;
 use rusttyterm::shell::SpawnOptions;
-use rusttyterm::theme::Theme;
+use rusttyterm::theme;
 
 #[cfg(windows)]
 fn probe_shell(cfg: &Config) -> SpawnOptions {
@@ -59,18 +59,19 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let theme = match Theme::preset(&cfg.theme) {
-        Some(theme) => theme,
-        None => {
-            // THEME-014: an unknown preset falls back to predawn.
-            eprintln!(
-                "rusttyterm: unknown theme {:?} (known: {}), using predawn",
-                cfg.theme,
-                Theme::preset_names().join(", ")
-            );
-            Theme::predawn()
-        }
-    };
+    // THEME-009/013/014: preset name, then themes/<name>.toml next to the
+    // config, then the [theme] colour overrides. Problems are reported and
+    // the nearest working theme is used.
+    let theme_dir =
+        rusttyterm::config::config_path().and_then(|p| p.parent().map(|dir| dir.join("themes")));
+    let (theme, problems) = theme::resolve_configured(
+        cfg.theme.name(),
+        &cfg.theme.overrides(),
+        theme_dir.as_deref(),
+    );
+    for problem in &problems {
+        eprintln!("rusttyterm: {problem}");
+    }
     let spawn = probe_shell(&cfg);
     match rusttyterm::window::run(&cfg, theme, spawn) {
         Ok(()) => ExitCode::SUCCESS,
@@ -90,7 +91,7 @@ fn main() -> ExitCode {
                 env!("CARGO_PKG_VERSION"),
                 cfg.window.cols,
                 cfg.window.rows,
-                cfg.theme,
+                cfg.theme.name(),
             );
             ExitCode::SUCCESS
         }

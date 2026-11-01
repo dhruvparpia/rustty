@@ -594,6 +594,8 @@ struct WindowState {
     /// Index of the selected built-in profile (MENU-008). New tabs and
     /// split panes spawn it.
     profile: usize,
+    /// `themes/` beside the config, for per-profile theme files (THEME-009/011).
+    theme_dir: Option<std::path::PathBuf>,
 }
 
 impl WindowState {
@@ -2075,12 +2077,23 @@ fn tab_profile(s: &WindowState) -> ProfileSpec {
         .unwrap_or_else(|| active_profile(s))
 }
 
-/// THEME-011: a profile's theme is the window theme while its tab lives.
+/// THEME-011: a profile's theme is the window theme while its tab lives. The
+/// name may be a preset or a `themes/<name>.toml` file.
 fn apply_profile_theme(s: &mut WindowState, spec: &ProfileSpec) {
     let Some(name) = spec.theme.as_deref() else {
         return;
     };
-    s.theme = Theme::preset(name).unwrap_or_default();
+    let (theme, problems) =
+        theme::resolve_configured(name, &theme::ThemeFile::default(), s.theme_dir.as_deref());
+    for problem in &problems {
+        eprintln!("rusttyterm: {problem}");
+    }
+    s.theme = theme;
+}
+
+/// The `themes/` directory beside the config file, if the config has a path.
+fn theme_dir_from_config() -> Option<std::path::PathBuf> {
+    crate::config::config_path().and_then(|p| p.parent().map(|dir| dir.join("themes")))
 }
 
 /// THEME-011 for the tab the user just switched to.
@@ -2405,6 +2418,7 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         renaming: None,
         tab_drag: None,
         blink_on: true,
+        theme_dir: theme_dir_from_config(),
         renderer: None,
         metrics,
         timer_id: 0,

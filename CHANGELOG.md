@@ -58,8 +58,20 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `[split] border` (CONFIG-013), `[window.padding]` — the grid is inset by it
   while the tab bar stays full width (WINDOW-011) — and `[tab-bar]` placement,
   `show-profiles` and `close-button` (CONFIG-012).
+- `theme = "..."` now also names a theme file: `themes/<name>.toml` beside the
+  config is loaded, and `[theme]` is a table of per-colour overrides
+  (`background`, `foreground`, `cursor`, `selection`, `search-highlight`,
+  `tab-bar`, `tab-active`, `split-border`, `split-focus`, `palette`) applied on
+  top of it (CONFIG-003, THEME-009). An unknown key in a theme file, a palette
+  that is not 16 colors, and a color that is not `#RRGGBB` are reported on
+  stderr and skipped, keeping the color that already worked (THEME-013/014).
 
 ### Fixed
+
+- The v0.1 "CLI stub" never parsed arguments, so no `--config`/`--theme` flag
+  existed: the config always comes from the file. CONFIG-021 (config under
+  `%APPDATA%`, or beside the exe in portable mode) and CONFIG-022 (no admin)
+  are what the spec asks for, and they work.
 - `[[profile]]` entries in the config were rejected: the parser read them from
   a `profiles` key while `docs/SPEC.md` spells it `profile`. The spec spelling
   is now the key, and `profiles` is accepted as an alias.

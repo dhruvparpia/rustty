@@ -59,7 +59,7 @@ fn tabs_add_select_close_round_trip() {
 #[test]
 fn config_fills_missing_keys_with_defaults() {
     let cfg = Config::parse("theme = \"one-dark\"").unwrap();
-    assert_eq!(cfg.theme, "one-dark");
+    assert_eq!(cfg.theme.name(), "one-dark");
     assert_eq!(cfg.window.cols, 80, "omitted keys get defaults");
     assert_eq!(cfg.window.rows, 24);
     assert_eq!(cfg.scrollback, 1000);

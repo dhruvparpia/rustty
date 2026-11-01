@@ -506,13 +506,49 @@ pub fn normalize_key_spec(spec: &str) -> String {
         .join("+")
 }
 
+/// The `theme` key: a preset/theme-file name, or a `[theme]` table of colour
+/// overrides (CONFIG-002/003, THEME-009).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ThemeSetting {
+    /// Preset name, or the name of `themes/<name>.toml`.
+    Name(String),
+    /// `[theme]` table; `name` inside it picks the base theme.
+    Table(Box<crate::theme::ThemeFile>),
+}
+
+impl ThemeSetting {
+    /// Name of the base theme (`""` when the table names none).
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Name(name) => name,
+            Self::Table(file) => file.name.as_deref().unwrap_or(""),
+        }
+    }
+
+    /// Colour overrides the key carries (empty for the string form).
+    #[must_use]
+    pub fn overrides(&self) -> crate::theme::ThemeFile {
+        match self {
+            Self::Name(_) => crate::theme::ThemeFile::default(),
+            Self::Table(file) => file.as_ref().clone(),
+        }
+    }
+
+    /// Point at a theme by name (theme cycling, `next-theme`).
+    pub fn set_name(&mut self, name: &str) {
+        *self = Self::Name(name.to_string());
+    }
+}
+
 /// The full configuration tree (SPEC §13 top-level fields).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Theme preset name (SPEC `theme`).
-    #[serde(default = "default_theme")]
-    pub theme: String,
+    /// Theme: preset name, `themes/<name>.toml`, and/or colour overrides.
+    #[serde(default = "default_theme_setting")]
+    pub theme: ThemeSetting,
     /// Font family (SPEC `font`).
     #[serde(default = "default_font")]
     pub font: String,
@@ -569,7 +605,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            theme: default_theme(),
+            theme: default_theme_setting(),
             font: default_font(),
             font_size: default_font_size(),
             line_height: default_line_height(),
@@ -619,8 +655,8 @@ impl PartialEq for Config {
 
 impl Eq for Config {}
 
-fn default_theme() -> String {
-    String::from(DEFAULT_THEME)
+fn default_theme_setting() -> ThemeSetting {
+    ThemeSetting::Name(String::from(DEFAULT_THEME))
 }
 
 fn default_font() -> String {
@@ -841,11 +877,32 @@ mod tests {
     fn empty_config_uses_defaults() {
         let cfg = Config::parse("").expect_result();
         assert_eq!(cfg, Config::default());
-        assert_eq!(cfg.theme, "predawn");
+        assert_eq!(cfg.theme.name(), "predawn");
         assert_eq!(cfg.font, DEFAULT_FONT);
         assert_eq!(cfg.font_size, DEFAULT_FONT_SIZE);
         assert_eq!(cfg.scrollback, DEFAULT_SCROLLBACK);
         assert_eq!(cfg.tab_bar.visible, TabBar::Always);
+    }
+
+    #[test]
+    fn theme_accepts_a_name_and_a_table_of_overrides() {
+        let cfg = Config::parse(
+            "theme = \"one-dark\"
+",
+        )
+        .expect_result();
+        assert_eq!(cfg.theme.name(), "one-dark");
+        assert!(cfg.theme.overrides().background.is_none());
+
+        let cfg = Config::parse(
+            "[theme]
+name = \"gruvbox-dark\"
+background = \"#000000\"
+",
+        )
+        .expect_result();
+        assert_eq!(cfg.theme.name(), "gruvbox-dark");
+        assert_eq!(cfg.theme.overrides().background.as_deref(), Some("#000000"));
     }
 
     #[test]
@@ -854,7 +911,7 @@ mod tests {
             "theme = \"gruvbox-dark\"\nfont = \"Consolas\"\nfont-size = 14\nline-height = 1.4\nscrollback = 5000\ntab-bar = \"auto\"\n",
         )
         .expect_result();
-        assert_eq!(cfg.theme, "gruvbox-dark");
+        assert_eq!(cfg.theme.name(), "gruvbox-dark");
         assert_eq!(cfg.font, "Consolas");
         assert_eq!(cfg.font_size, 14.0);
         assert_eq!(cfg.line_height, 1.4);

@@ -1,14 +1,22 @@
 # rusttyterm config — %APPDATA%\rusttyterm\config.toml
 # (portable mode: a `config.toml` next to rusttyterm.exe wins)
 #
-# Every key below is optional; the defaults shown are what the app uses
-# when the file or a key is missing. Unknown keys are rejected with an
-# error at startup (no silent clamps: a bad value is an error, not a
-# surprise). Keep the plain keys above the first `[section]` header —
-# in TOML a key after a header belongs to that section.
+# Every key below is optional; the defaults shown are what the app uses when
+# the file or a key is missing. Unknown keys are rejected with an error at
+# startup (no silent clamps: a bad value is an error, not a surprise). Keep
+# the plain keys above the first `[section]` header — in TOML a key written
+# after a header belongs to that section.
+#
+# Not read from config yet: window position, maximized/fullscreen start,
+# initial directories, session restore.
 
-# Built-in theme preset. Known: predawn, catppuccin-mocha, gruvbox-dark,
-# one-dark, solarized-dark. An unknown name warns and falls back to predawn.
+# ---------------------------------------------------------------------------
+# Plain keys — write these before any `[section]` header.
+# ---------------------------------------------------------------------------
+
+# Theme preset. Known: predawn, catppuccin-mocha, gruvbox-dark, one-dark,
+# solarized-dark. An unknown name warns and falls back to predawn. A [theme]
+# table (below) can name a theme file and override single colors.
 theme = "predawn"
 
 # Font family, as installed on the system.
@@ -18,95 +26,180 @@ font = "Cascadia Mono"
 font-size = 11
 
 # Line height as a multiple of the font's natural height, 0.5..4.0.
-line-height = 1.2
+line-height = 1.25
 
-# Scrollback lines kept per tab, 0..1000000.
-scrollback = 1000
+# Ligature font features (OTF tags), comma separated.
+font-features = "calt,liga"
 
-# OpenType ligatures (calt/liga/clig/dlig).
-ligatures = true
+# Rows of scrollback per tab, 0..1_000_000.
+scrollback = 10000
 
-# Extra DirectWrite font features, "tag index" pairs, e.g. "calt 0 ss01 1".
-font-features = ""
+# Show the tab bar: always, auto (hide with one tab), hidden. A [tab-bar]
+# table (below) carries the rest of the tab-bar options.
+tab-bar = "auto"
 
-# Window opacity in percent, 1..100. 100 keeps the window non-layered.
+# Profile used for the first tab (CONFIG-024, CONFIG-028).
+starting-profile = "Git Bash"
+
+# Window opacity, 10..100 (100 = solid).
 opacity = 100
 
-# Focused cursor: "block", "underline" or "bar".
+# Cursor: block | vertical-bar | underline, and whether it blinks.
 cursor-shape = "block"
-
-# Blink the focused cursor.
 cursor-blink = true
 
-# Copy a mouse selection to the clipboard as soon as the button is released.
-copy-on-select = false
+# A left-drag release also copies the selection (CONFIG-008).
+copy-on-select = true
 
-# Profile the first tab uses; empty = the first profile in the list below.
-starting-profile = ""
+# ---------------------------------------------------------------------------
+# Theme (CONFIG-002/003, THEME-009/013/014)
+# ---------------------------------------------------------------------------
+# A [theme] table replaces the plain `theme` key. `name` picks the base: a
+# preset, or the name of themes\<name>.toml beside this file (that file may
+# set any of the keys below). Colors written here win over the file. Colors
+# are "#RRGGBB", with or without the '#'; 3-digit forms, 0x prefixes and
+# color names are rejected. An unknown key, a color that does not parse, and
+# a palette that is not exactly 16 colors are reported and skipped, so a
+# broken theme file never wrecks a window.
+#
+# [theme]
+# name = "predawn"
+# background = "#23212E"
+# foreground = "#E7E7E7"
+# cursor = "#E7E7E7"
+# selection = "#44424F"
+# search-highlight = "#FF7C36"
+# tab-bar = "#1D1B26"
+# tab-active = "#2C2A38"
+# split-border = "#44424F"
+# split-focus = "#FF7C36"
+# palette = [
+#   "#000000", "#D7005F", "#00BE6F", "#FF7C36",
+#   "#28018F", "#B000AB", "#7C70FF", "#E7E7E7",
+#   "#555555", "#F53084", "#10CF83", "#FFAF4B",
+#   "#5442A3", "#AE21A9", "#66A6E3", "#FFFFFF",
+# ]
 
-# Tab bar: a bare string, or the [tab-bar] table. Use one form, not both.
-# tab-bar = "auto"
-
-[tab-bar]
-# "always", "auto" (only when more than one tab), "hidden".
-visible = "always"
-# Strip above ("top") or below ("bottom") the terminal.
-placement = "top"
-# Prefix each tab with its profile name.
-show-profiles = true
-# Append the working directory to the tab title (parsed only for now: it
-# needs shell integration, which v0.2 does not implement).
-show-cwd = false
-# Draw the x close button on the hovered tab.
-close-button = true
-
-[window]
-# Initial grid size in cells, 1..4000 columns and 1..1000 rows.
-cols = 80
-rows = 24
-
-# Padding around the grid, in pixels (0..1000 each).
-[window.padding]
-x = 0
-y = 0
-
-[split]
-# Split panes are on; borders carry the drag-to-resize.
-visible = true
-# Pixels between panes (parsed for now: panes are laid out on the cell grid,
-# so no pixel gap is drawn between them yet).
-padding = 2
-# Draw the split borders.
-border = true
-
-[search]
-# Ctrl+F opens the search strip.
-visible = true
-# Search options the strip starts with.
-case-sensitive-default = false
-whole-word-default = false
-regex-default = false
-
-# Rebind keys: "Ctrl+Shift+T" = "new-tab". A user binding wins over the
-# built-in one. Keys are modifier chains joined by "+": Ctrl, Shift, Alt
-# (Win/Super cannot be bound). Names: letters, digits, F1..F24, Enter, Esc,
-# Space, Tab, Backspace, PageUp, PageDown, Home, End, Insert, Delete, arrows.
-[keybindings]
-# "Ctrl+Shift+K" = "close-tab"
-# "Ctrl+Shift+PageUp" = "move-tab-left"
+# ---------------------------------------------------------------------------
+# Key bindings (CONFIG-007, KEY-004..021)
+# ---------------------------------------------------------------------------
+# Modifiers: ctrl, shift, alt, super (Win is rejected: the terminal does not
+# receive Win-key events). Keys include letters, digits, F1..F24, Enter, Tab,
+# Esc, Backspace, Insert, Delete, Home, End, PageUp, PageDown, Up, Down, Left,
+# Right, Space, Minus, Plus, Equals, comma.
+#
+# Actions:
+#   new-tab, close-tab, next-tab, prev-tab, rename-tab, move-tab-left,
+#   move-tab-right, split-vertical, split-horizontal, close-pane,
+#   focus-next-pane, focus-prev-pane, focus-pane-1..4,
+#   resize-pane-left/right/up/down, increase-font-size, decrease-font-size,
+#   reset-font-size, next-theme, prev-theme, copy, paste, copy-paste, search,
+#   clear-scrollback, toggle-fullscreen,
+#   spawn-cmd, spawn-powershell, spawn-pwsh, spawn-git-bash, spawn-wsl
+#
+# Built-ins:
+#   Ctrl+Shift+T=new-tab          Ctrl+Shift+W=close-tab
+#   Ctrl+Shift+Right=next-tab     Ctrl+Shift+Left=prev-tab
+#   Ctrl+Shift+D=split-vertical   Ctrl+Shift+S=split-horizontal
+#   Ctrl+Shift+E=close-pane       Ctrl+Shift+Tab=focus-next-pane
+#   Ctrl+Shift+1..4=focus-pane-1..4
+#   Ctrl+Shift+Left/Right/Up/Down=resize-pane-left/right/up/down
+#   Ctrl+Plus=increase-font-size  Ctrl+Minus=decrease-font-size
+#   Ctrl+0=reset-font-size        Ctrl+Shift+C=copy  Ctrl+Shift+V=paste
+#   Ctrl+Shift+X=copy-paste       Ctrl+K=clear-scrollback
+#   Ctrl+F=search                 F11=toggle-fullscreen
+#   Ctrl+Shift+F2=spawn-cmd       Ctrl+Shift+F3=spawn-powershell
+#   Ctrl+Shift+F4=spawn-pwsh      Ctrl+Shift+F5=spawn-git-bash
+#   Ctrl+Shift+F6=spawn-wsl       Ctrl+Shift+PageUp/Down=move-tab-left/right
+#
+# A binding below overrides the built-in for the same key.
+#
+# [keybindings]
+# "Ctrl+Shift+T" = "new-tab"
+# "Ctrl+Shift+Enter" = "split-vertical"
+# "Alt+1" = "focus-pane-1"
 # "Ctrl+Shift+J" = "next-theme"
+# "Ctrl+Shift+R" = "rename-tab"
+# "Ctrl+Shift+PageUp" = "move-tab-left"
+# "Ctrl+Shift+PageDown" = "move-tab-right"
 
-# Shell profiles: the built-in list (cmd, PowerShell, pwsh, Git Bash, WSL)
-# plus these. A `[[profile]]` whose name matches a built-in replaces it.
+# ---------------------------------------------------------------------------
+# Shell profiles (SHELL-017/019/021, CONFIG-023..028)
+# ---------------------------------------------------------------------------
+# The built-in list (cmd, PowerShell, pwsh, Git Bash, WSL) is always
+# available; these entries are added to it, and an entry whose name matches a
+# built-in replaces it. The Window menu lists every profile, and a
+# `[profile]` (singular) table sets the one profile.
+#
 # [[profile]]
 # name = "PowerShell"
-# command = "pwsh"
+# command = "pwsh"                    # executable, found on PATH if relative
 # args = ["-NoLogo"]
-# env = { RUST_LOG = "debug" }
-# starting-directory = "%USERPROFILE%\\src"   # "" = the inherited cwd
-# theme = "gruvbox-dark"                      # theme for tabs of this profile
-# tab-color = "#ff8800"                       # tab strip accent
-# font = "Cascadia Mono"                      # applied at startup only
-# font-size = 12
+# starting-directory = "%USERPROFILE%\\src"   # ~ and %VAR% expand; "" = inherit
+# env = { RUST_LOG = "debug" }        # added to the inherited environment
+# theme = "gruvbox-dark"              # preset name, or themes\<name>.toml
+# tab-color = "#ff8800"               # accent stripe on the tab
+# show-profile = true                 # prefix tab titles with the name
+# scrollback = 20000
+# font = "Consolas"                   # applied at startup only: per-profile
+# font-size = 12                      # fonts are not swapped in a live tab
 # line-height = 1.2
-# scrollback = 5000
+
+# ---------------------------------------------------------------------------
+# Search defaults (SEARCH-006/007/014)
+# ---------------------------------------------------------------------------
+# How the search strip starts up.
+#
+# [search]
+# case-sensitive-default = false
+# whole-word-default = false
+# regex-default = false
+
+# ---------------------------------------------------------------------------
+# Splits (SPLIT-014, CONFIG-013)
+# ---------------------------------------------------------------------------
+#
+# [split]
+# border = true
+# padding = 1     # parsed, not drawn: panes are laid out on the cell grid
+
+# ---------------------------------------------------------------------------
+# Window size (CONFIG-011, WINDOW-001, WINDOW-011)
+# ---------------------------------------------------------------------------
+#
+# [window]
+# cols = 80
+# rows = 24
+# padding = { x = 4, y = 4 }   # grid inset; the tab bar spans full width
+
+# ---------------------------------------------------------------------------
+# Tab bar (CONFIG-012, TAB-011/015/021/022/023)
+# ---------------------------------------------------------------------------
+# As a table it carries the rest of the tab-bar options; `visible` is the same
+# value as the plain `tab-bar` key above (use one form, not both).
+#
+# [tab-bar]
+# visible = "auto"                 # always | auto | hidden
+# placement = "top"                # top | bottom
+# show-profiles = "auto"           # always | auto | never — prefix "name:"
+# close-button = true              # the hover box (TAB-021)
+# show-index = false
+# show-cwd = true                  # needs shell integration (v0.3)
+# max-width = 24
+# indicator-color = "#ff8800"
+# [tab-bar.section]                # what the profile selector shows
+# show-index = true
+# show-icon = true
+# show-name = true
+
+# ---------------------------------------------------------------------------
+# Font (CONFIG-004..006)
+# ---------------------------------------------------------------------------
+# As a table this is the same as the plain font keys, plus per-monitor DPI.
+#
+# [font]
+# family = "Cascadia Mono"
+# size = 11
+# line-height = 1.25
+# dpi-scale = 100            # 50..400 percent
+# features = "calt,liga"

@@ -1,9 +1,14 @@
 //! Theme: UI colors plus the ANSI palette fed to the renderer.
 //!
-//! Themes are selected by preset name from `[theme]`/`theme = "..."` in the
-//! config (SPEC §14, THEME-001/013/014). An unknown preset name falls back
-//! to `predawn` and is reported by the caller; themes are validated on load
-//! because every preset is a static, compile-checked table.
+//! A theme is a preset name (`theme = "gruvbox-dark"`) and/or a table of
+//! colour overrides (`[theme]`, CONFIG-003), optionally read from a named
+//! theme file `themes/<name>.toml` next to the config (THEME-009). Unknown
+//! preset names fall back to `predawn` and every invalid colour is reported
+//! and skipped, keeping the value it already had (THEME-013/014).
+
+use std::path::Path;
+
+use serde::Deserialize;
 
 use crate::color::{Color, ansi_palette};
 
@@ -227,6 +232,147 @@ impl Theme {
     pub fn resolve(name: &str) -> Self {
         Self::preset(name).unwrap_or_else(Self::predawn)
     }
+
+    /// Apply a table of colour overrides (CONFIG-003). Each key that parses
+    /// wins; each key that does not is returned as a problem and leaves the
+    /// existing color alone (THEME-014).
+    pub fn apply_overrides(&mut self, file: &ThemeFile) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut apply = |key: &str, from: &Option<String>, to: &mut Color| {
+            let Some(text) = from else { return };
+            match Color::parse_hex(text) {
+                Some(color) => *to = color,
+                None => problems.push(format!("[theme] {key} = {text:?} is not #RRGGBB")),
+            }
+        };
+        apply("background", &file.background, &mut self.background);
+        apply("foreground", &file.foreground, &mut self.foreground);
+        apply("cursor", &file.cursor, &mut self.cursor);
+        apply("selection", &file.selection, &mut self.selection);
+        apply(
+            "search-highlight",
+            &file.search_highlight,
+            &mut self.search_highlight,
+        );
+        apply("tab-bar", &file.tab_bar, &mut self.tab_bar);
+        apply("tab-active", &file.tab_active, &mut self.tab_active);
+        apply("split-border", &file.split_border, &mut self.split_border);
+        apply("split-focus", &file.split_focus, &mut self.split_focus);
+        if let Some(palette) = &file.palette {
+            // THEME-013: the palette is all-or-nothing, a short list would
+            // silently repaint one ANSI color of the preset.
+            if palette.len() != 16 {
+                problems.push(format!(
+                    "[theme] palette has {} colors, expected 16",
+                    palette.len()
+                ));
+            } else {
+                let mut parsed = [ansi_palette()[0]; 16];
+                let mut ok = true;
+                for (i, text) in palette.iter().enumerate() {
+                    match Color::parse_hex(text) {
+                        Some(color) => parsed[i] = color,
+                        None => {
+                            problems
+                                .push(format!("[theme] palette[{i}] = {text:?} is not #RRGGBB"));
+                            ok = false;
+                        }
+                    }
+                }
+                if ok {
+                    self.palette = parsed;
+                }
+            }
+        }
+        problems
+    }
+
+    /// Read `theme_dir/<name>.toml` (THEME-009). The error text says what is
+    /// wrong so the caller can report it and carry on with a preset.
+    pub fn load_file(theme_dir: &Path, name: &str) -> Result<ThemeFile, String> {
+        if name.is_empty() || name.contains(['/', '\\', '.']) {
+            return Err(format!("{name:?} is not a theme name"));
+        }
+        let path = theme_dir.join(format!("{name}.toml"));
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+/// Colour overrides for one theme: the `[theme]` table in the config, or the
+/// whole of a `themes/<name>.toml` file. Every key is optional, so a theme
+/// file only states what it changes (CONFIG-003, THEME-009).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ThemeFile {
+    /// Name this theme answers to (`name` in the table, CONFIG-002).
+    pub name: Option<String>,
+    /// Default background.
+    pub background: Option<String>,
+    /// Default foreground.
+    pub foreground: Option<String>,
+    /// Cursor color.
+    pub cursor: Option<String>,
+    /// Selection background.
+    pub selection: Option<String>,
+    /// Search match background.
+    pub search_highlight: Option<String>,
+    /// Tab bar strip background.
+    pub tab_bar: Option<String>,
+    /// Active tab background.
+    pub tab_active: Option<String>,
+    /// Split pane border.
+    pub split_border: Option<String>,
+    /// Focused split pane border.
+    pub split_focus: Option<String>,
+    /// ANSI-16 palette, 16 `#RRGGBB` strings.
+    pub palette: Option<Vec<String>>,
+}
+
+/// Resolve the theme a config asks for: preset by name, then the named theme
+/// file in `theme_dir`, then the `[theme]` overrides on top. Unknown names
+/// fall back to `predawn`; every problem found is returned for the caller to
+/// report (THEME-009/013/014, CONFIG-003).
+#[must_use]
+pub fn resolve_configured(
+    name: &str,
+    overrides: &ThemeFile,
+    theme_dir: Option<&Path>,
+) -> (Theme, Vec<String>) {
+    let mut problems = Vec::new();
+    let mut theme = Theme::preset(name).unwrap_or_else(Theme::predawn);
+    let mut from_file = false;
+    if let Some(dir) = theme_dir {
+        match Theme::load_file(dir, name) {
+            Ok(file) => {
+                from_file = true;
+                problems.extend(theme.apply_overrides(&file));
+            }
+            Err(e) => {
+                // Only a file that exists and fails to parse is a problem; a
+                // preset simply has no file.
+                if dir.join(format!("{name}.toml")).exists() {
+                    problems.push(format!("theme file {e}"));
+                }
+            }
+        }
+    }
+    if from_file {
+        // A theme file is a theme of its own, not a patch on predawn.
+        theme.name = name.to_string();
+    }
+    if theme.name != name && !name.is_empty() && !from_file {
+        problems.push(format!(
+            "unknown theme {name:?} (known: {}), using predawn",
+            PRESETS.join(", ")
+        ));
+    }
+    problems.extend(theme.apply_overrides(overrides));
+    if let Some(name) = &overrides.name {
+        theme.name = name.clone();
+    }
+    (theme, problems)
 }
 
 impl Default for Theme {
@@ -276,6 +422,88 @@ mod tests {
     fn unknown_preset_falls_back_to_predawn() {
         assert_eq!(Theme::preset("not-a-theme"), None);
         assert_eq!(Theme::resolve("not-a-theme"), Theme::predawn());
+    }
+
+    fn table(text: &str) -> ThemeFile {
+        toml::from_str(text).unwrap_or_else(|e| panic!("bad theme table: {e}"))
+    }
+
+    #[test]
+    fn a_colour_override_wins_and_a_bad_one_is_reported() {
+        let base = Theme::predawn();
+        let mut theme = base.clone();
+        let problems = theme.apply_overrides(&table(
+            "background = \"1A1B1C\"\ncursor = \"not-a-color\"\ntab-bar = \"#FF0000\"\n",
+        ));
+        assert_eq!(theme.background, Color::rgb(0x1A, 0x1B, 0x1C));
+        assert_eq!(theme.tab_bar, Color::rgb(0xFF, 0x00, 0x00));
+        assert_eq!(theme.cursor, base.cursor, "invalid color keeps preset");
+        assert_eq!(problems.len(), 1, "one problem: {problems:?}");
+    }
+
+    #[test]
+    fn the_palette_is_all_or_nothing() {
+        let base = Theme::predawn();
+        let mut theme = base.clone();
+        let short = theme.apply_overrides(&table("palette = [\"#000000\"]"));
+        assert_eq!(theme.palette, base.palette);
+        assert_eq!(short.len(), 1, "a 1-color palette is a problem: {short:?}");
+
+        let full = (0..16)
+            .map(|i| format!("\"#{i:02X}0000\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let problems = theme.apply_overrides(&table(&format!("palette = [{full}]")));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(theme.palette[3], Color::rgb(0x03, 0x00, 0x00));
+    }
+
+    #[test]
+    fn an_unknown_theme_key_is_rejected() {
+        // THEME-013: a typo in a theme file is a problem, not silence.
+        assert!(toml::from_str::<ThemeFile>("backround = \"#000000\"").is_err());
+    }
+
+    #[test]
+    fn a_named_theme_file_overrides_the_preset() {
+        let dir = std::env::temp_dir().join(format!("rusttyterm-theme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+        let path = dir.join("dracula-ish.toml");
+        std::fs::write(
+            &path,
+            "background = \"#282A36\"\ntab-active = \"#44475A\"\n",
+        )
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+
+        let (theme, problems) =
+            resolve_configured("dracula-ish", &ThemeFile::default(), Some(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(theme.name, "dracula-ish");
+        assert_eq!(theme.background, Color::rgb(0x28, 0x2A, 0x36));
+        assert_eq!(theme.tab_active, Color::rgb(0x44, 0x47, 0x5A));
+    }
+
+    #[test]
+    fn the_config_table_wins_over_the_theme_file() {
+        let dir = std::env::temp_dir().join(format!("rusttyterm-theme2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("grid.toml"), "foreground = \"#111111\"\n").unwrap();
+        let table = table("name = \"grid\"\nforeground = \"#222222\"\n");
+
+        let (theme, problems) = resolve_configured("gruvbox-dark", &table, Some(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(theme.name, "grid");
+        assert_eq!(theme.background, Theme::gruvbox_dark().background);
+        assert_eq!(theme.foreground, Color::rgb(0x22, 0x22, 0x22));
+    }
+
+    #[test]
+    fn a_missing_theme_name_falls_back_and_says_so() {
+        let (theme, problems) = resolve_configured("nope", &ThemeFile::default(), None);
+        assert_eq!(theme, Theme::predawn());
+        assert_eq!(problems.len(), 1, "{problems:?}");
     }
 
     trait UnwrapPreset {

@@ -33,6 +33,17 @@ impl Color {
             b: (value & 0xFF) as u8,
         }
     }
+
+    /// Parse `#RRGGBB` or `RRGGBB` (config spelling, CONFIG-002/003). Nothing
+    /// else is a color: 3-digit shorthand, `0x` prefixes and names are not.
+    #[must_use]
+    pub fn parse_hex(text: &str) -> Option<Self> {
+        let text = text.trim().strip_prefix('#').unwrap_or(text.trim());
+        if text.len() != 6 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(text, 16).ok().map(Self::from_hex)
+    }
 }
 
 impl fmt::Display for Color {
