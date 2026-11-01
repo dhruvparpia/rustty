@@ -47,6 +47,7 @@ pub mod parser;
     reason = "NFR-113: the bench drives the Direct2D/Win32 render hot path"
 )]
 mod perf_bench;
+pub mod portable;
 pub mod selection;
 pub mod shell;
 // Direct2D/DirectWrite renderer FFI boundary (spec WIN-002, WIN-003).

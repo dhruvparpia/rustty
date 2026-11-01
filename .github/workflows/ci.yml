@@ -29,3 +29,12 @@ jobs:
 
       - name: Test
         run: cargo test --all-features
+
+      - name: Portable ZIP
+        run: pwsh packaging/build-portable.ps1
+
+      - name: Upload portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: rusttyterm-portable-zip
+          path: dist/*.zip

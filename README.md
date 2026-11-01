@@ -8,9 +8,10 @@ behaviors users praise — and implements them natively on Windows with no Elect
 no web UI, no bundled interpreted runtime.
 
 > **Early development.** `rusttyterm` runs today as a native Windows terminal:
-> ConPTY shells in tabs, Direct2D/DirectWrite rendering, mouse selection,
-> clipboard, fullscreen, and a TOML config with theme presets. Splits, session
-> restore, and packaging are not built yet.
+> ConPTY shells in tabs, Direct2D/DirectWrite rendering with a glyph atlas,
+> mouse selection, clipboard, fullscreen, and a TOML config with theme presets.
+> `packaging/build-portable.ps1` builds the portable ZIP. Splits and session
+> restore are not built yet.
 > See [`ROADMAP.md`](ROADMAP.md) for what ships in each version.
 
 ## Vision
@@ -26,7 +27,9 @@ no web UI, no bundled interpreted runtime.
 ## Configuration
 
 The config file is `%APPDATA%\rusttyterm\config.toml`. It is optional: missing
-file or keys use the built-in defaults. Values are validated — a size, theme,
+file or keys use the built-in defaults. In a portable ZIP (or any folder with a
+`rusttyterm.portable` marker beside the exe) the `config.toml` beside the
+executable is used instead. Values are validated — a size, theme,
 scrollback, or grid value outside its range is a startup error with a message,
 never a silent clamp. [`config.example.toml`](config.example.toml) lists every
 key the app reads today, with its default and range.

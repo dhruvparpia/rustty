@@ -1,9 +1,11 @@
 //! TOML configuration (SPEC §13 schema, §14 defaults).
 //!
-//! User file: `%APPDATA%\rusttyterm\config.toml` on Windows. Missing or
-//! invalid files fall back to defaults; invalid values are reported by
-//! [`Config::load`]. Value ranges are validated on parse (CONFIG-001..006):
-//! out-of-range values are errors, not silent clamps.
+//! User file: `%APPDATA%\rusttyterm\config.toml` on Windows; in portable
+//! mode (see [`crate::portable`]) the `config.toml` beside the executable
+//! wins (CONFIG-020). Missing or invalid files fall back to defaults;
+//! invalid values are reported by [`Config::load`]. Value ranges are
+//! validated on parse (CONFIG-001..006): out-of-range values are errors,
+//! not silent clamps.
 
 use std::cmp::Ordering;
 use std::io;
@@ -280,9 +282,16 @@ impl Config {
 }
 
 /// Path of the user config file, or `None` when `%APPDATA%` is unset.
+///
+/// Portable mode wins over `%APPDATA%` (CONFIG-020, PKG-004): when the
+/// executable sits in a portable folder (see [`crate::portable`]), the
+/// `config.toml` beside it is used.
 #[must_use]
 pub fn config_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join("rusttyterm").join("config.toml"))
+    crate::portable::running_config_path().or_else(|| {
+        std::env::var_os("APPDATA")
+            .map(|dir| PathBuf::from(dir).join("rusttyterm").join("config.toml"))
+    })
 }
 
 #[cfg(test)]
