@@ -66,6 +66,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   that is not 16 colors, and a color that is not `#RRGGBB` are reported on
   stderr and skipped, keeping the color that already worked (THEME-013/014).
 
+- OSC 7 working-directory reporting: with `tab-bar.show-cwd` (TAB-011) a tab whose
+  shell sets no title shows the last directory of the path the shell reported,
+  percent-decoded and drive-path aware.
+- OSC 133 prompt markers: a pane knows when its shell is at a prompt, when a command
+  is running, and the exit code of the last command.
+- Per-profile confirmations (TAB-014/021): `confirm-close` and `confirm-new-process`
+  in `[[profile]]`. Closing a tab whose shell is busy, closing the last tab, and
+  quitting ask in a native dialog; the busy wording comes from the OSC 133 state.
+
 ### Fixed
 
 - The v0.1 "CLI stub" never parsed arguments, so no `--config`/`--theme` flag
