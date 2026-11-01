@@ -22,6 +22,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Portable mode: `config.toml` beside the exe wins over `%APPDATA%`
   (CONFIG-020, PKG-004). `packaging/build-portable.ps1` builds the portable
   ZIP (PKG-001..003); CI uploads it as a build artifact.
+- Split panes: pane tree, vertical/horizontal splits, pane focus and ratio
+  keys, mouse routing, themeable borders and pane titles, shell-death
+  cascade (SPLIT-001..015).
+- Search: Ctrl+F overlay; plain, whole-word and regex search over the active
+  tab's screen and scrollback; match highlights, next/previous navigation
+  that scrolls the viewport, case/word/regex toggles, and a capped result
+  list (SEARCH-001..015). Adds `regex` 1.13.1.
 
 ## [0.1.0] — v0.1 MVP (planned)
 

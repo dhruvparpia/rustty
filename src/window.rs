@@ -58,6 +58,7 @@ use crate::keyboard::{self, Modifiers};
 use crate::pane::Pane;
 use crate::parser::bracketed_paste_bytes;
 use crate::render::{CellMetrics, Renderer, measure_cells, px_to_dips};
+use crate::search::SearchState;
 use crate::selection::{Pos, Selection};
 use crate::shell::SpawnOptions;
 use crate::split::{Dir, Rect, Side};
@@ -126,6 +127,10 @@ struct WindowState {
     /// Saved window rect + styles while fullscreen (F11), `None` in
     /// windowed mode.
     fullscreen: Option<(RECT, isize, isize)>,
+    /// Search overlay state (SEARCH-001..015); `None` when the overlay
+    /// is closed. While active, keystrokes edit the query instead of
+    /// reaching the shell.
+    search: Option<SearchState>,
 }
 
 impl WindowState {
@@ -212,7 +217,7 @@ unsafe extern "system" fn wnd_proc(
                 && let Some(r) = &mut s.renderer
             {
                 // NFR-216: paint() logs and swallows Direct2D failures.
-                r.paint(&s.app, &s.theme);
+                r.paint(&s.app, &s.theme, s.search.as_ref());
             }
             let _ = unsafe { EndPaint(hwnd, &ps) };
             LRESULT(0)
@@ -239,6 +244,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_SYSCHAR => {
+            if take_suppressed_char(hwnd) {
+                return LRESULT(0);
+            }
             handle_char(hwnd, wparam.0 as u32, true);
             LRESULT(0)
         }
@@ -403,6 +411,19 @@ fn sync_tab_bar(hwnd: HWND) {
 /// WM_KEYDOWN/WM_SYSKEYDOWN: app bindings first, then VT encoding.
 fn handle_keydown(hwnd: HWND, vk: u16) {
     let mods = read_mods();
+    // Ctrl+F opens or closes the search overlay (SEARCH-002).
+    if mods.ctrl && !mods.shift && !mods.alt && vk == 0x46 {
+        toggle_search(hwnd);
+        return;
+    }
+    // While search is active, special keys drive search and every other
+    // keydown is left for WM_CHAR, which edits the query instead of the PTY.
+    if state_ref(hwnd).is_some_and(|s| s.search.is_some()) {
+        if handle_search_keydown(hwnd, vk, mods) {
+            return;
+        }
+        return;
+    }
     if vk == 0x7A {
         // F11: fullscreen toggle
         toggle_fullscreen(hwnd);
@@ -540,8 +561,144 @@ fn handle_char(hwnd: HWND, code: u32, sys: bool) {
         read_mods()
     };
     let Some(s) = state_mut(hwnd) else { return };
+    // While search is active, typed text edits the query, not the shell.
+    if let Some(search) = &mut s.search {
+        if ch.is_control() {
+            return;
+        }
+        search.query.push(ch);
+        let tab = s.app.active_tab();
+        search.refresh(tab);
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+        return;
+    }
     let bytes = keyboard::encode_char(ch, mods);
     let _ = s.app.send_input_active(&bytes);
+}
+
+/// Ctrl+F: open the search overlay, or close it when already open
+/// (SEARCH-002). Search starts with an empty query and no matches.
+fn toggle_search(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.search.is_some() {
+        s.search = None;
+    } else {
+        s.search = Some(SearchState::new());
+    }
+    s.suppress_char = true;
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Search-mode key handling (SEARCH-005/006/007/008/009). Returns `true`
+/// when the key was consumed; printable keys are left to `WM_CHAR`, which
+/// edits the query instead of sending bytes to the PTY.
+fn handle_search_keydown(hwnd: HWND, vk: u16, mods: Modifiers) -> bool {
+    if state_ref(hwnd).is_none_or(|s| s.search.is_none()) {
+        return false;
+    }
+    let consumed = match vk {
+        0x1B => {
+            // Escape closes the search overlay.
+            if let Some(s) = state_mut(hwnd) {
+                s.search = None;
+            }
+            true
+        }
+        0x0D => {
+            // Enter: next match.
+            search_step(hwnd, 1);
+            true
+        }
+        0x08 => {
+            // Backspace: delete the last query character.
+            search_backspace(hwnd);
+            true
+        }
+        0x26 => {
+            // Up arrow: previous match.
+            search_step(hwnd, -1);
+            true
+        }
+        0x28 => {
+            // Down arrow: next match.
+            search_step(hwnd, 1);
+            true
+        }
+        0x43 if mods.alt => {
+            // Alt+C: toggle case sensitivity.
+            search_toggle(hwnd, SearchToggle::Case);
+            true
+        }
+        0x57 if mods.alt => {
+            // Alt+W: toggle whole-word matching.
+            search_toggle(hwnd, SearchToggle::Word);
+            true
+        }
+        0x52 if mods.alt => {
+            // Alt+R: toggle regex matching.
+            search_toggle(hwnd, SearchToggle::Regex);
+            true
+        }
+        _ => false,
+    };
+    if consumed {
+        if let Some(s) = state_mut(hwnd) {
+            s.suppress_char = true;
+        }
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    }
+    consumed
+}
+
+enum SearchToggle {
+    Case,
+    Word,
+    Regex,
+}
+
+fn search_toggle(hwnd: HWND, kind: SearchToggle) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(search) = &mut s.search else { return };
+    let tab = s.app.active_tab();
+    match kind {
+        SearchToggle::Case => search.toggle_case(tab),
+        SearchToggle::Word => search.toggle_whole_word(tab),
+        SearchToggle::Regex => search.toggle_regex(tab),
+    }
+}
+
+fn search_backspace(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(search) = &mut s.search else { return };
+    let tab = s.app.active_tab();
+    search.backspace(tab);
+}
+
+/// Move to the next/previous match, focus its pane, and scroll its grid so
+/// the match is visible (SEARCH-005/006). Wraps at the ends.
+fn search_step(hwnd: HWND, delta: i32) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(search) = &mut s.search else { return };
+    if search.matches.is_empty() {
+        return;
+    }
+    let len = search.matches.len();
+    let idx = if delta > 0 {
+        (search.current + 1) % len
+    } else {
+        (search.current + len - 1) % len
+    };
+    search.current = idx;
+    let match_ = search.matches[idx];
+    s.app.focus_pane(match_.pane);
+    if let Some(mut pane) = s
+        .app
+        .active_tab_mut()
+        .and_then(|t| t.pane_at_mut(match_.pane))
+    {
+        pane.grid_mut().scroll_to_abs(match_.abs);
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
 /// WM_MOUSEWHEEL: scroll the pane under the cursor through its
@@ -873,7 +1030,7 @@ fn drain_and_cleanup(hwnd: HWND) {
         // shell output costs one partial frame per tick (NFR-113/114).
         if s.app.take_dirty() {
             if let Some(r) = &mut s.renderer {
-                r.paint_damage(&s.app, &s.theme);
+                r.paint_damage(&s.app, &s.theme, s.search.as_ref());
                 s.app.clear_grid_damage();
             } else {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -1129,6 +1286,7 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         last_click: None,
         suppress_char: false,
         fullscreen: None,
+        search: None,
     });
     let state_param = Box::into_raw(state) as *const c_void;
 

@@ -20,6 +20,8 @@ pub struct Theme {
     pub cursor: Color,
     /// Selection highlight background (WIN-004 mouse selection).
     pub selection: Color,
+    /// Search match highlight background (SEARCH-004).
+    pub search_highlight: Color,
     /// Tab bar strip background (tab bar P0).
     pub tab_bar: Color,
     /// Active tab background.
@@ -51,6 +53,7 @@ impl Theme {
             foreground: Color::from_hex(0xEAE6E3),
             cursor: Color::from_hex(0x61C0FF),
             selection: Color::from_hex(0x4C465C),
+            search_highlight: Color::from_hex(0x4C465C),
             tab_bar: Color::from_hex(0x1A1822),
             tab_active: Color::from_hex(0x3A3646),
             split_border: Color::from_hex(0x4C465C),
@@ -68,6 +71,7 @@ impl Theme {
             foreground: Color::from_hex(0xCDD6F4),
             cursor: Color::from_hex(0xF5E0DC),
             selection: Color::from_hex(0x313244),
+            search_highlight: Color::from_hex(0x313244),
             tab_bar: Color::from_hex(0x181825),
             tab_active: Color::from_hex(0x313244),
             split_border: Color::from_hex(0x45475A),
@@ -102,6 +106,7 @@ impl Theme {
             foreground: Color::from_hex(0xEBDBB2),
             cursor: Color::from_hex(0xEBDBB2),
             selection: Color::from_hex(0x504945),
+            search_highlight: Color::from_hex(0x504945),
             tab_bar: Color::from_hex(0x1D2021),
             tab_active: Color::from_hex(0x3C3836),
             split_border: Color::from_hex(0x504945),
@@ -136,6 +141,7 @@ impl Theme {
             foreground: Color::from_hex(0xABB2BF),
             cursor: Color::from_hex(0x528BFF),
             selection: Color::from_hex(0x3E4451),
+            search_highlight: Color::from_hex(0x3E4451),
             tab_bar: Color::from_hex(0x21252B),
             tab_active: Color::from_hex(0x3E4451),
             split_border: Color::from_hex(0x3E4451),
@@ -170,6 +176,7 @@ impl Theme {
             foreground: Color::from_hex(0x839496),
             cursor: Color::from_hex(0x93A1A1),
             selection: Color::from_hex(0x073642),
+            search_highlight: Color::from_hex(0x073642),
             tab_bar: Color::from_hex(0x00212B),
             tab_active: Color::from_hex(0x073642),
             split_border: Color::from_hex(0x073642),

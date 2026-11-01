@@ -41,11 +41,17 @@ use crate::config::FontConfig;
 use crate::glyph_cache::{self, GlyphAtlas, GlyphKey, Tile};
 use crate::grid::{Cell, CellAttribute, Grid};
 use crate::pane::Pane;
+use crate::search::SearchState;
 use crate::selection::Selection;
 use crate::split::Rect;
 use crate::tab::Tab;
 use crate::tabbar::{self, TAB_CHROME};
 use crate::theme::Theme;
+
+/// Search overlay height at the bottom of the client area (SEARCH-001..015).
+/// It is painted over the grid, so opening search does not resize the grid
+/// or the ConPTY.
+pub const SEARCH_BAR_HEIGHT: f32 = 24.0;
 
 /// Font families used as the fallback chain (WIN-003/FONT-018): Cascadia
 /// first, Consolas last. The configured family (FONT-002) is tried before
@@ -264,6 +270,8 @@ pub struct Renderer {
     titles: Vec<String>,
     layout: tabbar::Layout,
     label: String,
+    /// Reused fitted label for the search bar (SEARCH-004 display).
+    search_label: String,
     /// Reused row-damage mask for [`Renderer::paint_damage`]: one entry per
     /// tab row (each leaf's viewport rows stacked in layout order).
     mask: Vec<bool>,
@@ -417,6 +425,7 @@ impl Renderer {
             titles: Vec::new(),
             layout: tabbar::Layout::default(),
             label: String::new(),
+            search_label: String::new(),
             mask: Vec::new(),
             damage: Damage::default(),
             pane_damage: Vec::new(),
@@ -479,23 +488,24 @@ impl Renderer {
     }
 
     /// Paint the whole client area: tab bar strip, active pane viewport,
-    /// cursor. This is the full repaint, used for system-initiated
-    /// `WM_PAINT` (expose, resize, coming back from occluded).
-    /// Never panics on Direct2D failure (NFR-216).
-    pub fn paint(&mut self, app: &App, theme: &Theme) {
-        self.paint_frame(app, theme, true);
+    /// cursor, and the search overlay when `search` is active. This is the
+    /// full repaint, used for system-initiated `WM_PAINT` (expose, resize,
+    /// coming back from occluded). Never panics on Direct2D failure (NFR-216).
+    pub fn paint(&mut self, app: &App, theme: &Theme, search: Option<&SearchState>) {
+        self.paint_frame(app, theme, search, true);
     }
 
     /// Paint only what changed since the last frame (NFR-113 damage-only
     /// redraw): the rows the grid wrote, plus the rows a cursor move or a
-    /// selection change touched, plus the tab-bar strip. Falls back to a
-    /// full repaint when the tab, the grid size, or the whole grid changed.
+    /// selection change touched, plus the tab-bar strip and search overlay.
+    /// Falls back to a full repaint when the tab, the grid size, or the whole
+    /// grid changed.
     ///
     /// The caller clears the grid damage flags afterwards
     /// (see [`crate::app::App::clear_grid_damage`]); a dropped frame keeps
     /// them set, so the next call repaints everything.
-    pub fn paint_damage(&mut self, app: &App, theme: &Theme) {
-        self.paint_frame(app, theme, false);
+    pub fn paint_damage(&mut self, app: &App, theme: &Theme, search: Option<&SearchState>) {
+        self.paint_frame(app, theme, search, false);
     }
 
     /// Rows the last frame painted, for the damage-only benchmark
@@ -606,7 +616,13 @@ impl Renderer {
         (width / self.metrics.cell_width).floor() as usize
     }
 
-    fn paint_frame(&mut self, app: &App, theme: &Theme, force_full: bool) {
+    fn paint_frame(
+        &mut self,
+        app: &App,
+        theme: &Theme,
+        search: Option<&SearchState>,
+        force_full: bool,
+    ) {
         if unsafe { self.target.CheckWindowState() } == D2D1_WINDOW_STATE_OCCLUDED {
             return;
         }
@@ -637,7 +653,10 @@ impl Renderer {
         if let Some(tab) = app.active_tab() {
             let cw = self.metrics.cell_width;
             let ch = self.metrics.cell_height;
+            let mut pane_idx = 0usize;
             tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
+                let idx = pane_idx;
+                pane_idx += 1;
                 let left = rect.col as f32 * cw;
                 let top0 = self.tab_bar_height + rect.row as f32 * ch;
                 let grid = pane.grid();
@@ -661,6 +680,9 @@ impl Renderer {
                     let span = Self::row_selection(pane, y, n);
                     self.paint_row_backgrounds(left, top, cells, theme);
                     self.paint_row_selection(left, top, span, theme);
+                    if let Some(search) = search {
+                        self.paint_row_search(left, top, grid, y, idx, search, theme);
+                    }
                     self.paint_row_text(left, top, cells, span, theme);
                     self.paint_row_decorations(left, top, cells, theme);
                 }
@@ -677,6 +699,9 @@ impl Renderer {
             });
         }
         self.atlas = atlas;
+        if let Some(search) = search {
+            self.paint_search_bar(search, theme, width, height);
+        }
         if self.tab_bar_height > 0.0 {
             self.paint_tab_bar(app, theme, width);
         }
@@ -834,6 +859,114 @@ impl Renderer {
             top + self.metrics.cell_height,
             theme.selection,
         );
+    }
+
+    /// Paint every visible search match on row `view_row` of pane `pane_idx`
+    /// (SEARCH-004). Matches in scrollback are not painted until they are
+    /// scrolled into view. Drawn before the row text so glyphs stay legible.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "SEARCH-004 row geometry and search state are all needed"
+    )]
+    fn paint_row_search(
+        &mut self,
+        left: f32,
+        top: f32,
+        grid: &Grid,
+        view_row: usize,
+        pane_idx: usize,
+        search: &SearchState,
+        theme: &Theme,
+    ) {
+        let cw = self.metrics.cell_width;
+        let ch = self.metrics.cell_height;
+        for match_ in &search.matches {
+            if match_.pane != pane_idx || grid.view_of_abs(match_.abs) != Some(view_row) {
+                continue;
+            }
+            self.fill_rect(
+                left + match_.lo as f32 * cw,
+                top,
+                left + match_.hi as f32 * cw,
+                top + ch,
+                theme.search_highlight,
+            );
+        }
+    }
+
+    /// Paint the search overlay at the bottom of the client area
+    /// (SEARCH-001..015): query, current match, match count, option states,
+    /// and a regex error. It overlays the grid and does not resize it.
+    fn paint_search_bar(&mut self, search: &SearchState, theme: &Theme, width: f32, height: f32) {
+        let bar_h = SEARCH_BAR_HEIGHT.min(height.max(0.0));
+        if bar_h <= 0.0 {
+            return;
+        }
+        let top = height - bar_h;
+        self.fill_rect(0.0, top, width, height, theme.tab_bar);
+        let mut raw = std::mem::take(&mut self.label);
+        raw.clear();
+        raw.push_str("Search: ");
+        raw.push_str(&search.query);
+        raw.push_str("  ");
+        if search.matches.is_empty() {
+            raw.push_str("0/0");
+        } else {
+            raw.push_str(&(search.current + 1).to_string());
+            raw.push('/');
+            raw.push_str(&search.matches.len().to_string());
+        }
+        raw.push_str("  case=");
+        raw.push_str(if search.options.case_sensitive {
+            "on"
+        } else {
+            "off"
+        });
+        raw.push_str(" word=");
+        raw.push_str(if search.options.whole_word {
+            "on"
+        } else {
+            "off"
+        });
+        raw.push_str(" regex=");
+        raw.push_str(if search.options.regex { "on" } else { "off" });
+        if let Some(err) = &search.error {
+            raw.push_str("  ");
+            raw.push_str(err);
+        }
+        tabbar::fit_title_into(
+            &raw,
+            (width - 16.0).max(0.0),
+            self.metrics.cell_width,
+            &mut self.search_label,
+        );
+        if !self.search_label.is_empty() {
+            let mut units = std::mem::take(&mut self.utf16);
+            units.clear();
+            units.extend(self.search_label.encode_utf16());
+            let text_top = top + (bar_h - self.metrics.text_height) / 2.0;
+            let rect = D2D_RECT_F {
+                left: 8.0,
+                top: text_top,
+                right: width - 8.0,
+                bottom: text_top + self.metrics.text_height,
+            };
+            if let Some(brush) = self.brush(theme.foreground) {
+                let format = &self.formats[0];
+                unsafe {
+                    self.target.DrawText(
+                        &units,
+                        format,
+                        &rect,
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+            }
+            self.utf16 = units;
+        }
+        self.label = raw;
     }
 
     /// Paint the tab bar strip: bar background, per-tab titles (active

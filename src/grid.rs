@@ -514,6 +514,26 @@ impl Grid {
         self.mark_all_dirty();
     }
 
+    /// Bring absolute line `abs` into the viewport, at its first visible
+    /// row. `false` when the line has been evicted. Used by search navigation
+    /// (SEARCH-005/006) so a match in scrollback is visible.
+    pub fn scroll_to_abs(&mut self, abs: usize) -> bool {
+        let Some(v) = abs.checked_sub(self.evicted) else {
+            return false;
+        };
+        if v >= self.total {
+            return false;
+        }
+        let top = self.top();
+        if v >= top && v < top + self.rows {
+            return true;
+        }
+        let max_offset = self.total.saturating_sub(self.rows);
+        self.scroll_offset = max_offset.saturating_sub(v);
+        self.mark_all_dirty();
+        true
+    }
+
     /// Fill viewport rows `top..=bottom` with blank lines (ED / EL / ECH use this)
     pub fn erase_rows(&mut self, top: usize, bottom: usize) {
         let top = top.min(self.rows.saturating_sub(1));
@@ -766,6 +786,19 @@ mod tests {
         grid.scroll_down(999);
         assert_eq!(grid.scroll_offset(), 0);
         assert_eq!(row_text(&grid, 0), "line 27");
+    }
+
+    #[test]
+    fn test_scroll_to_abs_brings_a_line_to_the_top() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        append_lines(&mut grid, 50);
+        // Absolute id 30 is "line 7"; it is not visible at the live edge.
+        assert!(grid.scroll_to_abs(30));
+        assert_eq!(grid.scroll_offset(), 20);
+        assert_eq!(row_text(&grid, 0), "line 7");
+        assert!(grid.scroll_to_abs(50), "line 27 is already visible");
+        assert_eq!(grid.scroll_offset(), 20);
+        assert!(!grid.scroll_to_abs(999), "evicted id is not reachable");
     }
 
     #[test]
