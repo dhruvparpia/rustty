@@ -40,6 +40,8 @@ pub enum ParserEvent {
     CommandOutput,
     /// OSC 133;D[:`exit`]: the command finished with this exit code.
     PromptEnd(Option<i32>),
+    /// BEL: the shell rang the bell (BELL-001).
+    Bell,
 }
 
 /// What one [`Parser::advance`] call produced.
@@ -305,7 +307,8 @@ impl Parser {
                 self.cursor_col = 0;
                 self.wrap_pending = false;
             }
-            0x07 | 0x00 | 0x0E..=0x1A | 0x1C..=0x1F | 0x7F => {}
+            0x07 => events.push(ParserEvent::Bell),
+            0x00 | 0x0E..=0x1A | 0x1C..=0x1F | 0x7F => {}
             0x80..=0x9F => match b {
                 0x84 => self.line_feed(grid, printed),
                 0x85 => {

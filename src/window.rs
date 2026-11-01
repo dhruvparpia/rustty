@@ -26,11 +26,14 @@
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 
+use windows::Data::Xml::Dom::XmlDocument;
+use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromWindow, PAINTSTRUCT, ScreenToClient,
 };
+use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::HiDpi::{
@@ -41,24 +44,24 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_MENU,
     VK_SHIFT,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Shell::{SetCurrentProcessExplicitAppUserModelID, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
     CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
-    GetClientRect, GetCursorPos, GetMenu, GetMessageW, GetSubMenu, GetWindowLongPtrW,
-    GetWindowRect, HICON, HMENU, IDC_ARROW, IDC_IBEAM, IDYES, IsZoomed, LWA_ALPHA, LoadCursorW,
-    MB_DEFBUTTON2, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED,
-    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW,
-    PostMessageW, PostQuitMessage, RegisterClassW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SWP_FRAMECHANGED, SWP_NOZORDER, SetCursor, SetLayeredWindowAttributes, SetMenu, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY,
-    WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
-    WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_VISIBLE,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetMenu, GetMessageW, GetSubMenu,
+    GetWindowLongPtrW, GetWindowRect, HICON, HMENU, IDC_ARROW, IDC_IBEAM, IDYES, IsZoomed,
+    LWA_ALPHA, LoadCursorW, MB_DEFBUTTON2, MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO,
+    MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOZORDER, SetCursor,
+    SetLayeredWindowAttributes, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_CHAR,
+    WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW,
+    WS_EX_LAYERED, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, Result};
 
@@ -92,6 +95,14 @@ const POLL_TIMER: usize = 1;
 /// Timer id for the cursor blink (CONFIG-009).
 const BLINK_TIMER: usize = 2;
 
+/// The AUMID that owns our toasts (PKG-002: Windows attributes them to the app).
+fn aumid() -> windows::core::HSTRING {
+    windows::core::HSTRING::from("com.dhruv.rusttyterm")
+}
+/// BELL-003/004: how long one visual-bell flash lasts.
+const BELL_MS: u32 = 300;
+/// BELL-003/004: the visual-bell timer id (`SetTimer` `nIDEvent`).
+const BELL_TIMER: usize = 3;
 /// Typical terminal cursor blink period.
 const BLINK_MS: u32 = 530;
 
@@ -564,6 +575,9 @@ struct WindowState {
     spawn: SpawnOptions,
     font: FontConfig,
     tab_bar: TabBar,
+    /// BELL-003/004: tabs whose bell is still flashing.
+    bell_tabs: Vec<bool>,
+    bell_flash: bool,
     /// Full configuration: tab bar placement, split, search, cursor,
     /// keybindings, profiles (CONFIG-007..013).
     cfg: Config,
@@ -647,6 +661,48 @@ impl WindowState {
     }
 
     /// `true` when `y` (client DIPs) lands on the tab-bar strip.
+    /// BELL-001..008: ring the bells the shells just produced. A bell that
+    /// arrives while a flash is running only re-arms the timer.
+    fn take_bell(&mut self, hwnd: HWND) {
+        if !self.app.any_bell() {
+            return;
+        }
+        self.bell_tabs = self.app.bell_flags();
+        self.app.take_bells();
+        if self.cfg.bell.audible() {
+            // BELL-009: MessageBeep returns straight away, so a storm of BELs
+            // cannot stall the PTY read.
+            unsafe {
+                let _ = MessageBeep(MB_ICONASTERISK);
+            }
+        }
+        if self.cfg.bell.visual() {
+            self.bell_flash = true;
+            unsafe {
+                let _ = SetTimer(Some(hwnd), BELL_TIMER, BELL_MS, None);
+            }
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+        }
+        // BELL-005: when the window is in the background, say so out loud.
+        let backgrounded = unsafe { GetForegroundWindow() } != hwnd;
+        if backgrounded {
+            let ringing = self
+                .bell_tabs
+                .iter()
+                .position(|flag| *flag)
+                .and_then(|i| self.app.tabs().get(i))
+                .map_or_else(String::new, |tab| tab.title().to_string());
+            show_toast(
+                &ringing,
+                if self.app.any_bell() {
+                    "A command is waiting for you."
+                } else {
+                    "A command finished."
+                },
+            );
+        }
+    }
+
     fn over_tab_bar(&self, y: f32, height: f32) -> bool {
         let bar = self.bar_height();
         bar > 0.0 && y >= self.bar_top(height) && y < self.bar_top(height) + bar
@@ -764,6 +820,12 @@ unsafe extern "system" fn wnd_proc(
                     .as_ref()
                     .map(|(_, buf)| format!("Rename tab: {buf}  (Enter to accept, Esc to cancel)"));
                 // NFR-216: paint() logs and swallows Direct2D failures.
+                let active = s.app.active_index();
+                r.set_bell_state(
+                    s.bell_flash,
+                    &s.bell_tabs,
+                    s.bell_tabs.get(active).copied().unwrap_or(false),
+                );
                 r.paint(&s.app, &s.theme, s.search.as_ref(), prompt.as_deref());
             }
             let _ = unsafe { EndPaint(hwnd, &ps) };
@@ -842,6 +904,13 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             if wparam.0 == BLINK_TIMER {
                 blink_cursor(hwnd);
+            } else if wparam.0 == BELL_TIMER {
+                // BELL-003/004: one flash, for a fixed time.
+                if let Some(state) = state_mut(hwnd) {
+                    state.bell_flash = false;
+                    state.bell_tabs.clear();
+                }
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             }
             drain_and_cleanup(hwnd);
             LRESULT(0)
@@ -1877,6 +1946,42 @@ fn toggle_fullscreen(hwnd: HWND) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
+/// Escape the five XML metacharacters: the toast body carries shell text.
+fn xml_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// BELL-005: a Windows toast, attributed to rusttyterm by the AUMID.
+fn show_toast(title: &str, body: &str) {
+    let xml = format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        xml_escape(title),
+        xml_escape(body)
+    );
+    let _ = (|| -> Result<()> {
+        // SAFETY: FFI boundary (NFR-401) - the AUMID is a static wide string.
+        let id = aumid();
+        unsafe {
+            let _ = SetCurrentProcessExplicitAppUserModelID(&id);
+        }
+        let doc = XmlDocument::new()?;
+        doc.LoadXml(&windows::core::HSTRING::from(xml))?;
+        let toast = ToastNotification::CreateToastNotification(&doc)?;
+        ToastNotificationManager::CreateToastNotifierWithId(&id)?.Show(&toast)
+    })();
+}
+
 /// WM_TIMER: drain every shell, close dead panes (and the tabs they leave
 /// behind), refresh the caption.
 fn drain_and_cleanup(hwnd: HWND) {
@@ -1884,6 +1989,7 @@ fn drain_and_cleanup(hwnd: HWND) {
     let changed = {
         let Some(s) = state_mut(hwnd) else { return };
         s.app.drain_shells();
+        s.take_bell(hwnd);
         // Repaint only when a grid actually changed (NFR-113: no idle
         // repaints), and only the rows the grid wrote: paint the damage
         // directly instead of invalidating the client area, so a burst of
@@ -1894,6 +2000,12 @@ fn drain_and_cleanup(hwnd: HWND) {
                     .renaming
                     .as_ref()
                     .map(|(_, buf)| format!("Rename tab: {buf}  (Enter to accept, Esc to cancel)"));
+                let active = s.app.active_index();
+                r.set_bell_state(
+                    s.bell_flash,
+                    &s.bell_tabs,
+                    s.bell_tabs.get(active).copied().unwrap_or(false),
+                );
                 r.paint_damage(&s.app, &s.theme, s.search.as_ref(), prompt.as_deref());
                 s.app.clear_grid_damage();
             } else {
@@ -2492,6 +2604,8 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         spawn,
         font: font.clone(),
         tab_bar: cfg.tab_bar.visible,
+        bell_tabs: Vec::new(),
+        bell_flash: false,
         profiles: merge_profiles(cfg),
         cfg: cfg.clone(),
         renaming: None,
@@ -2578,6 +2692,14 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toast_text_is_escaped() {
+        assert_eq!(
+            xml_escape("make && rm -rf \"x\" <y> 'z'"),
+            "make &amp;&amp; rm -rf &quot;x&quot; &lt;y&gt; &apos;z&apos;"
+        );
+    }
 
     #[test]
     fn menu_generated_command_ranges_stay_disjoint() {

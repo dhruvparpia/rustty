@@ -54,6 +54,11 @@ cursor-blink = true
 # A left-drag release also copies the selection (CONFIG-008).
 copy-on-select = true
 
+# How a BEL is announced (BELL-002/006/007/008): "silent", "visual",
+# "audible" (the default) or "both". A bell while the window is in the
+# background also raises a Windows toast (BELL-005).
+bell = "audible"
+
 # ---------------------------------------------------------------------------
 # Theme (CONFIG-002/003, THEME-009/013/014)
 # ---------------------------------------------------------------------------

@@ -79,6 +79,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Per-profile confirmations (TAB-014/021): `confirm-close` and `confirm-new-process`
   in `[[profile]]`. Closing a tab whose shell is busy, closing the last tab, and
   quitting ask in a native dialog; the busy wording comes from the OSC 133 state.
+- Bell: `BEL` is decoded and announced. `bell = "silent" | "visual" | "audible" |
+  "both"` picks the mode (BELL-002/006/007/008); the visual bell flashes the tabs
+  that rang and the focused pane's border for 300 ms (BELL-003/004), the audible
+  bell plays the system bell (BELL-008), and a bell in a background window raises a
+  Windows toast attributed to rusttyterm by its AUMID (BELL-005). Ringing never
+  blocks the PTY read: the sound call returns straight away (BELL-009). Adds the
+  `windows` `UI_Notifications` and `Data_Xml_Dom` features.
 
 ### Fixed
 

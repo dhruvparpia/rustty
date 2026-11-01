@@ -28,6 +28,7 @@ windows = { version = "0.62", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_DataExchange",
     "Win32_System_IO",
     "Win32_System_LibraryLoader",
@@ -40,6 +41,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    "Data_Xml_Dom",
+    "UI_Notifications",
 ] }
 # Vector2 for Direct2D drawing calls (windows 0.62 does not re-export it).
 windows-numerics = "0.3.1"

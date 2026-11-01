@@ -61,6 +61,8 @@ pub struct Pane {
     command_running: bool,
     /// Exit code from the last `OSC 133;D:<code>`.
     last_exit: Option<i32>,
+    /// BEL seen and not yet handled by the window layer (BELL-001).
+    bell: bool,
     /// Main screen kept while the alternate screen is active (TTY-018).
     main_grid: Option<Grid>,
     in_alt: bool,
@@ -83,6 +85,7 @@ impl Pane {
             at_prompt: false,
             command_running: false,
             last_exit: None,
+            bell: false,
             main_grid: None,
             in_alt: false,
             dirty: true,
@@ -103,6 +106,7 @@ impl Pane {
             at_prompt: false,
             command_running: false,
             last_exit: None,
+            bell: false,
             main_grid: None,
             in_alt: false,
             dirty: true,
@@ -180,6 +184,17 @@ impl Pane {
         self.at_prompt
     }
 
+    /// BELL-001: a bell is waiting to be shown or heard.
+    #[must_use]
+    pub fn bell_pending(&self) -> bool {
+        self.bell
+    }
+
+    /// Clear the bell flag: the window layer rings once per BEL.
+    pub fn take_bell(&mut self) {
+        self.bell = false;
+    }
+
     /// Exit code of the last command that finished, from `OSC 133;D:<code>`.
     #[must_use]
     pub fn last_exit_code(&self) -> Option<i32> {
@@ -224,6 +239,7 @@ impl Pane {
             match event {
                 ParserEvent::Title(title) => self.title = Some(title),
                 ParserEvent::Cwd(url) => self.record_cwd(&url),
+                ParserEvent::Bell => self.bell = true,
                 ParserEvent::PromptStart => {
                     self.at_prompt = true;
                     self.command_running = false;
@@ -366,6 +382,18 @@ mod tests {
         pane.feed(b"\x1b]133;D:2\x07");
         assert!(pane.prompt_ready() && !pane.command_running());
         assert_eq!(pane.last_exit_code(), Some(2));
+    }
+
+    #[test]
+    fn a_bell_is_pending_until_the_window_layer_takes_it() {
+        let mut pane = Pane::with_size(20, 5, 10);
+        pane.feed(b"make");
+        assert!(pane.bell_pending());
+        pane.take_bell();
+        assert!(!pane.bell_pending());
+        // An OSC terminator is not a bell.
+        pane.feed(b"]0;T");
+        assert!(!pane.bell_pending());
     }
 
     #[test]

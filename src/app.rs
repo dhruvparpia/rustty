@@ -224,6 +224,25 @@ impl App {
         }
     }
 
+    /// BELL-003: which tabs have an unhandled bell, one flag per tab.
+    #[must_use]
+    pub fn bell_flags(&self) -> Vec<bool> {
+        self.tabs().iter().map(Tab::bell_pending).collect()
+    }
+
+    /// True when any tab has an unhandled bell.
+    #[must_use]
+    pub fn any_bell(&self) -> bool {
+        self.tabs().iter().any(Tab::bell_pending)
+    }
+
+    /// Clear every pane's bell flag (the window layer rang once).
+    pub fn take_bells(&mut self) {
+        for tab in &mut self.tabs {
+            tab.take_bell();
+        }
+    }
+
     /// Resize every tab to `cols` x `rows`. A per-profile font changes the
     /// grid the window fits (SHELL-019), so all tabs have to follow. The
     /// first ConPTY failure is returned; grids always resize.

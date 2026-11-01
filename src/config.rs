@@ -75,6 +75,35 @@ pub enum TabBarPlacement {
     Bottom,
 }
 
+/// How a BEL is announced (BELL-002/006/007/008).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BellMode {
+    /// Show nothing, make no sound (BELL-006).
+    Silent,
+    /// Flash the tab and the pane (BELL-003/004/007).
+    Visual,
+    /// Play the system bell (BELL-008).
+    #[default]
+    Audible,
+    /// Flash and play the system bell.
+    Both,
+}
+
+impl BellMode {
+    /// Should a BEL flash the UI?
+    #[must_use]
+    pub fn visual(self) -> bool {
+        matches!(self, Self::Visual | Self::Both)
+    }
+
+    /// Should a BEL play a sound?
+    #[must_use]
+    pub fn audible(self) -> bool {
+        matches!(self, Self::Audible | Self::Both)
+    }
+}
+
 /// Cursor shape (CONFIG-010).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -588,6 +617,9 @@ pub struct Config {
     /// Copy mouse selection immediately (CONFIG-008).
     #[serde(rename = "copy-on-select", default)]
     pub copy_on_select: bool,
+    /// How a BEL is announced: `silent`, `visual`, `audible`, `both`.
+    #[serde(default)]
+    pub bell: BellMode,
     /// Profile used for the first tab.
     #[serde(rename = "starting-profile", default)]
     pub starting_profile: String,
@@ -623,6 +655,7 @@ impl Default for Config {
             cursor_shape: CursorShape::default(),
             cursor_blink: true,
             copy_on_select: false,
+            bell: BellMode::default(),
             starting_profile: String::new(),
             window: WindowConfig::default(),
             split: SplitConfig::default(),
@@ -888,6 +921,24 @@ mod tests {
         assert_eq!(cfg.font_size, DEFAULT_FONT_SIZE);
         assert_eq!(cfg.scrollback, DEFAULT_SCROLLBACK);
         assert_eq!(cfg.tab_bar.visible, TabBar::Always);
+    }
+
+    #[test]
+    fn the_bell_mode_is_configurable_and_defaults_to_audible() {
+        assert_eq!(Config::parse("").expect_result().bell, BellMode::Audible);
+        for (text, mode) in [
+            ("bell = \"silent\"", BellMode::Silent),
+            ("bell = \"visual\"", BellMode::Visual),
+            ("bell = \"audible\"", BellMode::Audible),
+            ("bell = \"both\"", BellMode::Both),
+        ] {
+            assert_eq!(Config::parse(text).expect_result().bell, mode);
+        }
+        assert!(Config::parse("bell = \"loud\"").is_err());
+        assert!(!BellMode::Silent.visual() && !BellMode::Silent.audible());
+        assert!(BellMode::Visual.visual() && !BellMode::Visual.audible());
+        assert!(BellMode::Audible.audible() && !BellMode::Audible.visual());
+        assert!(BellMode::Both.visual() && BellMode::Both.audible());
     }
 
     #[test]

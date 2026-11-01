@@ -312,6 +312,11 @@ pub struct Renderer {
     cursor_blink_visible: bool,
     split_border: bool,
     split_padding: f32,
+    /// BELL-003/004: while a bell is unacknowledged, the tabs that rang and
+    /// the focused pane are drawn in the highlight colour.
+    bell_flash: bool,
+    bell_tabs: Vec<bool>,
+    bell_focused_pane: bool,
     /// `[window.padding]` in DIPs: the grid is inset by this much, the tab
     /// bar strip is not (WINDOW-011).
     pad_x: f32,
@@ -488,6 +493,9 @@ impl Renderer {
             cursor_blink_visible: true,
             split_border: true,
             split_padding: 1.0,
+            bell_flash: false,
+            bell_tabs: Vec::new(),
+            bell_focused_pane: false,
             pad_x: 0.0,
             pad_y: 0.0,
             brushes: HashMap::new(),
@@ -566,6 +574,15 @@ impl Renderer {
     pub fn set_split_options(&mut self, border: bool, padding: u32) {
         self.split_border = border;
         self.split_padding = padding as f32;
+    }
+
+    /// BELL-003/004: which tabs to flash, and whether the focused pane of the
+    /// active tab flashes too.
+    pub fn set_bell_state(&mut self, flash: bool, tabs: &[bool], focused_pane: bool) {
+        self.bell_flash = flash;
+        self.bell_tabs.clear();
+        self.bell_tabs.extend_from_slice(tabs);
+        self.bell_focused_pane = focused_pane;
     }
 
     /// `[window.padding]` (WINDOW-011). Callers re-read [`Renderer::grid_size`]
@@ -1280,6 +1297,15 @@ impl Renderer {
             if i == active {
                 self.fill_rect(lo, bar_top, hi, bar_bottom, theme.tab_active);
             }
+            if self.bell_flash && self.bell_tabs.get(i) == Some(&true) {
+                self.fill_rect(
+                    lo,
+                    bar_top,
+                    hi,
+                    bar_bottom,
+                    mix(theme.search_highlight, theme.tab_bar, 0.25),
+                );
+            }
             let close_w = if self.tab_close_button { cw * 1.5 } else { 0.0 };
             tabbar::fit_title_into(
                 &self.titles[i],
@@ -1577,10 +1603,12 @@ impl Renderer {
                     let y = self.grid_top() + rect.row as f32 * ch + pad;
                     let w = rect.cols as f32 * cw - 2.0 * pad;
                     let pane_height = rect.rows as f32 * ch - pad;
-                    let color = if pass_focus {
-                        theme.split_focus
-                    } else {
+                    let color = if !pass_focus {
                         theme.split_border
+                    } else if self.bell_flash && self.bell_focused_pane {
+                        theme.search_highlight
+                    } else {
+                        theme.split_focus
                     };
                     if rect.col > 0 && leaf_at(tab, rect.col - 1, rect.row).is_some() {
                         self.fill_rect(x, y, x + 1.0, y + pane_height, color);

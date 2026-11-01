@@ -217,6 +217,19 @@ impl Tab {
             .for_each(&self.layout, |_, pane, rect| f(&pane.borrow(), rect));
     }
 
+    /// BELL-003/004: true when any pane in this tab rang the bell.
+    #[must_use]
+    pub fn bell_pending(&self) -> bool {
+        let mut any = false;
+        self.for_each_pane_ref(&mut |pane: &Pane, _rect: Rect| any |= pane.bell_pending());
+        any
+    }
+
+    /// Clear the bell flag of every pane in this tab.
+    pub fn take_bell(&mut self) {
+        self.for_each_pane(&mut |pane: &mut Pane, _rect: Rect| pane.take_bell());
+    }
+
     /// Number of panes in the tab (1 before any split, SPLIT-001).
     #[must_use]
     pub fn pane_count(&self) -> usize {
