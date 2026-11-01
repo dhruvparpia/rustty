@@ -64,11 +64,14 @@ fn main() -> ExitCode {
     // the nearest working theme is used.
     let theme_dir =
         rusttyterm::config::config_path().and_then(|p| p.parent().map(|dir| dir.join("themes")));
-    let (theme, problems) = theme::resolve_configured(
-        cfg.theme.name(),
-        &cfg.theme.overrides(),
-        theme_dir.as_deref(),
-    );
+    // THEME-010: an empty theme name follows the system dark/light setting.
+    let theme_name = if cfg.theme.name().is_empty() {
+        theme::Theme::system_preset()
+    } else {
+        cfg.theme.name()
+    };
+    let (theme, problems) =
+        theme::resolve_configured(theme_name, &cfg.theme.overrides(), theme_dir.as_deref());
     for problem in &problems {
         eprintln!("rusttyterm: {problem}");
     }
@@ -91,7 +94,11 @@ fn main() -> ExitCode {
                 env!("CARGO_PKG_VERSION"),
                 cfg.window.cols,
                 cfg.window.rows,
-                cfg.theme.name(),
+                if cfg.theme.name().is_empty() {
+                    theme::Theme::system_preset()
+                } else {
+                    cfg.theme.name()
+                },
             );
             ExitCode::SUCCESS
         }

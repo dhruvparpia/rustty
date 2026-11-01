@@ -694,8 +694,10 @@ impl PartialEq for Config {
 
 impl Eq for Config {}
 
+/// The default theme name is empty: follow the system dark/light setting
+/// (THEME-010). A name in the config wins over the system.
 fn default_theme_setting() -> ThemeSetting {
-    ThemeSetting::Name(String::from(DEFAULT_THEME))
+    ThemeSetting::Name(String::new())
 }
 
 fn default_font() -> String {
@@ -916,7 +918,10 @@ mod tests {
     fn empty_config_uses_defaults() {
         let cfg = Config::parse("").expect_result();
         assert_eq!(cfg, Config::default());
-        assert_eq!(cfg.theme.name(), "predawn");
+        assert!(
+            cfg.theme.name().is_empty(),
+            "an unset theme follows the system (THEME-010)"
+        );
         assert_eq!(cfg.font, DEFAULT_FONT);
         assert_eq!(cfg.font_size, DEFAULT_FONT_SIZE);
         assert_eq!(cfg.scrollback, DEFAULT_SCROLLBACK);

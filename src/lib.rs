@@ -63,6 +63,11 @@ pub mod split;
 pub mod render;
 pub mod tab;
 pub mod tabbar;
+// THEME-010: reading the system dark/light setting is a Win32 registry call.
+#[allow(
+    unsafe_code,
+    reason = "THEME-010: the system theme check is a Win32 registry FFI boundary"
+)]
 pub mod theme;
 // Win32 window + message loop FFI boundary (spec WIN-001, WIN-005).
 #[cfg(windows)]

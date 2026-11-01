@@ -40,12 +40,13 @@ pub struct Theme {
 }
 
 /// Every built-in preset, in the order [`preset_names`] reports them.
-pub const PRESETS: [&str; 5] = [
+pub const PRESETS: [&str; 6] = [
     "predawn",
     "catppuccin-mocha",
     "gruvbox-dark",
     "one-dark",
     "solarized-dark",
+    "solarized-light",
 ];
 
 impl Theme {
@@ -64,6 +65,76 @@ impl Theme {
             split_border: Color::from_hex(0x4C465C),
             split_focus: Color::from_hex(0x61C0FF),
             palette: ansi_palette(),
+        }
+    }
+
+    /// Solarized light: the light half of the Solarized pair (THEME-010).
+    #[must_use]
+    pub fn solarized_light() -> Self {
+        Self {
+            name: String::from("solarized-light"),
+            background: Color::from_hex(0xFDF6E3),
+            foreground: Color::from_hex(0x586E75),
+            cursor: Color::from_hex(0x268BD2),
+            selection: Color::from_hex(0xEAE3C9),
+            search_highlight: Color::from_hex(0xEAE3C9),
+            tab_bar: Color::from_hex(0xEDE8D3),
+            tab_active: Color::from_hex(0xEAE3C9),
+            split_border: Color::from_hex(0xEAE3C9),
+            split_focus: Color::from_hex(0x268BD2),
+            palette: [
+                Color::from_hex(0x93A1A1),
+                Color::from_hex(0xDC322F),
+                Color::from_hex(0x859900),
+                Color::from_hex(0xB58900),
+                Color::from_hex(0x268BD2),
+                Color::from_hex(0xD33682),
+                Color::from_hex(0x2AA198),
+                Color::from_hex(0xEEE8D5),
+                Color::from_hex(0x002B36),
+                Color::from_hex(0xCB4B16),
+                Color::from_hex(0x859900),
+                Color::from_hex(0xB58900),
+                Color::from_hex(0x268BD2),
+                Color::from_hex(0xD33682),
+                Color::from_hex(0x2AA198),
+                Color::from_hex(0xFDF6E3),
+            ],
+        }
+    }
+
+    /// The preset that matches the system's dark/light setting (THEME-010).
+    /// An unreadable registry gives the built-in default.
+    #[must_use]
+    pub fn system_preset() -> &'static str {
+        #[cfg(windows)]
+        {
+            use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_DWORD, RegGetValueW};
+            use windows::core::w;
+            let mut value = 0u32;
+            let mut size = 4u32;
+            let status =
+                // SAFETY: FFI boundary (NFR-401) - a 4-byte out buffer and its size.
+                unsafe {
+                RegGetValueW(
+                    HKEY_CURRENT_USER,
+                    w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+                    w!("AppsUseLightTheme"),
+                    RRF_RT_DWORD,
+                    None::<*mut windows::Win32::System::Registry::REG_VALUE_TYPE>,
+                    Some(std::ptr::addr_of_mut!(value).cast::<core::ffi::c_void>()),
+                    Some(std::ptr::addr_of_mut!(size)),
+                )
+            };
+            if status.is_ok() && value != 0 {
+                "solarized-light"
+            } else {
+                crate::config::DEFAULT_THEME
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            crate::config::DEFAULT_THEME
         }
     }
 
@@ -222,6 +293,7 @@ impl Theme {
             "gruvbox-dark" => Some(Self::gruvbox_dark()),
             "one-dark" => Some(Self::one_dark()),
             "solarized-dark" => Some(Self::solarized_dark()),
+            "solarized-light" => Some(Self::solarized_light()),
             _ => None,
         }
     }
@@ -426,6 +498,20 @@ mod tests {
 
     fn table(text: &str) -> ThemeFile {
         toml::from_str(text).unwrap_or_else(|e| panic!("bad theme table: {e}"))
+    }
+
+    #[test]
+    fn the_light_preset_is_light_and_the_system_preset_is_known() {
+        let light = Theme::preset("solarized-light").expect("preset exists");
+        assert!(
+            light.background.r > light.foreground.r,
+            "the light preset has a light background"
+        );
+        assert!(Theme::preset_names().contains(&"solarized-light"));
+        assert!(
+            Theme::preset_names().contains(&Theme::system_preset()),
+            "the system preset is a real preset"
+        );
     }
 
     #[test]

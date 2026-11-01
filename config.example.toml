@@ -62,6 +62,11 @@ bell = "audible"
 # ---------------------------------------------------------------------------
 # Theme (CONFIG-002/003, THEME-009/013/014)
 # ---------------------------------------------------------------------------
+# `theme = "gruvbox-dark"` picks a preset: predawn, catppuccin-mocha,
+# gruvbox-dark, one-dark, solarized-dark, solarized-light. With no `theme` key
+# the app follows the Windows dark/light setting (THEME-010): light picks
+# solarized-light, dark picks predawn.
+#
 # A [theme] table replaces the plain `theme` key. `name` picks the base: a
 # preset, or the name of themes\<name>.toml beside this file (that file may
 # set any of the keys below). Colors written here win over the file. Colors
