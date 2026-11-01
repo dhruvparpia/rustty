@@ -321,6 +321,12 @@ pub struct ProfileConfig {
     /// Optional profile line height.
     #[serde(rename = "line-height", default)]
     pub line_height: Option<f32>,
+    /// Ask before closing tabs of this profile (TAB-014).
+    #[serde(rename = "confirm-close")]
+    pub confirm_close: Option<bool>,
+    /// Warn when a new process starts unasked (TAB-021).
+    #[serde(rename = "confirm-new-process")]
+    pub confirm_new_process: Option<bool>,
     /// Optional profile scrollback.
     #[serde(default)]
     pub scrollback: Option<usize>,

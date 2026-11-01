@@ -29,6 +29,17 @@ pub enum ParserEvent {
     ClearScrollback,
     /// Ready-made reply bytes to hand back to the shell (DSR, DA).
     Respond(Vec<u8>),
+    /// OSC 7: the shell reports its working directory
+    /// (`file://host/path`, percent-encoded).
+    Cwd(String),
+    /// OSC 133;A: the shell is sitting at a prompt.
+    PromptStart,
+    /// OSC 133;B: a command was accepted and is about to run.
+    CommandStart,
+    /// OSC 133;C: the command produced its first output.
+    CommandOutput,
+    /// OSC 133;D[:`exit`]: the command finished with this exit code.
+    PromptEnd(Option<i32>),
 }
 
 /// What one [`Parser::advance`] call produced.
@@ -390,8 +401,23 @@ impl Parser {
         let payload = std::mem::take(&mut self.osc);
         let text = String::from_utf8_lossy(&payload).into_owned();
         if let Some((prefix, rest)) = text.split_once(';') {
-            if matches!(prefix, "0" | "1" | "2") {
-                events.push(ParserEvent::Title(rest.to_string()));
+            match prefix {
+                "0" | "1" | "2" => events.push(ParserEvent::Title(rest.to_string())),
+                "7" => events.push(ParserEvent::Cwd(rest.to_string())),
+                "133" => {
+                    let (marker, code) = match rest.split_once(':') {
+                        Some((m, c)) => (m, c.parse().ok()),
+                        None => (rest, None),
+                    };
+                    match marker {
+                        "A" => events.push(ParserEvent::PromptStart),
+                        "B" => events.push(ParserEvent::CommandStart),
+                        "C" => events.push(ParserEvent::CommandOutput),
+                        "D" => events.push(ParserEvent::PromptEnd(code)),
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         } else if !text.is_empty() && !text.chars().all(|c| c.is_ascii_digit()) {
             events.push(ParserEvent::Title(text));

@@ -33,6 +33,9 @@ pub enum PaneClose {
 pub struct App {
     tabs: Vec<Tab>,
     active: usize,
+    /// TAB-011: a pane that sets no title shows the directory it reported
+    /// with OSC 7.
+    show_cwd: bool,
 }
 
 impl App {
@@ -42,6 +45,7 @@ impl App {
         Self {
             tabs: vec![Tab::new()],
             active: 0,
+            show_cwd: true,
         }
     }
 
@@ -52,7 +56,19 @@ impl App {
         Self {
             tabs: vec![Tab::with_size(cols, rows, scrollback)],
             active: 0,
+            show_cwd: true,
         }
+    }
+
+    /// TAB-014: the active tab asks before its shells are closed.
+    #[must_use]
+    pub fn tab_confirm_close(&self) -> bool {
+        self.active_tab().is_some_and(Tab::confirm_close)
+    }
+
+    /// Turn the cwd fallback in tab titles on or off (`tab-bar.show-cwd`).
+    pub fn set_show_cwd(&mut self, on: bool) {
+        self.show_cwd = on;
     }
 
     /// All tabs, in tab-bar order.
@@ -391,14 +407,35 @@ impl App {
 
     /// Copy the focused pane's OSC title onto its tab (tab-bar titles,
     /// spec §11, SPLIT-011/012: the tab shows what its focused pane runs).
+    /// With `show_cwd` (TAB-011) a pane that sets no title shows the
+    /// directory it reported with OSC 7.
     pub fn sync_tab_titles(&mut self) {
+        let show_cwd = self.show_cwd;
         for tab in &mut self.tabs {
-            let title = tab.pane().title().map(str::to_string);
+            // Read the pane through its own borrow, then release it, so the
+            // tab is writable again below.
+            let title = {
+                let pane = tab.pane();
+                pane.title().map(str::to_string).or_else(|| {
+                    if show_cwd {
+                        pane.cwd().and_then(last_path_component)
+                    } else {
+                        None
+                    }
+                })
+            };
             if let Some(title) = title {
                 tab.set_title(title);
             }
         }
     }
+}
+
+/// Last directory component of a path, `/` or `\` separated (TAB-011).
+fn last_path_component(path: &str) -> Option<String> {
+    path.split(['/', '\\'])
+        .rfind(|part| !part.is_empty() && !part.ends_with(':'))
+        .map(str::to_string)
 }
 
 impl Default for App {

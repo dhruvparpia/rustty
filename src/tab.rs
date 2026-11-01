@@ -43,6 +43,10 @@ pub struct Tab {
     profile: String,
     /// Tab color from the profile/theme.
     color: Option<Color>,
+    /// Ask before closing this tab's shells (TAB-014).
+    confirm_close: bool,
+    /// Warn when a new process starts in this tab unasked (TAB-021).
+    confirm_new_process: bool,
 }
 
 impl Tab {
@@ -71,6 +75,8 @@ impl Tab {
             title_fixed: false,
             profile: String::new(),
             color: None,
+            confirm_close: true,
+            confirm_new_process: true,
         }
     }
 
@@ -109,6 +115,24 @@ impl Tab {
     /// Set profile label.
     pub fn set_profile(&mut self, profile: impl Into<String>) {
         self.profile = profile.into();
+    }
+
+    /// TAB-014: does closing this tab's shells need a confirmation?
+    #[must_use]
+    pub const fn confirm_close(&self) -> bool {
+        self.confirm_close
+    }
+
+    /// TAB-021: warn when a new process starts in this tab unasked.
+    #[must_use]
+    pub const fn confirm_new_process(&self) -> bool {
+        self.confirm_new_process
+    }
+
+    /// The confirm flags a profile brings (TAB-014/021).
+    pub fn set_confirm(&mut self, close: bool, new_process: bool) {
+        self.confirm_close = close;
+        self.confirm_new_process = new_process;
     }
 
     /// Tab color (TAB-014/015/021).

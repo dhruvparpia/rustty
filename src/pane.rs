@@ -15,6 +15,37 @@ use crate::parser::{Parser, ParserEvent};
 use crate::selection::Selection;
 use crate::shell::{Shell, ShellError, ShellEvent, SpawnOptions};
 
+/// Turn an OSC 7 `file://host/path` (percent-encoded) into a path.
+fn cwd_from_url(url: &str) -> String {
+    let rest = url.strip_prefix("file://").unwrap_or(url);
+    // Drop the host component (everything up to the first '/'), keeping a
+    // leading slash for the absolute path that follows.
+    let path = match rest.find('/') {
+        Some(i) => &rest[i..],
+        None => return String::new(),
+    };
+    let mut out = String::with_capacity(path.len());
+    let mut chars = path.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if hex.len() == 2
+                && let Ok(byte) = u8::from_str_radix(&hex, 16)
+            {
+                out.push(char::from(byte));
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    // `/c/Users/x` and `/C:/Users/x` are both used; keep the drive form.
+    let bytes: Vec<char> = out.chars().collect();
+    if bytes.len() >= 3 && bytes[0] == '/' && bytes[2] == ':' && bytes[1].is_ascii_alphabetic() {
+        return out[1..].to_string();
+    }
+    out
+}
+
 /// A single terminal pane (one grid, one parser, one shell process).
 #[derive(Debug)]
 pub struct Pane {
@@ -22,6 +53,14 @@ pub struct Pane {
     shell: Shell,
     parser: Parser,
     title: Option<String>,
+    /// Last working directory the shell reported (OSC 7, SHELL-001).
+    cwd: Option<String>,
+    /// OSC 133;A/133;D seen: the shell is at a prompt.
+    at_prompt: bool,
+    /// OSC 133;B/C seen without a matching `D`: a command is running.
+    command_running: bool,
+    /// Exit code from the last `OSC 133;D:<code>`.
+    last_exit: Option<i32>,
     /// Main screen kept while the alternate screen is active (TTY-018).
     main_grid: Option<Grid>,
     in_alt: bool,
@@ -40,6 +79,10 @@ impl Pane {
             shell: Shell::new(),
             parser: Parser::new(),
             title: None,
+            cwd: None,
+            at_prompt: false,
+            command_running: false,
+            last_exit: None,
             main_grid: None,
             in_alt: false,
             dirty: true,
@@ -56,6 +99,10 @@ impl Pane {
             shell: Shell::new(),
             parser: Parser::new(),
             title: None,
+            cwd: None,
+            at_prompt: false,
+            command_running: false,
+            last_exit: None,
             main_grid: None,
             in_alt: false,
             dirty: true,
@@ -120,6 +167,36 @@ impl Pane {
         self.title.as_deref()
     }
 
+    /// Working directory the shell reported with OSC 7 (SHELL-001), if any.
+    #[must_use]
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+
+    /// SHELL-003: is the shell sitting at a prompt (after the first prompt
+    /// marker)? TAB-014/021 and the notification plan use this.
+    #[must_use]
+    pub fn prompt_ready(&self) -> bool {
+        self.at_prompt
+    }
+
+    /// Exit code of the last command that finished, from `OSC 133;D:<code>`.
+    #[must_use]
+    pub fn last_exit_code(&self) -> Option<i32> {
+        self.last_exit
+    }
+
+    /// A command is running: between the prompt and `OSC 133;D`.
+    #[must_use]
+    pub fn command_running(&self) -> bool {
+        self.command_running
+    }
+
+    /// Turn a `file://host/path` report into a path string.
+    fn record_cwd(&mut self, url: &str) {
+        self.cwd = Some(cwd_from_url(url));
+    }
+
     /// Whether the alternate screen is active (TTY-018).
     #[must_use]
     pub const fn in_alt_screen(&self) -> bool {
@@ -146,6 +223,20 @@ impl Pane {
         for event in outcome.events {
             match event {
                 ParserEvent::Title(title) => self.title = Some(title),
+                ParserEvent::Cwd(url) => self.record_cwd(&url),
+                ParserEvent::PromptStart => {
+                    self.at_prompt = true;
+                    self.command_running = false;
+                }
+                ParserEvent::CommandStart | ParserEvent::CommandOutput => {
+                    self.command_running = true;
+                    self.at_prompt = false;
+                }
+                ParserEvent::PromptEnd(code) => {
+                    self.at_prompt = true;
+                    self.command_running = false;
+                    self.last_exit = code;
+                }
                 ParserEvent::EnterAltScreen => {
                     if !self.in_alt {
                         let fresh = Grid::with_size(cols, rows, 0);
@@ -258,6 +349,23 @@ mod tests {
         assert_eq!(pane.grid().cols, 80);
         assert!(pane.title().is_none());
         assert!(!pane.in_alt_screen());
+    }
+
+    #[test]
+    fn osc_7_and_133_update_the_cwd_prompt_state_and_exit_code() {
+        let mut pane = Pane::with_size(20, 5, 10);
+        pane.feed(b"\x1b]7;file://DESKTOP/C:/src/rust\x07");
+        assert_eq!(pane.cwd(), Some("C:/src/rust"));
+        pane.feed(b"\x1b]7;file://HOST/home/dhruv/one%20two\x07");
+        assert_eq!(pane.cwd(), Some("/home/dhruv/one two"));
+        assert!(!pane.prompt_ready());
+        pane.feed(b"\x1b]133;A\x07");
+        assert!(pane.prompt_ready());
+        pane.feed(b"\x1b]133;B\x07\x1b]133;C\x07");
+        assert!(pane.command_running() && !pane.prompt_ready());
+        pane.feed(b"\x1b]133;D:2\x07");
+        assert!(pane.prompt_ready() && !pane.command_running());
+        assert_eq!(pane.last_exit_code(), Some(2));
     }
 
     #[test]

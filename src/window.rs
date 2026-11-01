@@ -307,6 +307,10 @@ struct ProfileSpec {
     theme: Option<String>,
     color: Option<Color>,
     scrollback: Option<usize>,
+    /// TAB-014: ask before this tab's shells are closed.
+    confirm_close: bool,
+    /// TAB-021: warn when a new process starts unasked.
+    confirm_new_process: bool,
 }
 
 impl ProfileSpec {
@@ -320,6 +324,8 @@ impl ProfileSpec {
             theme: None,
             color: None,
             scrollback: None,
+            confirm_close: true,
+            confirm_new_process: true,
         }
     }
 }
@@ -336,8 +342,10 @@ fn merge_profiles(cfg: &Config) -> Vec<ProfileSpec> {
             cwd: Some(config::expand_path(&profile.starting_directory)),
             env: profile.env.clone(),
             theme: (!profile.theme.is_empty()).then(|| profile.theme.clone()),
-            color: profile.tab_color.as_deref().and_then(parse_hex),
+            color: profile.tab_color.as_deref().and_then(Color::parse_hex),
             scrollback: profile.scrollback,
+            confirm_close: profile.confirm_close.unwrap_or(true),
+            confirm_new_process: profile.confirm_new_process.unwrap_or(true),
         };
         match merged.iter_mut().position(|e| e.name == spec.name) {
             Some(idx) => merged[idx] = spec,
@@ -345,20 +353,6 @@ fn merge_profiles(cfg: &Config) -> Vec<ProfileSpec> {
         }
     }
     merged
-}
-
-/// `#rrggbb`, as used by `tab-color` (TAB-015).
-fn parse_hex(text: &str) -> Option<Color> {
-    let hex = text.strip_prefix('#').unwrap_or(text);
-    if hex.len() != 6 {
-        return None;
-    }
-    let value = u32::from_str_radix(hex, 16).ok()?;
-    Some(Color::rgb(
-        (value >> 16) as u8,
-        (value >> 8) as u8,
-        value as u8,
-    ))
 }
 
 fn active_profile(s: &WindowState) -> ProfileSpec {
@@ -860,6 +854,11 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CLOSE => {
+            // TAB-014: quitting asks first when the profile wants it.
+            let ask = state_ref(hwnd).is_some_and(|s| s.app.tab_confirm_close());
+            if ask && !confirm_yes_no(hwnd, "Quit rusttyterm?") {
+                return LRESULT(0);
+            }
             let _ = unsafe { DestroyWindow(hwnd) };
             LRESULT(0)
         }
@@ -1970,28 +1969,47 @@ fn split_pane(hwnd: HWND, dir: Dir) {
 /// with a confirm box when its shell is live); otherwise close the tab,
 /// and closing the last tab closes the window (WM_DESTROY reclaims the
 /// state and quits the loop).
+/// TAB-014/021: a native yes/no box. The default button is "No", so a
+/// stray Enter keeps the shells alive.
+fn confirm_yes_no(hwnd: HWND, text: &str) -> bool {
+    let text = wstr(text);
+    let caption = wstr("rusttyterm");
+    let answer = unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            PCWSTR::from_raw(text.as_ptr()),
+            PCWSTR::from_raw(caption.as_ptr()),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
+    };
+    answer == IDYES
+}
+
 fn close_pane_or_tab(hwnd: HWND) {
-    let (multi, live) = match state_ref(hwnd) {
+    let (multi, live, busy, confirm) = match state_ref(hwnd) {
         Some(s) => (
             s.app.pane_count() > 1,
             s.app
                 .active_tab()
                 .is_some_and(|t| t.pane().shell().state() == crate::shell::ShellState::Running),
+            // TAB-014 "shell is busy": OSC 133 reported a command start and
+            // no prompt has come back yet.
+            s.app
+                .active_tab()
+                .is_some_and(|t| t.pane().command_running()),
+            s.app.tab_confirm_close(),
         ),
         None => return,
     };
-    if multi && live {
-        let text = wstr("Close the focused pane? Its shell is still running.");
-        let caption = wstr("rusttyterm");
-        let answer = unsafe {
-            MessageBoxW(
-                Some(hwnd),
-                PCWSTR::from_raw(text.as_ptr()),
-                PCWSTR::from_raw(caption.as_ptr()),
-                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
-            )
+    // TAB-014: confirm when the profile asks and the close would kill a
+    // running shell, or would quit (it is the last tab).
+    if confirm && (live || !multi) {
+        let text = if busy {
+            "A command is running in this tab. Close it and kill the shell?"
+        } else {
+            "Close this tab? It is the last one, so rusttyterm will quit."
         };
-        if answer != IDYES {
+        if !confirm_yes_no(hwnd, text) {
             return;
         }
     }
@@ -2040,6 +2058,9 @@ fn new_tab_with_profile(hwnd: HWND, spec: ProfileSpec) {
         spec.color,
     );
     apply_profile_theme(s, &spec);
+    if let Some(tab) = s.app.active_tab_mut() {
+        tab.set_confirm(spec.confirm_close, spec.confirm_new_process);
+    }
     // Auto/hidden tab bars change the strip height when the count changes;
     // sync first so the new shell spawns at the grid the bar leaves room for.
     sync_tab_bar(hwnd);
@@ -2408,7 +2429,12 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
     unsafe { AdjustWindowRect(&mut rect, style, false) }?;
 
     let state = Box::new(WindowState {
-        app: App::with_size(cols, rows, cfg.scrollback),
+        app: {
+            let mut app = App::with_size(cols, rows, cfg.scrollback);
+            // TAB-011: tab titles fall back to the pane's OSC 7 cwd.
+            app.set_show_cwd(cfg.tab_bar.show_cwd);
+            app
+        },
         theme,
         spawn,
         font: font.clone(),
@@ -2513,9 +2539,9 @@ mod profile_tests {
 
     #[test]
     fn tab_colour_hex_accepts_hash_and_bare_forms() {
-        assert_eq!(parse_hex("#ff0000"), Some(Color::rgb(255, 0, 0)));
-        assert_eq!(parse_hex("00ff00"), Some(Color::rgb(0, 255, 0)));
-        assert_eq!(parse_hex("nope"), None);
+        assert_eq!(Color::parse_hex("#ff0000"), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(Color::parse_hex("00ff00"), Some(Color::rgb(0, 255, 0)));
+        assert_eq!(Color::parse_hex("nope"), None);
     }
 
     #[test]
