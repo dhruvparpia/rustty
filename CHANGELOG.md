@@ -86,6 +86,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   Windows toast attributed to rusttyterm by its AUMID (BELL-005). Ringing never
   blocks the PTY read: the sound call returns straight away (BELL-009). Adds the
   `windows` `UI_Notifications` and `Data_Xml_Dom` features.
+- System dark/light detection (THEME-010): with no `theme` key the app reads the
+  Windows `AppsUseLightTheme` registry value — light mode gets the new
+  `solarized-light` preset, dark mode gets `predawn`. A `theme` in the config, and
+  a per-profile theme, both win over the system. Adds the `windows`
+  `Win32_System_Registry` feature.
 
 ### Fixed
 
