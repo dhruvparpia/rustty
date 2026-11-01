@@ -31,6 +31,9 @@ line-height = 1.25
 # Ligature font features (OTF tags), comma separated.
 font-features = "calt,liga"
 
+# Turn font ligatures on or off (SPEC-006, FONT-011).
+ligatures = true
+
 # Rows of scrollback per tab, 0..1_000_000.
 scrollback = 10000
 
@@ -139,7 +142,6 @@ copy-on-select = true
 # env = { RUST_LOG = "debug" }        # added to the inherited environment
 # theme = "gruvbox-dark"              # preset name, or themes\<name>.toml
 # tab-color = "#ff8800"               # accent stripe on the tab
-# show-profile = true                 # prefix tab titles with the name
 # scrollback = 20000
 # confirm-close = true         # TAB-014: ask before a tab of this profile closes
 # confirm-new-process = true   # TAB-021: warn when a command starts in a tab unasked
@@ -185,23 +187,16 @@ copy-on-select = true
 # placement = "top"                # top | bottom
 # show-profiles = "auto"           # always | auto | never — prefix "name:"
 # close-button = true              # the hover box (TAB-021)
-# show-index = false
-# show-cwd = true                  # needs shell integration (v0.3)
-# max-width = 24
-# indicator-color = "#ff8800"
-# [tab-bar.section]                # what the profile selector shows
-# show-index = true
-# show-icon = true
-# show-name = true
+# show-cwd = true                  # TAB-011: last directory of the OSC 7 cwd
 
 # ---------------------------------------------------------------------------
 # Font (CONFIG-004..006)
 # ---------------------------------------------------------------------------
-# As a table this is the same as the plain font keys, plus per-monitor DPI.
+# As a table this is the same as the plain font keys (`font`, `font-size`, `line-height`,
+# `font-features`). DPI comes from the app's PerMonitorV2 manifest, not config.
 #
 # [font]
 # family = "Cascadia Mono"
 # size = 11
 # line-height = 1.25
-# dpi-scale = 100            # 50..400 percent
 # features = "calt,liga"
