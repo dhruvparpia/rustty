@@ -1,0 +1,31 @@
+# rusttyterm config — %APPDATA%\rusttyterm\config.toml
+#
+# Every key below is optional; the defaults shown are what the app uses
+# when the file or a key is missing. Unknown keys are rejected with an
+# error at startup (no silent clamps: a bad value is an error, not a
+# surprise).
+
+# Built-in theme preset. Known: predawn, catppuccin-mocha, gruvbox-dark,
+# one-dark, solarized-dark. An unknown name warns and falls back to predawn.
+theme = "predawn"
+
+# Font family, as installed on the system.
+font = "Cascadia Mono"
+
+# Size in points, 5..72.
+font-size = 11
+
+# Line height as a multiple of the font's natural height, 0.5..4.0.
+line-height = 1.2
+
+# Scrollback lines kept per tab, 0..1000000.
+scrollback = 1000
+
+# Tab bar visibility: "always", "auto" (only when more than one tab),
+# or "hidden" (Ctrl+Shift+T still makes tabs, the strip stays gone).
+tab-bar = "always"
+
+[window]
+# Initial grid size in cells, 1..4000 columns and 1..1000 rows.
+cols = 80
+rows = 24

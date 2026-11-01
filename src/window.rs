@@ -49,7 +49,7 @@ use windows::core::PCWSTR;
 
 use crate::app::App;
 use crate::clipboard;
-use crate::config::Config;
+use crate::config::{Config, FontConfig, TabBar};
 use crate::keyboard::{self, Modifiers};
 use crate::parser::bracketed_paste_bytes;
 use crate::render::{CellMetrics, Renderer, measure_cells, px_to_dips};
@@ -100,6 +100,8 @@ struct WindowState {
     app: App,
     theme: Theme,
     spawn: SpawnOptions,
+    font: FontConfig,
+    tab_bar: TabBar,
     renderer: Option<Renderer>,
     metrics: CellMetrics,
     timer_id: usize,
@@ -116,6 +118,19 @@ struct WindowState {
     /// Saved window rect + styles while fullscreen (F11), `None` in
     /// windowed mode.
     fullscreen: Option<(RECT, isize, isize)>,
+}
+
+impl WindowState {
+    /// Tab-bar strip height in DIPs for the current tab count (TAB-010):
+    /// `always` shows it, `auto` shows it only with more than one tab,
+    /// `hidden` never shows it.
+    fn bar_height(&self) -> f32 {
+        match self.tab_bar {
+            TabBar::Always => TAB_BAR_HEIGHT,
+            TabBar::Auto if self.app.tab_count() > 1 => TAB_BAR_HEIGHT,
+            TabBar::Auto | TabBar::Hidden => 0.0,
+        }
+    }
 }
 
 /// Recover the state box from `GWLP_USERDATA`, for the whole lifetime of
@@ -167,7 +182,7 @@ unsafe extern "system" fn wnd_proc(
         WM_GETMINMAXINFO => {
             let mm = lparam.0 as *mut MINMAXINFO;
             if let (true, Some(s)) = (!mm.is_null(), state_ref(hwnd)) {
-                let (w, h) = px_size(s.metrics, MIN_COLS, MIN_ROWS);
+                let (w, h) = px_size(s.metrics, MIN_COLS, MIN_ROWS, s.bar_height());
                 unsafe { (*mm).ptMinTrackSize = POINT { x: w, y: h } };
             }
             LRESULT(0)
@@ -301,8 +316,11 @@ fn init_window(hwnd: HWND) {
         let d = GetDpiForWindow(hwnd);
         if d == 0 { GetDpiForSystem() } else { d }
     };
-    let (init_cols, init_rows) = state_ref(hwnd).map_or((80, 24), |s| (s.spawn.cols, s.spawn.rows));
-    let metrics = match measure_cells(dpi) {
+    let (init_cols, init_rows, font, bar) = state_ref(hwnd)
+        .map_or((80, 24, FontConfig::default(), TAB_BAR_HEIGHT), |s| {
+            (s.spawn.cols, s.spawn.rows, s.font.clone(), s.bar_height())
+        });
+    let metrics = match measure_cells(dpi, &font) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("rusttyterm: font measurement failed: {e}");
@@ -312,7 +330,7 @@ fn init_window(hwnd: HWND) {
     if let Some(s) = state_mut(hwnd) {
         s.metrics = metrics;
     }
-    let renderer = match Renderer::new(hwnd, dpi, init_cols, init_rows) {
+    let renderer = match Renderer::new(hwnd, dpi, &font, init_cols, init_rows, bar) {
         Ok(r) => Some(r),
         Err(e) => {
             // NFR-216: the app degrades to a live-but-blind terminal.
@@ -349,6 +367,24 @@ fn resize_window(hwnd: HWND, width_px: u32, height_px: u32) {
     let Some(s) = state_mut(hwnd) else { return };
     let Some(r) = &mut s.renderer else { return };
     r.resize(width_px, height_px);
+    let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
+    if s.app.resize_active(cols, rows).is_err() {
+        eprintln!("rusttyterm: ConPTY resize failed");
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Tab-count change follow-up: re-apply the tab-bar visibility rule. The
+/// strip height carves grid area off the top, so when it changes the grid
+/// and the ConPTY must follow (TAB-010, `tab-bar = "auto"/"hidden"`).
+fn sync_tab_bar(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let bar = s.bar_height();
+    let Some(r) = &mut s.renderer else { return };
+    if r.tab_bar_height() == bar {
+        return;
+    }
+    r.set_tab_bar_height(bar);
     let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
     if s.app.resize_active(cols, rows).is_err() {
         eprintln!("rusttyterm: ConPTY resize failed");
@@ -496,14 +532,13 @@ fn client_width_dips(hwnd: HWND) -> f32 {
 /// Grid cell under a client-area DIP position; `None` for the tab bar.
 /// Clamped to the grid bounds so drags past the edges extend the selection.
 fn cell_at(s: &WindowState, x: f32, y: f32) -> Option<(usize, usize)> {
-    if y < TAB_BAR_HEIGHT {
+    let bar = s.bar_height();
+    if y < bar {
         return None;
     }
     let grid = s.app.active_tab()?.pane().grid();
     let col = (x / s.metrics.cell_width).floor().max(0.0) as usize;
-    let row = ((y - TAB_BAR_HEIGHT) / s.metrics.cell_height)
-        .floor()
-        .max(0.0) as usize;
+    let row = ((y - bar) / s.metrics.cell_height).floor().max(0.0) as usize;
     Some((
         row.min(grid.rows().saturating_sub(1)),
         col.min(grid.cols().saturating_sub(1)),
@@ -514,7 +549,8 @@ fn cell_at(s: &WindowState, x: f32, y: f32) -> Option<(usize, usize)> {
 /// text-selection drag anchored on the clicked cell (WIN-004).
 fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
     let (x, y) = cursor_dips(hwnd, lparam);
-    if y < TAB_BAR_HEIGHT {
+    let bar = state_ref(hwnd).map_or(TAB_BAR_HEIGHT, |s| s.bar_height());
+    if y < bar {
         let hit = state_ref(hwnd).map(|s| {
             let titles: Vec<String> = s.app.tabs().iter().map(|t| t.title().to_string()).collect();
             let layout = tabbar::layout(&titles, client_width_dips(hwnd), s.metrics.cell_width);
@@ -622,7 +658,7 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     let Some(s) = state_mut(hwnd) else { return };
     let Some(a) = s.drag_anchor else { return };
     // Dragging over the tab bar clamps the selection to the top row.
-    let Some((row, col)) = cell_at(s, x, y.max(TAB_BAR_HEIGHT)) else {
+    let Some((row, col)) = cell_at(s, x, y.max(s.bar_height())) else {
         return;
     };
     let abs = s
@@ -660,11 +696,8 @@ fn set_cursor_for_position(wparam: WPARAM) {
     let _ = unsafe { ScreenToClient(target, &mut pt) };
     let dpi = unsafe { GetDpiForWindow(target) }.max(96) as f32;
     let y = px_to_dips(pt.y.max(0) as u32, dpi);
-    let idc = if y < TAB_BAR_HEIGHT {
-        IDC_ARROW
-    } else {
-        IDC_IBEAM
-    };
+    let bar = state_ref(target).map_or(TAB_BAR_HEIGHT, |s| s.bar_height());
+    let idc = if y < bar { IDC_ARROW } else { IDC_IBEAM };
     if let Ok(cursor) = unsafe { LoadCursorW(None, idc) } {
         let _ = unsafe { SetCursor(Some(cursor)) };
     }
@@ -734,38 +767,53 @@ fn toggle_fullscreen(hwnd: HWND) {
 
 /// WM_TIMER: drain every shell, close exited tabs, refresh the caption.
 fn drain_and_cleanup(hwnd: HWND) {
-    let Some(s) = state_mut(hwnd) else { return };
-    s.app.drain_shells();
-    // Repaint only when a grid actually changed (NFR-113: no idle repaints).
-    if s.app.take_dirty() {
-        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
-    }
-    let dead: Vec<usize> = s
-        .app
-        .tabs()
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| {
-            matches!(
-                t.pane().shell().state(),
-                crate::shell::ShellState::Inactive | crate::shell::ShellState::Exited(_)
-            )
-        })
-        .map(|(i, _)| i)
-        .collect();
-    for idx in dead.into_iter().rev() {
-        if s.app.close_tab(idx) {
-            let _ = unsafe { DestroyWindow(hwnd) };
-            return;
+    // Scope the GWLP_USERDATA borrow so it ends before sync_tab_bar re-enters.
+    let tab_closed = {
+        let Some(s) = state_mut(hwnd) else { return };
+        s.app.drain_shells();
+        // Repaint only when a grid actually changed (NFR-113: no idle repaints).
+        if s.app.take_dirty() {
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
         }
+        let dead: Vec<usize> = s
+            .app
+            .tabs()
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                matches!(
+                    t.pane().shell().state(),
+                    crate::shell::ShellState::Inactive | crate::shell::ShellState::Exited(_)
+                )
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let mut closed = false;
+        for idx in dead.into_iter().rev() {
+            if s.app.close_tab(idx) {
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return;
+            }
+            closed = true;
+        }
+        set_title(hwnd, &s.app);
+        closed
+    };
+    if tab_closed {
+        // A vanished tab can hide the strip again (tab-bar = "auto").
+        sync_tab_bar(hwnd);
     }
-    set_title(hwnd, &s.app);
 }
 
 /// Ctrl+Shift+T: append a tab and spawn a shell at the current grid size.
 fn new_tab(hwnd: HWND) {
+    if let Some(s) = state_mut(hwnd) {
+        s.app.add_tab();
+    }
+    // Auto/hidden tab bars change the strip height when the count changes;
+    // sync first so the new shell spawns at the grid the bar leaves room for.
+    sync_tab_bar(hwnd);
     let Some(s) = state_mut(hwnd) else { return };
-    s.app.add_tab();
     let (cols, rows) = s
         .renderer
         .as_ref()
@@ -785,12 +833,13 @@ fn new_tab(hwnd: HWND) {
 /// Ctrl+Shift+W: close the active tab; closing the last tab closes the
 /// window (WM_DESTROY reclaims the state and quits the loop).
 fn close_tab(hwnd: HWND) {
-    let Some(s) = state_mut(hwnd) else { return };
-    let idx = s.app.active_index();
-    if s.app.close_tab(idx) {
+    let destroy = state_mut(hwnd).is_some_and(|s| s.app.close_tab(s.app.active_index()));
+    if destroy {
         let _ = unsafe { DestroyWindow(hwnd) };
         return;
     }
+    // A vanished tab can hide the strip again (tab-bar = "auto").
+    sync_tab_bar(hwnd);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
@@ -838,9 +887,9 @@ fn set_title(hwnd: HWND, app: &App) {
 }
 
 /// Client-area pixel size for a `cols` x `rows` grid plus the tab bar.
-fn px_size(metrics: CellMetrics, cols: usize, rows: usize) -> (i32, i32) {
+fn px_size(metrics: CellMetrics, cols: usize, rows: usize, bar_height: f32) -> (i32, i32) {
     let w = (cols.max(1) as f32 * metrics.cell_width).ceil() as i32;
-    let h = (rows.max(1) as f32 * metrics.cell_height + TAB_BAR_HEIGHT).ceil() as i32;
+    let h = (rows.max(1) as f32 * metrics.cell_height + bar_height).ceil() as i32;
     (w.max(16), h.max(16))
 }
 
@@ -858,10 +907,16 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         let d = GetDpiForSystem();
         if d == 0 { 96 } else { d }
     };
-    let metrics = measure_cells(dpi)?;
+    let font = cfg.font();
+    let metrics = measure_cells(dpi, &font)?;
     let cols = cfg.window.cols.max(MIN_COLS);
     let rows = cfg.window.rows.max(MIN_ROWS);
-    let (cell_w, cell_h) = px_size(metrics, cols, rows);
+    // One tab at startup: "auto"/"hidden" bars start collapsed (TAB-010).
+    let bar = match cfg.tab_bar {
+        TabBar::Always => TAB_BAR_HEIGHT,
+        TabBar::Auto | TabBar::Hidden => 0.0,
+    };
+    let (cell_w, cell_h) = px_size(metrics, cols, rows, bar);
     let mut rect = RECT {
         left: 0,
         top: 0,
@@ -872,9 +927,11 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
     unsafe { AdjustWindowRect(&mut rect, style, false) }?;
 
     let state = Box::new(WindowState {
-        app: App::new(),
+        app: App::with_size(cols, rows, cfg.scrollback),
         theme,
         spawn,
+        font: font.clone(),
+        tab_bar: cfg.tab_bar,
         renderer: None,
         metrics,
         timer_id: 0,

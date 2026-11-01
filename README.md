@@ -7,8 +7,10 @@ from mature terminals (Ghostty, kitty, Alacritty, WezTerm, Windows Terminal) —
 behaviors users praise — and implements them natively on Windows with no Electron,
 no web UI, no bundled interpreted runtime.
 
-> **Early development.** `rusttyterm` is currently a scaffolded data model: tabs,
-> panes, grid, config, themes. There is no window, renderer, or shell backend yet.
+> **Early development.** `rusttyterm` runs today as a native Windows terminal:
+> ConPTY shells in tabs, Direct2D/DirectWrite rendering, mouse selection,
+> clipboard, fullscreen, and a TOML config with theme presets. Splits, session
+> restore, and packaging are not built yet.
 > See [`ROADMAP.md`](ROADMAP.md) for what ships in each version.
 
 ## Vision
@@ -20,6 +22,16 @@ no web UI, no bundled interpreted runtime.
   what Windows Terminal users expect: tabs always visible, `+` button, close
   destroys the shell, tab switching stays in the terminal.
 - **Open** — MIT, no telemetry, TOML config, portable ZIP first.
+
+## Configuration
+
+The config file is `%APPDATA%\rusttyterm\config.toml`. It is optional: missing
+file or keys use the built-in defaults. Values are validated — a size, theme,
+scrollback, or grid value outside its range is a startup error with a message,
+never a silent clamp. [`config.example.toml`](config.example.toml) lists every
+key the app reads today, with its default and range.
+
+Full requirement set: `docs/SPEC.md` §13.
 
 ## Roadmap summary
 
@@ -35,14 +47,14 @@ Full plan: [`ROADMAP.md`](ROADMAP.md). Complete requirements: [`docs/SPEC.md`](d
 
 ## Development
 
-Requirements: a current Rust toolchain (MSRV **1.92**) and Windows.
+Requirements: a current Rust toolchain (MSRV **1.99**) and Windows.
 
 ```sh
 cargo check            # type-check
 cargo test             # unit + integration tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
-cargo run              # CLI stub (prints version + theme list)
+cargo run              # open the terminal window
 cargo build --release
 ```
 

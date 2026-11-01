@@ -22,6 +22,15 @@ impl Tab {
         }
     }
 
+    /// Create a tab with a sized pane (see [`Pane::with_size`]).
+    #[must_use]
+    pub fn with_size(cols: usize, rows: usize, scrollback: usize) -> Self {
+        Self {
+            pane: Pane::with_size(cols, rows, scrollback),
+            title: String::from("New Tab"),
+        }
+    }
+
     /// The tab's display title.
     #[must_use]
     pub fn title(&self) -> &str {

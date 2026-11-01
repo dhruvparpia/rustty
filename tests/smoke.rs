@@ -59,10 +59,10 @@ fn tabs_add_select_close_round_trip() {
 }
 
 #[test]
-fn config_fills_missing_sections_with_defaults() {
-    let cfg = Config::parse("[theme]\nname = \"One Dark Pro\"").unwrap();
-    assert_eq!(cfg.theme.name, "One Dark Pro");
-    assert_eq!(cfg.window.cols, 80, "omitted sections get defaults");
+fn config_fills_missing_keys_with_defaults() {
+    let cfg = Config::parse("theme = \"one-dark\"").unwrap();
+    assert_eq!(cfg.theme, "one-dark");
+    assert_eq!(cfg.window.cols, 80, "omitted keys get defaults");
     assert_eq!(cfg.window.rows, 24);
-    assert_eq!(cfg.scrollback.limit, 1000);
+    assert_eq!(cfg.scrollback, 1000);
 }

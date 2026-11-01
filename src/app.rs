@@ -24,6 +24,16 @@ impl App {
         }
     }
 
+    /// Create an app whose first tab is sized for `cols` x `rows` with a
+    /// `scrollback`-line history (config `scrollback`, SPEC §13).
+    #[must_use]
+    pub fn with_size(cols: usize, rows: usize, scrollback: usize) -> Self {
+        Self {
+            tabs: vec![Tab::with_size(cols, rows, scrollback)],
+            active: 0,
+        }
+    }
+
     /// All tabs, in tab-bar order.
     #[must_use]
     pub fn tabs(&self) -> &[Tab] {

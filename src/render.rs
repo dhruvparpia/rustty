@@ -30,19 +30,16 @@ use windows_numerics::Vector2;
 
 use crate::app::App;
 use crate::color::Color;
+use crate::config::FontConfig;
 use crate::grid::{Cell, CellAttribute, Grid};
 use crate::pane::Pane;
-use crate::tabbar::{self, TAB_BAR_HEIGHT, TAB_CHROME};
+use crate::tabbar::{self, TAB_CHROME};
 use crate::theme::Theme;
 
-/// Font families tried in order (WIN-003): Cascadia first, Consolas last.
+/// Font families used as the fallback chain (WIN-003/FONT-018): Cascadia
+/// first, Consolas last. The configured family (FONT-002) is tried before
+/// this chain.
 const FONT_FAMILIES: [&str; 3] = ["Cascadia Mono", "Cascadia Code", "Consolas"];
-
-/// Default face size in points.
-const FONT_POINTS: f32 = 11.0;
-
-/// Extra line leading as a fraction of the measured glyph height.
-const LINE_LEADING: f32 = 1.2;
 
 /// Cell geometry derived from the font, in DIPs.
 #[derive(Debug, Clone, Copy)]
@@ -103,30 +100,33 @@ fn mix(from: Color, to: Color, t: f32) -> Color {
     }
 }
 
-/// Measure cell geometry for the chosen monospace font at `dpi`.
+/// Measure cell geometry for the configured font at `dpi` (FONT-002/011).
 ///
 /// # Errors
 ///
 /// Fails when the DirectWrite factory cannot be created.
-pub fn measure_cells(dpi: u32) -> anyhow::Result<CellMetrics> {
+pub fn measure_cells(dpi: u32, font: &FontConfig) -> anyhow::Result<CellMetrics> {
     let dpi = dpi.max(96) as f32;
     let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
-    let (_family, _formats, metrics) = build_font_resources(&dwrite, dpi)?;
+    let (_family, _formats, metrics) = build_font_resources(&dwrite, dpi, font)?;
     Ok(metrics)
 }
 
 /// Build the text formats for plain/bold/italic/bold-italic plus the cell
-/// metrics, picking the first installed family from [`FONT_FAMILIES`].
+/// metrics, picking the configured family when installed, else the first
+/// installed family from [`FONT_FAMILIES`] (FONT-002/018).
 fn build_font_resources(
     dwrite: &IDWriteFactory,
     dpi: f32,
+    font: &FontConfig,
 ) -> anyhow::Result<(String, [IDWriteTextFormat; 4], CellMetrics)> {
-    let font_size = FONT_POINTS * dpi / 72.0; // points -> DIPs
+    let font_size = font.size * dpi / 72.0; // points -> DIPs
     let mut collection: Option<IDWriteFontCollection> = None;
     unsafe { dwrite.GetSystemFontCollection(&raw mut collection, false) }?;
     let collection = collection.ok_or_else(|| anyhow::anyhow!("rusttyterm: no system fonts"))?;
-    let mut chosen = FONT_FAMILIES[FONT_FAMILIES.len() - 1];
-    for family in FONT_FAMILIES {
+    let mut chosen: &str = FONT_FAMILIES[FONT_FAMILIES.len() - 1];
+    let configured = font.family.as_str();
+    for family in std::iter::once(configured).chain(FONT_FAMILIES) {
         let name = wstr(family);
         let mut index = 0u32;
         let mut exists = windows::core::BOOL(0);
@@ -170,7 +170,7 @@ fn build_font_resources(
             DWRITE_FONT_STYLE_ITALIC,
         )?,
     ];
-    let metrics = measure_cells_with(dwrite, &formats[0])?;
+    let metrics = measure_cells_with(dwrite, &formats[0], font.line_height)?;
     Ok((chosen.to_string(), formats, metrics))
 }
 
@@ -201,14 +201,17 @@ fn make_format(
     Ok(format)
 }
 
+/// Measure the cell box for `format`: width = advance of `M` (rounded up),
+/// height = glyph box scaled by `line_height` (SPEC `line-height`).
 fn measure_cells_with(
     dwrite: &IDWriteFactory,
     format: &IDWriteTextFormat,
+    line_height: f32,
 ) -> anyhow::Result<CellMetrics> {
     let width = layout_height(dwrite, format, "M")?.width;
     let glyph = layout_height(dwrite, format, "Mg")?;
     let cell_width = width.ceil().max(1.0);
-    let cell_height = (glyph.height * LINE_LEADING).ceil().max(1.0);
+    let cell_height = (glyph.height * line_height).ceil().max(1.0);
     Ok(CellMetrics {
         cell_width,
         cell_height,
@@ -234,26 +237,37 @@ pub struct Renderer {
     formats: [IDWriteTextFormat; 4],
     metrics: CellMetrics,
     dpi: f32,
+    /// Tab-bar strip height in DIPs; 0.0 when the bar is hidden
+    /// (`tab-bar = "auto"` with one tab, or `"hidden"`, TAB-010).
+    tab_bar_height: f32,
     brushes: HashMap<u32, ID2D1SolidColorBrush>,
 }
 
 impl Renderer {
-    /// Create the render target for `hwnd`, sized for `cols` x `rows` cells.
+    /// Create the render target for `hwnd`, sized for `cols` x `rows` cells
+    /// plus the tab-bar strip of `tab_bar_height` DIPs.
     ///
     /// # Errors
     ///
     /// Fails when the Direct2D/DirectWrite factories or the render target
     /// cannot be created.
-    pub fn new(hwnd: HWND, dpi: u32, cols: usize, rows: usize) -> anyhow::Result<Self> {
+    pub fn new(
+        hwnd: HWND,
+        dpi: u32,
+        font: &FontConfig,
+        cols: usize,
+        rows: usize,
+        tab_bar_height: f32,
+    ) -> anyhow::Result<Self> {
         let dpi = dpi.max(96) as f32;
         let factory: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }?;
         let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
         // Family name is diagnostics-only; the formats carry the chosen face.
-        let (_family, formats, metrics) = build_font_resources(&dwrite, dpi)?;
+        let (_family, formats, metrics) = build_font_resources(&dwrite, dpi, font)?;
         let width = dips_to_px(cols.max(1) as f32 * metrics.cell_width, dpi).max(1);
         let height = dips_to_px(
-            rows.max(1) as f32 * metrics.cell_height + TAB_BAR_HEIGHT,
+            rows.max(1) as f32 * metrics.cell_height + tab_bar_height,
             dpi,
         )
         .max(1);
@@ -279,6 +293,7 @@ impl Renderer {
             formats,
             metrics,
             dpi,
+            tab_bar_height,
             brushes: HashMap::new(),
         })
     }
@@ -287,6 +302,19 @@ impl Renderer {
     #[must_use]
     pub fn metrics(&self) -> CellMetrics {
         self.metrics
+    }
+
+    /// Tab-bar strip height in DIPs (0.0 when hidden).
+    #[must_use]
+    pub fn tab_bar_height(&self) -> f32 {
+        self.tab_bar_height
+    }
+
+    /// Set the tab-bar strip height (TAB-010 visibility modes). The grid
+    /// area below the strip changes with it — callers re-read
+    /// [`Renderer::grid_size`] and resize the grid afterwards.
+    pub fn set_tab_bar_height(&mut self, height: f32) {
+        self.tab_bar_height = height.max(0.0);
     }
 
     /// Resize the render target to a new client area in physical pixels.
@@ -309,7 +337,7 @@ impl Renderer {
     pub fn grid_size(&self) -> (usize, usize) {
         let px = unsafe { self.target.GetPixelSize() };
         let w = px_to_dips(px.width, self.dpi);
-        let h = (px_to_dips(px.height, self.dpi) - TAB_BAR_HEIGHT).max(0.0);
+        let h = (px_to_dips(px.height, self.dpi) - self.tab_bar_height).max(0.0);
         (
             (w / self.metrics.cell_width).floor().max(1.0) as usize,
             (h / self.metrics.cell_height).floor().max(1.0) as usize,
@@ -344,7 +372,9 @@ impl Renderer {
             }
             self.paint_cursor(pane, grid, theme);
         }
-        self.paint_tab_bar(app, theme, width);
+        if self.tab_bar_height > 0.0 {
+            self.paint_tab_bar(app, theme, width);
+        }
         unsafe {
             self.target
                 .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
@@ -391,7 +421,7 @@ impl Renderer {
         if hi <= lo {
             return;
         }
-        let top = TAB_BAR_HEIGHT + y as f32 * self.metrics.cell_height;
+        let top = self.tab_bar_height + y as f32 * self.metrics.cell_height;
         self.fill_rect(
             lo as f32 * self.metrics.cell_width,
             top,
@@ -404,17 +434,17 @@ impl Renderer {
     /// Paint the tab bar strip: bar background, per-tab titles (active
     /// tab highlighted), and the `+` new-tab button (tab bar P0).
     fn paint_tab_bar(&mut self, app: &App, theme: &Theme, width: f32) {
-        self.fill_rect(0.0, 0.0, width, TAB_BAR_HEIGHT, theme.tab_bar);
+        self.fill_rect(0.0, 0.0, width, self.tab_bar_height, theme.tab_bar);
         let titles: Vec<String> = app.tabs().iter().map(|t| t.title().to_string()).collect();
         let layout = tabbar::layout(&titles, width, self.metrics.cell_width);
         let active = app.active_index();
-        let y_top = (TAB_BAR_HEIGHT - self.metrics.text_height) / 2.0;
+        let y_top = (self.tab_bar_height - self.metrics.text_height) / 2.0;
         for (i, &(lo, hi)) in layout.tabs.iter().enumerate() {
             if hi <= lo {
                 continue;
             }
             if i == active {
-                self.fill_rect(lo, 0.0, hi, TAB_BAR_HEIGHT, theme.tab_active);
+                self.fill_rect(lo, 0.0, hi, self.tab_bar_height, theme.tab_active);
             }
             let label =
                 tabbar::fit_title(&titles[i], (hi - lo) - TAB_CHROME, self.metrics.cell_width);
@@ -497,7 +527,7 @@ impl Renderer {
             while end < cells.len() && Self::effective_colors(&cells[end], theme).1 == bg {
                 end += 1;
             }
-            let top = TAB_BAR_HEIGHT + y as f32 * self.metrics.cell_height;
+            let top = self.tab_bar_height + y as f32 * self.metrics.cell_height;
             self.fill_rect(
                 x as f32 * self.metrics.cell_width,
                 top,
@@ -512,7 +542,7 @@ impl Renderer {
     fn paint_row_text(&mut self, y: usize, cells: &[Cell], theme: &Theme) {
         let cw = self.metrics.cell_width;
         let ch = self.metrics.cell_height;
-        let y_top = TAB_BAR_HEIGHT + y as f32 * ch + (ch - self.metrics.text_height) / 2.0;
+        let y_top = self.tab_bar_height + y as f32 * ch + (ch - self.metrics.text_height) / 2.0;
         let mut i = 0;
         while i < cells.len() {
             let cell = &cells[i];
@@ -572,11 +602,11 @@ impl Renderer {
             let left = x as f32 * cw;
             let right = left + cw;
             if cell.attributes.contains(CellAttribute::UNDERLINE) {
-                let yline = TAB_BAR_HEIGHT + y as f32 * ch + ch - 1.0;
+                let yline = self.tab_bar_height + y as f32 * ch + ch - 1.0;
                 self.stroke_line(left, yline, right, yline, fg);
             }
             if cell.attributes.contains(CellAttribute::STRIKE) {
-                let yline = TAB_BAR_HEIGHT + y as f32 * ch + ch / 2.0;
+                let yline = self.tab_bar_height + y as f32 * ch + ch / 2.0;
                 self.stroke_line(left, yline, right, yline, fg);
             }
         }
@@ -591,7 +621,7 @@ impl Renderer {
         if row >= grid.rows() || col >= grid.cols() {
             return;
         }
-        let top = TAB_BAR_HEIGHT + row as f32 * self.metrics.cell_height;
+        let top = self.tab_bar_height + row as f32 * self.metrics.cell_height;
         let left = col as f32 * self.metrics.cell_width;
         self.fill_rect(
             left,

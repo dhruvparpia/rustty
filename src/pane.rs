@@ -47,6 +47,22 @@ impl Pane {
         }
     }
 
+    /// Create a pane whose grid starts at `cols` x `rows` with a
+    /// `scrollback`-line history (config `scrollback`).
+    #[must_use]
+    pub fn with_size(cols: usize, rows: usize, scrollback: usize) -> Self {
+        Self {
+            grid: Grid::with_size(cols, rows, scrollback),
+            shell: Shell::new(),
+            parser: Parser::new(),
+            title: None,
+            main_grid: None,
+            in_alt: false,
+            dirty: true,
+            selection: None,
+        }
+    }
+
     /// The pane's grid (viewport rows are `0..grid.rows`).
     #[must_use]
     pub fn grid(&self) -> &Grid {

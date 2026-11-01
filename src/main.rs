@@ -57,8 +57,18 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut theme = Theme::default();
-    theme.name = cfg.theme.name.clone();
+    let theme = match Theme::preset(&cfg.theme) {
+        Some(theme) => theme,
+        None => {
+            // THEME-014: an unknown preset falls back to predawn.
+            eprintln!(
+                "rusttyterm: unknown theme {:?} (known: {}), using predawn",
+                cfg.theme,
+                Theme::preset_names().join(", ")
+            );
+            Theme::predawn()
+        }
+    };
     let spawn = probe_shell(&cfg);
     match rusttyterm::window::run(&cfg, theme, spawn) {
         Ok(()) => ExitCode::SUCCESS,
@@ -78,7 +88,7 @@ fn main() -> ExitCode {
                 env!("CARGO_PKG_VERSION"),
                 cfg.window.cols,
                 cfg.window.rows,
-                cfg.theme.name,
+                cfg.theme,
             );
             ExitCode::SUCCESS
         }
