@@ -1,5 +1,12 @@
-//! Direct2D/DirectWrite renderer: paints a grid through an
-//! `ID2D1HwndRenderTarget` (spec WIN-002, WIN-003).
+//! Direct2D/DirectWrite renderer: paints a tab's pane tree through an
+//! `ID2D1HwndRenderTarget` (spec WIN-002, WIN-003, SPLIT-002/014/015).
+//!
+//! A tab paints as its [`crate::split`] layout flattened: every leaf gets
+//! its own pixel origin, pane borders (theme `split_border`/`split_focus`),
+//! a title chip when the tab is split, and its cursor — solid on the
+//! focused pane, hollow on the others. Damage tracking is per pane: the
+//! row mask covers the whole tab (each leaf's viewport rows stacked in
+//! layout order), so a damage repaint touches only rows some pane changed.
 //!
 //! This module is an FFI boundary (NFR-401): all Direct2D/DirectWrite calls
 //! are `unsafe` Win32 COM invocations. The renderer never panics on
@@ -34,6 +41,9 @@ use crate::config::FontConfig;
 use crate::glyph_cache::{self, GlyphAtlas, GlyphKey, Tile};
 use crate::grid::{Cell, CellAttribute, Grid};
 use crate::pane::Pane;
+use crate::selection::Selection;
+use crate::split::Rect;
+use crate::tab::Tab;
 use crate::tabbar::{self, TAB_CHROME};
 use crate::theme::Theme;
 
@@ -254,10 +264,16 @@ pub struct Renderer {
     titles: Vec<String>,
     layout: tabbar::Layout,
     label: String,
-    /// Reused per-row damage mask for [`Renderer::paint_damage`].
+    /// Reused row-damage mask for [`Renderer::paint_damage`]: one entry per
+    /// tab row (each leaf's viewport rows stacked in layout order).
     mask: Vec<bool>,
     /// Last painted frame, used to work out what a damage repaint must cover.
     damage: Damage,
+    /// Last painted frame's per-pane state (flatten order).
+    pane_damage: Vec<PaneDamage>,
+    /// `(pane_count, layout cols, layout rows)` of the last painted frame;
+    /// any change forces a full repaint.
+    shape: (usize, usize, usize),
     /// Glyph atlas (spec §20): created on the first paint, when the target
     /// exists. `None` = no atlas, glyphs go through the `DrawText` path.
     atlas: Option<GlyphAtlas>,
@@ -266,21 +282,51 @@ pub struct Renderer {
 }
 
 /// What the last painted frame looked like: enough to decide which rows a
-/// damage repaint has to cover (grid damage, cursor move, selection change).
-#[derive(Debug, Default, Clone, Copy)]
+/// damage repaint has to cover (grid damage, cursor moves, selection
+/// changes) plus the per-pane snapshot in [`PaneDamage`].
+#[derive(Debug, Clone, Copy)]
 struct Damage {
-    /// Index of the tab whose pane was painted.
+    /// Index of the tab whose panes were painted (`usize::MAX` before the
+    /// first frame; a tab switch forces a full repaint).
     active_tab: usize,
-    /// Grid size the last frame was painted at.
-    grid_cols: usize,
-    grid_rows: usize,
-    /// Row the cursor block was painted on last frame (`usize::MAX` when
-    /// the block was not drawn).
-    cursor_row: usize,
-    /// Mouse selection painted last frame.
-    selection: Option<crate::selection::Selection>,
     /// `false` until the first frame is on screen.
     painted: bool,
+}
+
+impl Default for Damage {
+    fn default() -> Self {
+        Self {
+            active_tab: usize::MAX,
+            painted: false,
+        }
+    }
+}
+
+/// Last painted state of one pane: the row-damage inputs tracked per pane
+/// (grid size, cursor row, selection).
+#[derive(Debug, Default, Clone, Copy)]
+struct PaneDamage {
+    /// Grid size the pane was painted at.
+    grid_cols: usize,
+    grid_rows: usize,
+    /// Row the cursor block was painted on (`usize::MAX` when not drawn).
+    cursor_row: usize,
+    /// Mouse selection painted on this pane.
+    selection: Option<Selection>,
+}
+
+/// Flatten index of the leaf whose layout box covers cell `(col, row)`
+/// of the active tab, `None` when the cell is outside every pane.
+fn leaf_at(tab: &Tab, col: usize, row: usize) -> Option<usize> {
+    let mut found = None;
+    let mut idx = 0usize;
+    tab.for_each_pane_ref(&mut |_: &Pane, rect: Rect| {
+        if rect.contains(col, row) {
+            found = Some(idx);
+        }
+        idx += 1;
+    });
+    found
 }
 
 /// Cell the cursor block occupies, or `None` when it is not drawn
@@ -371,8 +417,10 @@ impl Renderer {
             titles: Vec::new(),
             layout: tabbar::Layout::default(),
             label: String::new(),
-            mask: vec![true; rows.max(1)],
+            mask: Vec::new(),
             damage: Damage::default(),
+            pane_damage: Vec::new(),
+            shape: (0, 0, 0),
             atlas: None,
             atlas_failed: false,
         })
@@ -492,21 +540,22 @@ impl Renderer {
         }
     }
 
-    /// Collect pass: queue every glyph the masked rows of this frame will
+    /// Collect pass for one pane: queue every glyph its masked rows will
     /// draw. [`crate::glyph_cache::GlyphAtlas::request`] deduplicates, so a
     /// frame of 80 x 24 identical cells queues one tile.
     fn collect_atlas_tiles(
         &mut self,
         atlas: &mut GlyphAtlas,
         pane: &Pane,
-        rows: usize,
-        cols: usize,
+        rect: Rect,
+        max_cols: usize,
         theme: &Theme,
     ) {
         let grid = pane.grid();
-        let rows = rows.min(grid.rows()).min(self.mask.len());
+        let rows = rect.rows.min(grid.rows());
+        let cols = rect.cols.min(max_cols.saturating_sub(rect.col));
         for y in 0..rows {
-            if !self.mask[y] {
+            if !self.mask.get(rect.row + y).copied().unwrap_or(false) {
                 continue;
             }
             let Some(line) = grid.row(y) else { continue };
@@ -520,6 +569,43 @@ impl Renderer {
         }
     }
 
+    /// `true` when the active tab's panes cannot be damage-painted: tab
+    /// switch, a changed split shape, a pane the renderer has not painted
+    /// yet, a grid resize, or a grid flagged fully dirty.
+    fn full_repaint_needed(&self, app: &App) -> bool {
+        let Some(tab) = app.active_tab() else {
+            return true;
+        };
+        if self.damage.active_tab != app.active_index() {
+            return true;
+        }
+        if self.shape != (tab.pane_count(), tab.cols(), tab.rows()) {
+            return true;
+        }
+        let mut full = false;
+        let mut idx = 0usize;
+        tab.for_each_pane_ref(&mut |pane: &Pane, _| {
+            let grid = pane.grid();
+            match self.pane_damage.get(idx) {
+                None => full = true,
+                Some(d) => {
+                    if grid.all_dirty() || d.grid_cols != grid.cols() || d.grid_rows != grid.rows()
+                    {
+                        full = true;
+                    }
+                }
+            }
+            idx += 1;
+        });
+        full
+    }
+
+    /// Columns this frame may paint: the client width measured in cells.
+    /// Each leaf clamps this further to its own box (SPLIT-002).
+    fn frame_cols(&self, width: f32) -> usize {
+        (width / self.metrics.cell_width).floor() as usize
+    }
+
     fn paint_frame(&mut self, app: &App, theme: &Theme, force_full: bool) {
         if unsafe { self.target.CheckWindowState() } == D2D1_WINDOW_STATE_OCCLUDED {
             return;
@@ -527,28 +613,19 @@ impl Renderer {
         let px = unsafe { self.target.GetPixelSize() };
         let width = px_to_dips(px.width, self.dpi);
         let height = px_to_dips(px.height, self.dpi);
-        let full = force_full
-            || !self.damage.painted
-            || app.active_tab().is_some_and(|tab| {
-                let grid = tab.pane().grid();
-                grid.all_dirty()
-                    || self.damage.active_tab != app.active_index()
-                    || self.damage.grid_cols != grid.cols()
-                    || self.damage.grid_rows != grid.rows()
-            });
+        let full = force_full || !self.damage.painted || self.full_repaint_needed(app);
         self.build_mask(app, full);
         // Glyph atlas (spec §20): queue every glyph this frame wants, render
         // the new tiles into the atlas bitmap, then paint the frame with
         // blits. `render_pending` runs *before* the target's `BeginDraw`:
         // the atlas is its own draw session.
-        let rows = app.active_tab().map_or(0, |tab| tab.pane().grid().rows());
-        let cols = app.active_tab().map_or(0, |tab| {
-            (tab.pane().grid().cols()).min((width / self.metrics.cell_width).floor() as usize)
-        });
+        let max_cols = self.frame_cols(width);
         let mut atlas = self.ensure_atlas().then(|| self.atlas.take()).flatten();
         if let Some(atlas) = atlas.as_mut() {
             if let Some(tab) = app.active_tab() {
-                self.collect_atlas_tiles(atlas, tab.pane(), rows, cols, theme);
+                tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
+                    self.collect_atlas_tiles(atlas, pane, rect, max_cols, theme);
+                });
             }
             atlas.render_pending(&self.formats, self.metrics.text_height);
         }
@@ -558,30 +635,46 @@ impl Renderer {
         }
         unsafe { self.target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED) };
         if let Some(tab) = app.active_tab() {
-            let pane = tab.pane();
-            let grid = pane.grid();
-            for y in 0..rows {
-                if !self.mask[y] {
-                    continue;
+            let cw = self.metrics.cell_width;
+            let ch = self.metrics.cell_height;
+            tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
+                let left = rect.col as f32 * cw;
+                let top0 = self.tab_bar_height + rect.row as f32 * ch;
+                let grid = pane.grid();
+                let rows = rect.rows.min(grid.rows());
+                let cols = rect.cols.min(max_cols.saturating_sub(rect.col));
+                for y in 0..rows {
+                    if !self.mask[rect.row + y] {
+                        continue;
+                    }
+                    let Some(line) = grid.row(y) else { continue };
+                    let n = line.cells.len().min(cols);
+                    let cells = &line.cells[..n];
+                    let top = top0 + y as f32 * ch;
+                    self.fill_rect(
+                        left,
+                        top,
+                        left + rect.cols as f32 * cw,
+                        top + ch,
+                        theme.background,
+                    );
+                    let span = Self::row_selection(pane, y, n);
+                    self.paint_row_backgrounds(left, top, cells, theme);
+                    self.paint_row_selection(left, top, span, theme);
+                    self.paint_row_text(left, top, cells, span, theme);
+                    self.paint_row_decorations(left, top, cells, theme);
                 }
-                let Some(line) = grid.row(y) else { continue };
-                let n = line.cells.len().min(cols);
-                let cells = &line.cells[..n];
-                let top = self.tab_bar_height + y as f32 * self.metrics.cell_height;
-                self.fill_rect(
-                    0.0,
-                    top,
-                    width,
-                    top + self.metrics.cell_height,
-                    theme.background,
-                );
-                self.paint_row_backgrounds(y, cells, theme);
-                let span = Self::row_selection(pane, y, n);
-                self.paint_row_selection(y, span, theme);
-                self.paint_row_text(y, cells, span, theme);
-                self.paint_row_decorations(y, cells, theme);
+            });
+            if tab.pane_count() > 1 {
+                self.paint_split_borders(tab, theme);
+                self.paint_pane_titles(tab, theme);
             }
-            self.paint_cursor(pane, grid, theme);
+            let focused = tab.focused_index().unwrap_or(usize::MAX);
+            let mut idx = 0usize;
+            tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
+                self.paint_cursor(pane, rect, idx == focused, theme);
+                idx += 1;
+            });
         }
         self.atlas = atlas;
         if self.tab_bar_height > 0.0 {
@@ -598,72 +691,98 @@ impl Renderer {
         if unsafe { self.target.EndDraw(None, None) }.is_err() {
             eprintln!("rusttyterm: Direct2D EndDraw failed");
             self.damage.painted = false;
+            self.pane_damage.clear();
             self.atlas = None;
             self.atlas_failed = false;
             self.brushes.clear();
             return;
         }
-        if let Some(tab) = app.active_tab() {
-            let pane = tab.pane();
-            self.damage.active_tab = app.active_index();
-            self.damage.grid_cols = pane.grid().cols();
-            self.damage.grid_rows = pane.grid().rows();
-            self.damage.cursor_row =
-                cursor_cell(pane, pane.grid()).map_or(usize::MAX, |(row, _)| row);
-            self.damage.selection = pane.selection();
-        }
-        self.damage.painted = true;
+        self.commit_damage(app);
     }
 
-    /// Fill the reused row mask with the viewport rows a damage repaint must
-    /// cover: grid damage, the rows the cursor block moved between, and the
-    /// rows the selection overlay changed on. Allocation-free after warmup.
+    /// Fill the reused tab-row mask with the rows this frame must cover, per
+    /// pane: grid damage, the rows each cursor block moved between, and the
+    /// rows a selection overlay changed on. The mask has one entry per tab
+    /// row; pane row `y` of leaf `rect` is mask index `rect.row + y`.
+    /// Allocation-free after warmup.
     fn build_mask(&mut self, app: &App, full: bool) {
-        let rows = app.active_tab().map_or(0, |tab| tab.pane().grid().rows());
-        self.mask.clear();
-        self.mask.resize(rows, false);
-        if rows == 0 {
+        let Some(tab) = app.active_tab() else {
+            self.mask.clear();
             return;
-        }
-        let Some(tab) = app.active_tab() else { return };
-        let pane = tab.pane();
-        let grid = pane.grid();
-        let mark = |mask: &mut [bool], lo: usize, hi: usize| {
-            let hi = hi.min(rows - 1);
-            for row in &mut mask[lo.min(hi)..=hi] {
-                *row = true;
-            }
         };
-        if full {
-            mark(&mut self.mask, 0, rows - 1);
+        let total = tab.rows();
+        self.mask.clear();
+        self.mask.resize(total, false);
+        if total == 0 {
             return;
         }
-        grid.for_each_dirty_row(|row| {
-            if row < rows {
-                self.mask[row] = true;
-            }
-        });
-        // A moved block leaves a hole in the row it was painted on.
-        let cursor = cursor_cell(pane, grid);
-        let cursor_row = cursor.map(|(row, _)| row);
-        if cursor_row != Some(self.damage.cursor_row) {
-            if self.damage.cursor_row < rows {
-                self.mask[self.damage.cursor_row] = true;
-            }
-            if let Some(row) = cursor_row {
-                self.mask[row] = true;
-            }
+        if full {
+            self.mask.iter_mut().for_each(|m| *m = true);
+            return;
         }
-        // The overlay has to be cleared where it was and drawn where it is.
-        let selection = pane.selection();
-        if selection != self.damage.selection {
-            let mut span = (0usize, 0usize);
-            for sel in [selection, self.damage.selection].into_iter().flatten() {
-                if selection_rows(grid, sel, rows, &mut span) {
-                    mark(&mut self.mask, span.0, span.1);
+        // The snapshot is taken out so the closure can write rows into
+        // `self.mask` while reading the previous cursor/selection state.
+        let prev = std::mem::take(&mut self.pane_damage);
+        let mut idx = 0usize;
+        tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
+            let grid = pane.grid();
+            let rows = rect.rows.min(grid.rows());
+            grid.for_each_dirty_row(|row| {
+                if row < rows {
+                    self.mask[rect.row + row] = true;
+                }
+            });
+            let d = prev.get(idx).copied().unwrap_or_default();
+            // A moved block leaves a hole in the row it was painted on.
+            let cursor_row = cursor_cell(pane, grid).map(|(row, _)| row);
+            if cursor_row != Some(d.cursor_row) {
+                if d.cursor_row < rows {
+                    self.mask[rect.row + d.cursor_row] = true;
+                }
+                if let Some(row) = cursor_row.filter(|r| *r < rows) {
+                    self.mask[rect.row + row] = true;
                 }
             }
+            // The overlay has to be cleared where it was and drawn where it is.
+            let selection = pane.selection();
+            if selection != d.selection {
+                let mut span = (0usize, 0usize);
+                for sel in [selection, d.selection].into_iter().flatten() {
+                    if selection_rows(grid, sel, rows, &mut span) {
+                        for m in &mut self.mask[rect.row + span.0..=rect.row + span.1] {
+                            *m = true;
+                        }
+                    }
+                }
+            }
+            idx += 1;
+        });
+        self.pane_damage = prev;
+    }
+
+    /// Record what this frame painted (per pane) so the next damage repaint
+    /// knows what to compare against. Reuses the snapshot buffers (NFR-113).
+    fn commit_damage(&mut self, app: &App) {
+        self.damage.active_tab = app.active_index();
+        if let Some(tab) = app.active_tab() {
+            self.shape = (tab.pane_count(), tab.cols(), tab.rows());
+            let mut snapshot = std::mem::take(&mut self.pane_damage);
+            snapshot.clear();
+            tab.for_each_pane_ref(&mut |pane: &Pane, _| {
+                let grid = pane.grid();
+                snapshot.push(PaneDamage {
+                    grid_cols: grid.cols(),
+                    grid_rows: grid.rows(),
+                    cursor_row: cursor_cell(pane, grid).map_or(usize::MAX, |(row, _)| row),
+                    selection: pane.selection(),
+                });
+            });
+            self.pane_damage = snapshot;
+        } else {
+            self.shape = (0, 0, 0);
+            self.pane_damage.clear();
         }
+        self.damage.painted = true;
     }
 
     /// Copy the printable text of the active viewport (Ctrl+Shift+C MVP
@@ -695,17 +814,23 @@ impl Renderer {
         (hi > lo).then_some((lo, hi))
     }
 
-    /// Fill the mouse-selection span on viewport row `y` (drawn between
-    /// the row background and the row text, so glyphs stay legible).
-    fn paint_row_selection(&mut self, y: usize, span: Option<(usize, usize)>, theme: &Theme) {
+    /// Fill the mouse-selection span on one row of the pane box that starts
+    /// at (`left`, `top`) (drawn between the row background and the row
+    /// text, so glyphs stay legible).
+    fn paint_row_selection(
+        &mut self,
+        left: f32,
+        top: f32,
+        span: Option<(usize, usize)>,
+        theme: &Theme,
+    ) {
         let Some((lo, hi)) = span else {
             return;
         };
-        let top = self.tab_bar_height + y as f32 * self.metrics.cell_height;
         self.fill_rect(
-            lo as f32 * self.metrics.cell_width,
+            left + lo as f32 * self.metrics.cell_width,
             top,
-            hi as f32 * self.metrics.cell_width,
+            left + hi as f32 * self.metrics.cell_width,
             top + self.metrics.cell_height,
             theme.selection,
         );
@@ -820,7 +945,9 @@ impl Renderer {
         }
     }
 
-    fn paint_row_backgrounds(&mut self, y: usize, cells: &[Cell], theme: &Theme) {
+    /// Fill the row's cell backgrounds, run by run, inside the pane box that
+    /// starts at (`left`, `top`).
+    fn paint_row_backgrounds(&mut self, left: f32, top: f32, cells: &[Cell], theme: &Theme) {
         let mut x = 0;
         while x < cells.len() {
             let (_, bg) = Self::effective_colors(&cells[x], theme);
@@ -832,11 +959,10 @@ impl Renderer {
             while end < cells.len() && Self::effective_colors(&cells[end], theme).1 == bg {
                 end += 1;
             }
-            let top = self.tab_bar_height + y as f32 * self.metrics.cell_height;
             self.fill_rect(
-                x as f32 * self.metrics.cell_width,
+                left + x as f32 * self.metrics.cell_width,
                 top,
-                end as f32 * self.metrics.cell_width,
+                left + end as f32 * self.metrics.cell_width,
                 top + self.metrics.cell_height,
                 bg,
             );
@@ -844,21 +970,23 @@ impl Renderer {
         }
     }
 
-    /// Paint one row's glyphs. With an atlas, a cell whose tile is already
+    /// Paint one row's glyphs inside the pane box that starts at
+    /// (`left`, `top`). With an atlas, a cell whose tile is already
     /// rendered is a single `DrawBitmap`; glyphs the atlas has not finished
     /// yet fall back to style+colour runs of `DrawText`. The UTF-16 text is
     /// built into the reused `self.utf16` buffer: the hot path allocates
     /// nothing per frame (NFR-113).
     fn paint_row_text(
         &mut self,
-        y: usize,
+        left: f32,
+        top: f32,
         cells: &[Cell],
         span: Option<(usize, usize)>,
         theme: &Theme,
     ) {
         let cw = self.metrics.cell_width;
         let ch = self.metrics.cell_height;
-        let y_top = self.tab_bar_height + y as f32 * ch + (ch - self.metrics.text_height) / 2.0;
+        let y_top = top + (ch - self.metrics.text_height) / 2.0;
         let atlas = self.atlas.take();
         let mut units = std::mem::take(&mut self.utf16);
         let mut i = 0;
@@ -874,12 +1002,7 @@ impl Renderer {
                 .and_then(|key| atlas.as_ref().and_then(|atlas| atlas.lookup(key)));
             if let Some(tile) = tile {
                 if let Some(atlas) = atlas.as_ref() {
-                    self.blit_glyph(
-                        atlas,
-                        tile,
-                        i as f32 * cw,
-                        self.tab_bar_height + y as f32 * ch,
-                    );
+                    self.blit_glyph(atlas, tile, left + i as f32 * cw, top);
                 }
                 i += 1;
                 continue;
@@ -917,9 +1040,9 @@ impl Renderer {
                 units.extend_from_slice(&buf[..count]);
             }
             let rect = D2D_RECT_F {
-                left: i as f32 * cw,
+                left: left + i as f32 * cw,
                 top: y_top,
-                right: end as f32 * cw,
+                right: left + end as f32 * cw,
                 bottom: y_top + self.metrics.text_height,
             };
             let Some(brush) = self.brush(fg) else {
@@ -977,7 +1100,7 @@ impl Renderer {
         Some(GlyphKey::new(cell.char, format, fg, bg))
     }
 
-    fn paint_row_decorations(&mut self, y: usize, cells: &[Cell], theme: &Theme) {
+    fn paint_row_decorations(&mut self, left0: f32, top: f32, cells: &[Cell], theme: &Theme) {
         let cw = self.metrics.cell_width;
         let ch = self.metrics.cell_height;
         for (x, cell) in cells.iter().enumerate() {
@@ -985,37 +1108,158 @@ impl Renderer {
                 continue;
             }
             let (fg, _) = Self::effective_colors(cell, theme);
-            let left = x as f32 * cw;
+            let left = left0 + x as f32 * cw;
             let right = left + cw;
             if cell.attributes.contains(CellAttribute::UNDERLINE) {
-                let yline = self.tab_bar_height + y as f32 * ch + ch - 1.0;
+                let yline = top + ch - 1.0;
                 self.stroke_line(left, yline, right, yline, fg);
             }
             if cell.attributes.contains(CellAttribute::STRIKE) {
-                let yline = self.tab_bar_height + y as f32 * ch + ch / 2.0;
+                let yline = top + ch / 2.0;
                 self.stroke_line(left, yline, right, yline, fg);
             }
         }
     }
 
-    fn paint_cursor(&mut self, pane: &Pane, grid: &Grid, theme: &Theme) {
+    /// Paint one pane's cursor: the solid block on the focused pane, a
+    /// hollow outline elsewhere (SPLIT-003 focus cue, SPLIT-015).
+    fn paint_cursor(&mut self, pane: &Pane, rect: Rect, focused: bool, theme: &Theme) {
+        let grid = pane.grid();
         if grid.scroll_offset() != 0 || !pane.cursor_visible() {
             return;
         }
         let row = pane.parser().cursor_row;
         let col = pane.parser().cursor_col;
-        if row >= grid.rows() || col >= grid.cols() {
+        if row >= rect.rows || col >= rect.cols {
             return;
         }
-        let top = self.tab_bar_height + row as f32 * self.metrics.cell_height;
-        let left = col as f32 * self.metrics.cell_width;
-        self.fill_rect(
-            left,
-            top,
-            left + self.metrics.cell_width,
-            top + self.metrics.cell_height,
-            theme.cursor,
-        );
+        let top = self.tab_bar_height + (rect.row + row) as f32 * self.metrics.cell_height;
+        let left = (rect.col + col) as f32 * self.metrics.cell_width;
+        let right = left + self.metrics.cell_width;
+        let bottom = top + self.metrics.cell_height;
+        if focused {
+            self.fill_rect(left, top, right, bottom, theme.cursor);
+        } else {
+            // Hollow block: outline only, so the focused pane's block stands out.
+            self.stroke_line(left, top, right, top, theme.cursor);
+            self.stroke_line(left, bottom, right, bottom, theme.cursor);
+            self.stroke_line(left, top, left, bottom, theme.cursor);
+            self.stroke_line(right, top, right, bottom, theme.cursor);
+        }
+    }
+
+    /// Fill the separator lines between touching panes (SPLIT-014, SPLIT-015):
+    /// 1 DIP wide, `split_border` everywhere, `split_focus` on the focused
+    /// pane's edges. Unfocused edges paint first so the focused color wins a
+    /// shared boundary. Allocation-free.
+    fn paint_split_borders(&mut self, tab: &Tab, theme: &Theme) {
+        let cw = self.metrics.cell_width;
+        let ch = self.metrics.cell_height;
+        let focused = tab.focused_index().unwrap_or(usize::MAX);
+        for pass_focus in [false, true] {
+            let mut idx = 0usize;
+            tab.for_each_pane_ref(&mut |_: &Pane, rect: Rect| {
+                if (idx == focused) == pass_focus {
+                    let x = rect.col as f32 * cw;
+                    let y = self.tab_bar_height + rect.row as f32 * ch;
+                    let w = rect.cols as f32 * cw;
+                    let pane_height = rect.rows as f32 * ch;
+                    let color = if pass_focus {
+                        theme.split_focus
+                    } else {
+                        theme.split_border
+                    };
+                    if rect.col > 0 && leaf_at(tab, rect.col - 1, rect.row).is_some() {
+                        self.fill_rect(x, y, x + 1.0, y + pane_height, color);
+                    }
+                    if rect.col + rect.cols < tab.cols()
+                        && leaf_at(tab, rect.col + rect.cols, rect.row).is_some()
+                    {
+                        self.fill_rect(x + w - 1.0, y, x + w, y + pane_height, color);
+                    }
+                    if rect.row > 0 && leaf_at(tab, rect.col, rect.row - 1).is_some() {
+                        self.fill_rect(x, y, x + w, y + 1.0, color);
+                    }
+                    if rect.row + rect.rows < tab.rows()
+                        && leaf_at(tab, rect.col, rect.row + rect.rows).is_some()
+                    {
+                        self.fill_rect(x, y + pane_height - 1.0, x + w, y + pane_height, color);
+                    }
+                }
+                idx += 1;
+            });
+        }
+    }
+
+    /// Paint a title chip in each pane's top-left corner (SPLIT-011): the
+    /// pane's OSC-set title, on panes that have one. Reuses the tab-bar
+    /// label buffers, so the hot path stays allocation-free (NFR-113).
+    fn paint_pane_titles(&mut self, tab: &Tab, theme: &Theme) {
+        let cw = self.metrics.cell_width;
+        let ch = self.metrics.cell_height;
+        let focused = tab.focused_index().unwrap_or(usize::MAX);
+        let mut units = std::mem::take(&mut self.utf16);
+        let mut label = std::mem::take(&mut self.label);
+        let mut idx = 0usize;
+        tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
+            let is_focus = idx == focused;
+            let Some(title) = pane.title() else {
+                idx += 1;
+                return;
+            };
+            let x = rect.col as f32 * cw;
+            let y = self.tab_bar_height + rect.row as f32 * ch;
+            let w = rect.cols as f32 * cw;
+            label.clear();
+            tabbar::fit_title_into(title, (w - 2.0).max(0.0) - TAB_CHROME, cw, &mut label);
+            if label.is_empty() {
+                idx += 1;
+                return;
+            }
+            let chip_w = label.chars().count() as f32 * cw + TAB_CHROME;
+            let bg = if is_focus {
+                mix(theme.tab_bar, theme.split_focus, 0.25)
+            } else {
+                theme.tab_bar
+            };
+            self.fill_rect(
+                x + 1.0,
+                y + 1.0,
+                x + 1.0 + chip_w,
+                y + 1.0 + self.metrics.text_height,
+                bg,
+            );
+            units.clear();
+            units.extend(label.encode_utf16());
+            let rect_box = D2D_RECT_F {
+                left: x + 1.0 + TAB_CHROME / 2.0,
+                top: y + 1.0,
+                right: x + 1.0 + chip_w - TAB_CHROME / 2.0,
+                bottom: y + 1.0 + self.metrics.text_height,
+            };
+            let color = if is_focus {
+                theme.foreground
+            } else {
+                mix(theme.foreground, theme.tab_bar, 0.45)
+            };
+            if let Some(brush) = self.brush(color) {
+                let format = &self.formats[0];
+                unsafe {
+                    self.target.DrawText(
+                        &units,
+                        format,
+                        &rect_box,
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+            }
+            idx += 1;
+        });
+        units.clear();
+        self.utf16 = units;
+        self.label = label;
     }
 
     fn fill_rect(&mut self, left: f32, top: f32, right: f32, bottom: f32, color: Color) {

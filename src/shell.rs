@@ -158,37 +158,54 @@ impl Shell {
     }
 
     /// Spawn the shell on a ConPTY of the requested size (TTY-001, TTY-002).
+    ///
+    /// A failed spawn leaves the pane inert (`Inactive`) so a later
+    /// [`Tab::spawn_panes`] retry can ask again (TTY-026: no half-open
+    /// session, no stuck `Spawning` state).
     #[cfg(windows)]
     pub fn spawn(&mut self, opts: &SpawnOptions) -> Result<(), ShellError> {
         if self.is_running() {
             return Err(ShellError::NotRunning);
         }
         self.state = ShellState::Spawning;
+        match self.attach_console(opts) {
+            Ok(()) => {
+                self.state = ShellState::Running;
+                Ok(())
+            }
+            Err(e) => {
+                self.state = ShellState::Inactive;
+                self.inner = None;
+                self.rx = None;
+                self.reader = None;
+                Err(e)
+            }
+        }
+    }
+
+    /// Build the ConPTY session and its pump thread; the caller owns the
+    /// `Spawning`/`Running`/`Inactive` transitions.
+    #[cfg(windows)]
+    fn attach_console(&mut self, opts: &SpawnOptions) -> Result<(), ShellError> {
+        let spawn_err = |e: std::io::Error| ShellError::Spawn {
+            program: opts.program.clone(),
+            source: e,
+        };
 
         let (conpty, process, thread) =
-            conpty::ConPty::spawn(&opts.program, &opts.args, opts.cols, opts.rows).map_err(
-                |e| ShellError::Spawn {
-                    program: opts.program.clone(),
-                    source: e,
-                },
-            )?;
+            conpty::ConPty::spawn(&opts.program, &opts.args, opts.cols, opts.rows)
+                .map_err(spawn_err)?;
         // The primary thread handle is not needed after spawn (WIN-001:
         // no handle leaks); dropping the SendHandle closes it.
         drop(thread);
-        let reader_handle = conpty.output_reader().map_err(|e| ShellError::Spawn {
-            program: opts.program.clone(),
-            source: e,
-        })?;
+        let reader_handle = conpty.output_reader().map_err(spawn_err)?;
 
         let (tx, rx) = mpsc::channel::<ShellEvent>();
         let pump_tx = tx.clone();
         // The shell answers terminal queries (CSI 6n) inline: cmd.exe and
         // bash query the cursor position at startup and block until the
         // terminal replies with a CPR report.
-        let reply_tx = conpty.input_writer().map_err(|e| ShellError::Spawn {
-            program: opts.program.clone(),
-            source: e,
-        })?;
+        let reply_tx = conpty.input_writer().map_err(spawn_err)?;
         let reader = std::thread::spawn(move || {
             // Pump output until EOF/broken pipe; a hard failure is treated
             // like EOF so the pane always converges to Exited (TTY-026:
@@ -209,7 +226,6 @@ impl Shell {
         self.inner = Some(Inner { conpty, _tx: tx });
         self.rx = Some(rx);
         self.reader = Some(reader);
-        self.state = ShellState::Running;
         Ok(())
     }
 

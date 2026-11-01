@@ -10,11 +10,14 @@
 //! `WM_SYSKEYDOWN` and are encoded by [`crate::keyboard`]; text,
 //! Enter/Escape/Backspace and Ctrl-control characters arrive through
 //! `WM_CHAR`/`WM_SYSCHAR`. App bindings: Ctrl+Shift+T (new tab),
-//! Ctrl+Shift+W (close tab), Ctrl+Shift+T/W/C/V, Ctrl+Shift+]/[
-//! (next/prev tab), Ctrl+Shift+Q (quit), F11 (fullscreen),
+//! Ctrl+Shift+W (close pane, else tab), Ctrl+Shift+T/W/C/V, Ctrl+Shift+]/[
+//! (next/prev tab), Ctrl+Shift+Q (quit), Ctrl+Shift+Enter (split right),
+//! Ctrl+Shift+- (split below), Ctrl+Alt+arrows (pane focus),
+//! Ctrl+Alt+Shift+arrows (pane resize), F11 (fullscreen),
 //! Ctrl+Shift+C (copy selection, else screen), Ctrl+Shift+V (paste).
-//! Mouse (WIN-004): drag-selects text, double-click selects a word,
-//! middle-click pastes, tab-bar clicks switch tabs / press `+`.
+//! Mouse (WIN-004): click focuses a pane, drag-selects text, double-click
+//! selects a word, middle-click pastes, wheel scrolls the pane under the
+//! cursor, tab-bar clicks switch tabs / press `+`.
 
 use std::ffi::c_void;
 
@@ -37,24 +40,27 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
     DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
     GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, HICON, IDC_ARROW,
-    IDC_IBEAM, LoadCursorW, MINMAXINFO, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-    SW_SHOW, SWP_FRAMECHANGED, SWP_NOZORDER, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_COPY,
-    WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    IDC_IBEAM, IDYES, LoadCursorW, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO, MINMAXINFO, MSG,
+    MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOW, SWP_FRAMECHANGED,
+    SWP_NOZORDER, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    TranslateMessage, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_COPY, WM_CREATE, WM_DESTROY,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_SETCURSOR, WM_SETFOCUS,
+    WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
-use crate::app::App;
+use crate::app::{App, PaneClose};
 use crate::clipboard;
 use crate::config::{Config, FontConfig, TabBar};
 use crate::keyboard::{self, Modifiers};
+use crate::pane::Pane;
 use crate::parser::bracketed_paste_bytes;
 use crate::render::{CellMetrics, Renderer, measure_cells, px_to_dips};
 use crate::selection::{Pos, Selection};
 use crate::shell::SpawnOptions;
+use crate::split::{Dir, Rect, Side};
 use crate::tabbar::{self, Hit, TAB_BAR_HEIGHT};
 use crate::theme::Theme;
 
@@ -106,8 +112,10 @@ struct WindowState {
     metrics: CellMetrics,
     timer_id: usize,
     /// Anchor cell of the in-progress mouse text selection drag
-    /// (absolute grid coordinates); `None` when not dragging (WIN-004).
-    drag_anchor: Option<Pos>,
+    /// (absolute grid coordinates in the pane the drag started on) plus
+    /// that pane's flatten index; `None` when not dragging (WIN-004,
+    /// SPLIT-004: drags stay inside their pane).
+    drag_anchor: Option<(Pos, usize)>,
     /// Last grid click as (absolute row, col, GetTickCount64 ms): used to
     /// detect double clicks the system does not coalesce into
     /// `WM_LBUTTONDBLCLK` (injected/synthesized input never coalesces).
@@ -235,7 +243,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEWHEEL => {
-            handle_wheel(hwnd, ((wparam.0 >> 16) & 0xFFFF) as u16);
+            handle_wheel(hwnd, wparam, lparam);
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
@@ -408,8 +416,8 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
                 true
             }
             0x57 => {
-                // Ctrl+Shift+W: close tab
-                close_tab(hwnd);
+                // Ctrl+Shift+W: close focused pane, else close tab
+                close_pane_or_tab(hwnd);
                 true
             }
             0x43 => {
@@ -437,6 +445,18 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
                 switch_tab_rel(hwnd, -1);
                 true
             }
+            0x0A => {
+                // Ctrl+Shift+Enter: split the focused pane, new pane right
+                // (SPLIT-005)
+                split_pane(hwnd, Dir::Vertical);
+                true
+            }
+            0xBD => {
+                // Ctrl+Shift+-: split the focused pane, new pane below
+                // (SPLIT-005)
+                split_pane(hwnd, Dir::Horizontal);
+                true
+            }
             _ => false,
         };
         if consumed {
@@ -446,6 +466,42 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
                 s.suppress_char = true;
             }
             return;
+        }
+    }
+    // Ctrl+Alt+arrows: pane focus (SPLIT-008). Ctrl+Alt+Shift+arrows:
+    // pane resize (SPLIT-009). Unsplit tabs fall through to normal VT
+    // encoding so the shells keep receiving their arrow keys.
+    if mods.ctrl && mods.alt {
+        let side = match vk {
+            0x25 => Some(Side::Left),
+            0x26 => Some(Side::Up),
+            0x27 => Some(Side::Right),
+            0x28 => Some(Side::Down),
+            _ => None,
+        };
+        if let Some(side) = side {
+            let moved = state_mut(hwnd).is_some_and(|s| {
+                if mods.shift {
+                    // Shift grows/shrinks the focused pane across its
+                    // nearest split: left/up shrink, right/down grow.
+                    let (dir, delta) = match side {
+                        Side::Left => (Dir::Vertical, -App::ratio_step()),
+                        Side::Right => (Dir::Vertical, App::ratio_step()),
+                        Side::Up => (Dir::Horizontal, -App::ratio_step()),
+                        Side::Down => (Dir::Horizontal, App::ratio_step()),
+                    };
+                    s.app.adjust_ratio(dir, delta)
+                } else {
+                    s.app.focus_neighbor(side)
+                }
+            });
+            if moved {
+                if let Some(s) = state_mut(hwnd) {
+                    s.suppress_char = true;
+                }
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+                return;
+            }
         }
     }
     let Some(s) = state_ref(hwnd) else { return };
@@ -488,17 +544,35 @@ fn handle_char(hwnd: HWND, code: u32, sys: bool) {
     let _ = s.app.send_input_active(&bytes);
 }
 
-/// WM_MOUSEWHEEL: scroll the viewport through the scrollback.
-fn handle_wheel(hwnd: HWND, delta_u16: u16) {
-    let delta = delta_u16 as i16;
+/// WM_MOUSEWHEEL: scroll the pane under the cursor through its
+/// scrollback. The wheel never moves pane focus (SPLIT-004: the mouse
+/// routes to what it points at).
+fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    let delta = (wparam.0 >> 16) as u16 as i16;
     let lines = if read_mods().ctrl {
         WHEEL_LINES * 2
     } else {
         WHEEL_LINES
     };
+    // Wheel lparam carries *screen* coordinates; map them to the client.
+    // The windows crate has no `GET_X_LPARAM`/`GET_Y_LPARAM` (C macros);
+    // decode the signed 16-bit pair from the packed lparam.
+    let mut pt = POINT {
+        x: (lparam.0 & 0xFFFF) as u16 as i16 as i32,
+        y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32,
+    };
+    let _ = unsafe { ScreenToClient(hwnd, &mut pt) };
     let Some(s) = state_mut(hwnd) else { return };
-    if let Some(tab) = s.app.active_tab_mut() {
-        let grid = tab.pane_mut().grid_mut();
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+    let pos = (
+        px_to_dips(pt.x.max(0) as u32, dpi),
+        px_to_dips(pt.y.max(0) as u32, dpi),
+    );
+    let pane = cell_at(s, pos.0, pos.1).map(|(idx, _, _)| idx);
+    if let Some(idx) = pane
+        && let Some(mut pane) = s.app.active_tab_mut().and_then(|t| t.pane_at_mut(idx))
+    {
+        let grid = pane.grid_mut();
         if delta < 0 {
             grid.scroll_up(lines);
         } else {
@@ -529,24 +603,38 @@ fn client_width_dips(hwnd: HWND) -> f32 {
     px_to_dips((r.right - r.left).max(1) as u32, dpi)
 }
 
-/// Grid cell under a client-area DIP position; `None` for the tab bar.
-/// Clamped to the grid bounds so drags past the edges extend the selection.
-fn cell_at(s: &WindowState, x: f32, y: f32) -> Option<(usize, usize)> {
+/// Grid cell under a client-area DIP position, addressed by pane:
+/// `(pane flatten index, viewport row, viewport col)` inside that pane;
+/// `None` for the tab bar. Clamped to the grid bounds so drags past the
+/// edges extend the selection (WIN-004, SPLIT-004 hit-testing).
+fn cell_at(s: &WindowState, x: f32, y: f32) -> Option<(usize, usize, usize)> {
     let bar = s.bar_height();
     if y < bar {
         return None;
     }
-    let grid = s.app.active_tab()?.pane().grid();
+    let tab = s.app.active_tab()?;
     let col = (x / s.metrics.cell_width).floor().max(0.0) as usize;
     let row = ((y - bar) / s.metrics.cell_height).floor().max(0.0) as usize;
-    Some((
-        row.min(grid.rows().saturating_sub(1)),
-        col.min(grid.cols().saturating_sub(1)),
-    ))
+    let (cols, rows) = (tab.cols(), tab.rows());
+    let col = col.min(cols.saturating_sub(1));
+    let row = row.min(rows.saturating_sub(1));
+    let idx = tab.layout().iter().position(|r| r.contains(col, row))?;
+    let rect = tab.layout()[idx];
+    Some((idx, row - rect.row, col - rect.col))
 }
 
-/// WM_LBUTTONDOWN: tab bar hit (switch tab / press `+`) or start a
-/// text-selection drag anchored on the clicked cell (WIN-004).
+/// Viewport row -> absolute grid row inside pane `idx`, clamped to its
+/// grid (panes tile the tab, so the mapping always exists).
+fn abs_row_in_pane(s: &WindowState, idx: usize, row: usize) -> usize {
+    s.app
+        .active_tab()
+        .and_then(|t| t.pane_at(idx)?.grid().abs_of_view(row))
+        .unwrap_or(row)
+}
+
+/// WM_LBUTTONDOWN: tab bar hit (switch tab / press `+`) or focus the pane
+/// under the pointer and start a text-selection drag anchored on the
+/// clicked cell (WIN-004, SPLIT-003).
 fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
     let (x, y) = cursor_dips(hwnd, lparam);
     let bar = state_ref(hwnd).map_or(TAB_BAR_HEIGHT, |s| s.bar_height());
@@ -570,15 +658,16 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
         return;
     }
     let anchor = state_ref(hwnd).and_then(|s| {
-        let (row, col) = cell_at(s, x, y)?;
-        s.app
-            .active_tab()?
-            .pane()
-            .grid()
-            .abs_of_view(row)
-            .map(|a| Pos { row: a, col })
+        let (idx, row, col) = cell_at(s, x, y)?;
+        let abs = abs_row_in_pane(s, idx, row);
+        Some((Pos { row: abs, col }, idx))
     });
-    let Some(a) = anchor else { return };
+    let Some((a, idx)) = anchor else { return };
+    // Clicking a pane focuses it (SPLIT-003); the keystrokes and the
+    // follow-up selection drag then belong to that pane.
+    if let Some(s) = state_mut(hwnd) {
+        s.app.focus_pane(idx);
+    }
     // Synthetic double-click detection: the system coalesces real mouse
     // clicks into WM_LBUTTONDBLCLK, but injected/synthesized input never
     // coalesces, so detect the second fast click on the same cell here.
@@ -592,7 +681,7 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
         s.last_click = Some((a.row, a.col, tick));
     }
     if dbl {
-        select_word(hwnd, a.row, a.col);
+        select_word(hwnd, idx, a.row, a.col);
         return;
     }
     // Do NOT SetCapture here: taking capture on the button-down suppresses
@@ -600,9 +689,9 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
     // first drag move instead. The selection stays empty until the drag
     // extends (a plain click must not leave a one-cell selection behind).
     if let Some(s) = state_mut(hwnd) {
-        s.drag_anchor = Some(a);
-        if let Some(tab) = s.app.active_tab_mut() {
-            tab.pane_mut().set_selection(None);
+        s.drag_anchor = Some((a, idx));
+        if let Some(mut pane) = s.app.active_tab_mut().and_then(|t| t.pane_at_mut(idx)) {
+            pane.set_selection(None);
         }
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -613,30 +702,30 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
 fn handle_dblclick(hwnd: HWND, lparam: LPARAM) {
     let (x, y) = cursor_dips(hwnd, lparam);
     let cell = state_ref(hwnd).and_then(|s| {
-        let (row, col) = cell_at(s, x, y)?;
-        let abs = s.app.active_tab()?.pane().grid().abs_of_view(row)?;
-        Some((abs, col))
+        let (idx, row, col) = cell_at(s, x, y)?;
+        let abs = abs_row_in_pane(s, idx, row);
+        Some((idx, abs, col))
     });
-    if let Some((abs, col)) = cell {
+    if let Some((idx, abs, col)) = cell {
         if let Some(s) = state_mut(hwnd) {
             s.last_click = Some((abs, col, unsafe { GetTickCount64() } as i64));
         }
-        select_word(hwnd, abs, col);
+        select_word(hwnd, idx, abs, col);
     }
 }
 
-/// Select the whole word at absolute grid position (`abs`, `col`) (WIN-004).
-fn select_word(hwnd: HWND, abs: usize, col: usize) {
+/// Select the whole word at pane `idx`'s absolute grid position
+/// (`abs`, `col`) (WIN-004).
+fn select_word(hwnd: HWND, idx: usize, abs: usize, col: usize) {
     let word = state_ref(hwnd).and_then(|s| {
-        let grid = s.app.active_tab()?.pane().grid();
-        let (lo, hi) = grid.word_range_abs(abs, col)?;
-        Some((lo, hi))
+        let pane = s.app.active_tab()?.pane_at(idx)?;
+        pane.grid().word_range_abs(abs, col)
     });
     let Some((lo, hi)) = word else { return };
     if let Some(s) = state_mut(hwnd) {
-        s.drag_anchor = Some(Pos { row: abs, col: lo });
-        if let Some(tab) = s.app.active_tab_mut() {
-            tab.pane_mut().set_selection(Some(Selection::between(
+        s.drag_anchor = Some((Pos { row: abs, col: lo }, idx));
+        if let Some(mut pane) = s.app.active_tab_mut().and_then(|t| t.pane_at_mut(idx)) {
+            pane.set_selection(Some(Selection::between(
                 Pos { row: abs, col: lo },
                 Pos {
                     row: abs,
@@ -648,7 +737,9 @@ fn select_word(hwnd: HWND, abs: usize, col: usize) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
-/// WM_MOUSEMOVE with the left button down: extend the selection drag.
+/// WM_MOUSEMOVE with the left button down: extend the selection drag
+/// inside the pane the drag started on (SPLIT-004: drags stay in their
+/// pane; crossing a border clamps to that pane's edges).
 fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     const MK_LBUTTON: usize = 0x01;
     if wparam.0 & MK_LBUTTON == 0 {
@@ -656,23 +747,27 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     }
     let (x, y) = cursor_dips(hwnd, lparam);
     let Some(s) = state_mut(hwnd) else { return };
-    let Some(a) = s.drag_anchor else { return };
-    // Dragging over the tab bar clamps the selection to the top row.
-    let Some((row, col)) = cell_at(s, x, y.max(s.bar_height())) else {
+    let Some((a, idx)) = s.drag_anchor else {
         return;
     };
-    let abs = s
-        .app
-        .active_tab()
-        .and_then(|t| t.pane().grid().abs_of_view(row))
-        .unwrap_or(a.row);
+    // Dragging over the tab bar clamps the selection to the top row of
+    // the anchor pane.
+    let Some((_, row, col)) = cell_at(s, x, y.max(s.bar_height())) else {
+        return;
+    };
+    let row = row.min(
+        s.app
+            .active_tab()
+            .and_then(|t| t.pane_at(idx))
+            .map_or(row, |p| p.grid().rows().saturating_sub(1)),
+    );
+    let abs = abs_row_in_pane(s, idx, row);
     let cur = Pos { row: abs, col };
     // First drag move: take capture now (see handle_lbutton_down) so the
     // drag keeps delivering moves even past the window edges.
     unsafe { SetCapture(hwnd) };
-    if let Some(tab) = s.app.active_tab_mut() {
-        tab.pane_mut()
-            .set_selection(Some(Selection::between(a, cur)));
+    if let Some(mut pane) = s.app.active_tab_mut().and_then(|t| t.pane_at_mut(idx)) {
+        pane.set_selection(Some(Selection::between(a, cur)));
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -765,10 +860,11 @@ fn toggle_fullscreen(hwnd: HWND) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
-/// WM_TIMER: drain every shell, close exited tabs, refresh the caption.
+/// WM_TIMER: drain every shell, close dead panes (and the tabs they leave
+/// behind), refresh the caption.
 fn drain_and_cleanup(hwnd: HWND) {
     // Scope the GWLP_USERDATA borrow so it ends before sync_tab_bar re-enters.
-    let tab_closed = {
+    let changed = {
         let Some(s) = state_mut(hwnd) else { return };
         s.app.drain_shells();
         // Repaint only when a grid actually changed (NFR-113: no idle
@@ -783,34 +879,133 @@ fn drain_and_cleanup(hwnd: HWND) {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             }
         }
-        let dead: Vec<usize> = s
-            .app
-            .tabs()
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| {
-                matches!(
-                    t.pane().shell().state(),
-                    crate::shell::ShellState::Inactive | crate::shell::ShellState::Exited(_)
-                )
-            })
-            .map(|(i, _)| i)
-            .collect();
+        // Shell death closes its pane (SPLIT-006: the sibling takes the
+        // box); a tab whose last pane dies closes with it, and the last
+        // tab closing destroys the window.
+        let mut quit = false;
         let mut closed = false;
-        for idx in dead.into_iter().rev() {
-            if s.app.close_tab(idx) {
-                let _ = unsafe { DestroyWindow(hwnd) };
-                return;
+        for idx in (0..s.app.tab_count()).rev() {
+            // Collect with indices: `for_each_pane_ref` visits leaves in
+            // flatten order, so the dead panes are closed from the far
+            // end backwards and the live indices stay valid.
+            let dead: Vec<usize> = s
+                .app
+                .tabs()
+                .get(idx)
+                .map(|tab| {
+                    let mut out = Vec::new();
+                    let mut i = 0usize;
+                    tab.for_each_pane_ref(|pane: &Pane, _rect: Rect| {
+                        if matches!(
+                            pane.shell().state(),
+                            crate::shell::ShellState::Inactive
+                                | crate::shell::ShellState::Exited(_)
+                        ) {
+                            out.push(i);
+                        }
+                        i += 1;
+                    });
+                    out
+                })
+                .unwrap_or_default();
+            for pane_idx in dead.into_iter().rev() {
+                match s.app.close_tab_pane(idx, pane_idx) {
+                    PaneClose::WindowQuit => {
+                        quit = true;
+                        break;
+                    }
+                    PaneClose::TabClosed => closed = true,
+                    PaneClose::PaneClosed => closed = true,
+                    PaneClose::NotFound => {}
+                }
             }
-            closed = true;
+            if quit {
+                break;
+            }
+        }
+        if quit {
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return;
         }
         set_title(hwnd, &s.app);
         closed
     };
-    if tab_closed {
+    if changed {
         // A vanished tab can hide the strip again (tab-bar = "auto").
         sync_tab_bar(hwnd);
     }
+}
+
+/// Ctrl+Shift+Enter / Ctrl+Shift+-: split the focused pane (SPLIT-005) and
+/// spawn the tab's shell profile into the new pane at its box size
+/// (SPLIT-007).
+fn split_pane(hwnd: HWND, dir: Dir) {
+    let split = state_mut(hwnd).is_some_and(|s| s.app.split_active(dir).is_some());
+    if !split {
+        return;
+    }
+    // The new pane takes half the tab: rebuild the tab bar strip (it may
+    // appear with the pane's tab count), then spawn at the pane's box.
+    sync_tab_bar(hwnd);
+    let Some(s) = state_mut(hwnd) else { return };
+    let opts = SpawnOptions {
+        program: s.spawn.program.clone(),
+        args: s.spawn.args.clone(),
+        cols: s.app.active_tab().map_or(80, |t| t.cols()).max(MIN_COLS),
+        rows: s.app.active_tab().map_or(24, |t| t.rows()).max(MIN_ROWS),
+    };
+    // `spawn_active` clamps cols/rows to the focused pane's own box.
+    if let Err(e) = s.app.spawn_active(&opts) {
+        eprintln!("rusttyterm: split shell spawn failed: {e}");
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Ctrl+Shift+W: close the focused pane when the tab is split (SPLIT-006,
+/// with a confirm box when its shell is live); otherwise close the tab,
+/// and closing the last tab closes the window (WM_DESTROY reclaims the
+/// state and quits the loop).
+fn close_pane_or_tab(hwnd: HWND) {
+    let (multi, live) = match state_ref(hwnd) {
+        Some(s) => (
+            s.app.pane_count() > 1,
+            s.app
+                .active_tab()
+                .is_some_and(|t| t.pane().shell().state() == crate::shell::ShellState::Running),
+        ),
+        None => return,
+    };
+    if multi && live {
+        let text = wstr("Close the focused pane? Its shell is still running.");
+        let caption = wstr("rusttyterm");
+        let answer = unsafe {
+            MessageBoxW(
+                Some(hwnd),
+                PCWSTR::from_raw(text.as_ptr()),
+                PCWSTR::from_raw(caption.as_ptr()),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+            )
+        };
+        if answer != IDYES {
+            return;
+        }
+    }
+    if multi {
+        let quit = state_mut(hwnd).is_some_and(|st| st.app.close_active_pane());
+        if quit {
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return;
+        }
+    } else {
+        let destroy = state_mut(hwnd).is_some_and(|s| s.app.close_tab(s.app.active_index()));
+        if destroy {
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return;
+        }
+    }
+    // A vanished tab can hide the strip again (tab-bar = "auto").
+    sync_tab_bar(hwnd);
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
 /// Ctrl+Shift+T: append a tab and spawn a shell at the current grid size.
@@ -835,19 +1030,6 @@ fn new_tab(hwnd: HWND) {
     if let Err(e) = s.app.spawn_active(&opts) {
         eprintln!("rusttyterm: shell spawn failed: {e}");
     }
-    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
-}
-
-/// Ctrl+Shift+W: close the active tab; closing the last tab closes the
-/// window (WM_DESTROY reclaims the state and quits the loop).
-fn close_tab(hwnd: HWND) {
-    let destroy = state_mut(hwnd).is_some_and(|s| s.app.close_tab(s.app.active_index()));
-    if destroy {
-        let _ = unsafe { DestroyWindow(hwnd) };
-        return;
-    }
-    // A vanished tab can hide the strip again (tab-bar = "auto").
-    sync_tab_bar(hwnd);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 

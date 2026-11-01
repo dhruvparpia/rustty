@@ -1,11 +1,31 @@
 //! App model: the ordered tab list with one active tab.
 //!
-//! This is the root of the data model the renderer and window layer will
-//! drive. No windowing code lives here (spec §32 Step 4: data model
-//! first).
+//! This is the root of the data model the renderer and window layer drive.
+//! No windowing code lives here (spec §32 Step 4: data model first).
+//!
+//! Every tab is a pane tree ([`crate::tab::Tab`], SPEC SPLIT-001..015), so
+//! the pane-wide operations (drain, dirty, close) walk every pane of every
+//! tab, while the input operations (feed, spawn, send) target the focused
+//! pane of the active tab. See [`crate::tab`] for the `RefCell` borrow rule.
 
 use crate::shell::{ShellError, SpawnOptions};
+use crate::split::{Dir, Rect, Side};
 use crate::tab::Tab;
+
+/// Outcome of [`App::close_tab_pane`] (SPLIT-004/006 shell-death cascade):
+/// the pane closed, the pane's tab closed with it, or the closed tab was
+/// the last tab, so the window should quit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneClose {
+    /// The pane closed; its tab stays open.
+    PaneClosed,
+    /// The tab's last pane died, so the tab closed; other tabs remain.
+    TabClosed,
+    /// The closed tab was the last tab: quit the window.
+    WindowQuit,
+    /// The tab or pane index was out of range: nothing happened.
+    NotFound,
+}
 
 /// The application state: tabs plus the active-tab index.
 #[derive(Debug)]
@@ -54,7 +74,8 @@ impl App {
 
     /// The active tab.
     ///
-    /// The list is never empty, so this is always `Some`.
+    /// The list is never empty in a running app, so this is `Some` in
+    /// practice.
     #[must_use]
     pub fn active_tab(&self) -> Option<&Tab> {
         self.tabs.get(self.active)
@@ -66,9 +87,21 @@ impl App {
         self.tabs.get_mut(self.active)
     }
 
-    /// Append a new tab and make it active; returns its index.
+    /// Append a new tab (sized like the current one) and make it active;
+    /// returns its index.
     pub fn add_tab(&mut self) -> usize {
-        self.tabs.push(Tab::new());
+        let (cols, rows) = self
+            .active_tab()
+            .map_or((80, 24), |tab| (tab.cols(), tab.rows()));
+        self.tabs.push(Tab::with_size(cols, rows, 1000));
+        self.active = self.tabs.len() - 1;
+        self.active
+    }
+
+    /// Append a tab sized `cols` x `rows` with `scrollback`-line history and
+    /// make it active; returns its index.
+    pub fn add_tab_sized(&mut self, cols: usize, rows: usize, scrollback: usize) -> usize {
+        self.tabs.push(Tab::with_size(cols, rows, scrollback));
         self.active = self.tabs.len() - 1;
         self.active
     }
@@ -100,19 +133,130 @@ impl App {
         false
     }
 
-    /// Resize the active tab's grid and pseudo-console (window resize
-    /// handler entry point, spec §17).
+    // ---- focused-pane operations (SPEC §9/§10) -------------------------
+
+    /// Number of panes in the active tab (1 when the tab is not split).
+    #[must_use]
+    pub fn pane_count(&self) -> usize {
+        self.active_tab().map_or(0, Tab::pane_count)
+    }
+
+    /// The focused pane's box inside the active tab (SPLIT-003, WIN-004).
+    #[must_use]
+    pub fn active_rect(&self) -> Option<Rect> {
+        self.active_tab().and_then(Tab::active_rect)
+    }
+
+    /// Resize the active tab to `cols` x `rows`: every pane's grid and
+    /// pseudo-console follows its layout box, ratios kept (window resize
+    /// handler entry point, spec §17, SPLIT-010).
     ///
-    /// The grid always resizes; the error only reports a ConPTY resize
+    /// The grids always resize; the error only reports a ConPTY resize
     /// failure, which the window layer logs and never panics on.
     pub fn resize_active(&mut self, cols: usize, rows: usize) -> Result<(), ShellError> {
         match self.active_tab_mut() {
-            Some(tab) => tab.pane_mut().resize(cols, rows),
+            Some(tab) => tab.resize(cols, rows),
             None => Ok(()),
         }
     }
 
-    /// Feed shell output bytes into the active pane, then sync tab titles.
+    /// Split the focused pane of the active tab (SPLIT-005):
+    /// [`Dir::Vertical`] = new pane on the right, [`Dir::Horizontal`] = new
+    /// pane below. The new pane is focused and returns its flatten index;
+    /// the caller spawns its shell (SPLIT-007).
+    pub fn split_active(&mut self, dir: Dir) -> Option<usize> {
+        let tab = self.active_tab_mut()?;
+        let idx = tab.split_active(dir)?;
+        self.sync_tab_titles();
+        Some(idx)
+    }
+
+    /// Close the focused pane of the active tab (SPLIT-006). `true` when it
+    /// was the tab's last pane, so the caller closes the tab.
+    pub fn close_active_pane(&mut self) -> bool {
+        let quit = self.active_tab_mut().is_none_or(Tab::close_active);
+        self.sync_tab_titles();
+        quit
+    }
+
+    /// Close the pane at `idx` of the active tab (SPLIT-004, shell death).
+    /// `true` when it was the tab's last pane, so the caller closes the tab.
+    pub fn close_active_pane_at(&mut self, idx: usize) -> bool {
+        let quit = self.active_tab_mut().is_none_or(|tab| tab.close_pane(idx));
+        self.sync_tab_titles();
+        quit
+    }
+
+    /// Close the pane at `idx` of the tab at `tab_idx` (SPLIT-004, shell
+    /// death in a background tab). See [`PaneClose`] for what the result
+    /// reports; closing the tab at the active index keeps the active
+    /// selection valid.
+    pub fn close_tab_pane(&mut self, tab_idx: usize, idx: usize) -> PaneClose {
+        let alive = self
+            .tabs
+            .get(tab_idx)
+            .is_some_and(|tab| tab.pane_count() > idx);
+        if !alive {
+            return PaneClose::NotFound;
+        }
+        // `idx` is in range, so `close_pane` reports the last-pane case.
+        let last = self
+            .tabs
+            .get_mut(tab_idx)
+            .is_some_and(|tab| tab.close_pane(idx));
+        if !last {
+            self.sync_tab_titles();
+            return PaneClose::PaneClosed;
+        }
+        if self.close_tab(tab_idx) {
+            PaneClose::WindowQuit
+        } else {
+            PaneClose::TabClosed
+        }
+    }
+
+    /// Move pane focus inside the active tab (SPLIT-008). `false` when the
+    /// tab is not split in that direction.
+    pub fn focus_neighbor(&mut self, side: Side) -> bool {
+        self.active_tab_mut().is_some_and(|tab| {
+            let moved = tab.focus_neighbor(side);
+            if moved {
+                // Focus moved: the hollow/solid cursor swap repaints via
+                // the caller's InvalidateRect, so drop the grid's dirty
+                // flag rather than queue a second paint.
+                let _ = tab.pane_mut().take_dirty();
+            }
+            moved
+        })
+    }
+
+    /// Grow/shrink the focused pane by one [`crate::split::RATIO_STEP`]
+    /// (SPLIT-009 keyboard pane resize). `true` when a split was adjusted.
+    pub fn adjust_ratio(&mut self, dir: Dir, delta: f32) -> bool {
+        self.active_tab_mut()
+            .is_some_and(|tab| tab.adjust_ratio(dir, delta))
+    }
+
+    /// One keyboard pane-resize step (SPLIT-009, [`crate::split::RATIO_STEP`]).
+    #[must_use]
+    pub const fn ratio_step() -> f32 {
+        Tab::ratio_step()
+    }
+
+    /// Focus the pane at `idx` of the active tab (mouse click, SPLIT-003).
+    pub fn focus_pane(&mut self, idx: usize) -> bool {
+        self.active_tab_mut().is_some_and(|tab| {
+            let moved = tab.focus_index(idx);
+            if moved {
+                // See `focus_neighbor`: focus moves repaint through the
+                // caller, so clear the grid's dirty flag here.
+                let _ = tab.pane_mut().take_dirty();
+            }
+            moved
+        })
+    }
+
+    /// Feed shell output bytes into the focused pane, then sync tab titles.
     pub fn feed_active(&mut self, bytes: &[u8]) {
         if let Some(tab) = self.active_tab_mut() {
             tab.pane_mut().feed(bytes);
@@ -120,15 +264,26 @@ impl App {
         self.sync_tab_titles();
     }
 
-    /// Start a shell in the active pane (TTY-001).
+    /// Start a shell in the focused pane of the active tab, sized to its
+    /// box (TTY-001, SPLIT-007: split panes get the tab's profile).
     pub fn spawn_active(&mut self, opts: &SpawnOptions) -> Result<(), ShellError> {
         match self.active_tab_mut() {
-            Some(tab) => tab.pane_mut().spawn_shell(opts),
+            Some(tab) => {
+                let (cols, rows) = tab
+                    .active_rect()
+                    .map_or((opts.cols, opts.rows), |r| (r.cols, r.rows));
+                let opts = SpawnOptions {
+                    cols,
+                    rows,
+                    ..opts.clone()
+                };
+                tab.pane_mut().spawn_shell(&opts)
+            }
             None => Err(ShellError::NotRunning),
         }
     }
 
-    /// Send keyboard/paste bytes to the active pane's shell.
+    /// Send keyboard/paste bytes to the focused pane's shell.
     pub fn send_input_active(&mut self, bytes: &[u8]) -> Result<(), ShellError> {
         match self.active_tab_mut() {
             Some(tab) => tab.pane_mut().send_input(bytes),
@@ -136,51 +291,54 @@ impl App {
         }
     }
 
-    /// Drain every tab's shell reader events (the UI's periodic poll).
+    // ---- all-pane operations -------------------------------------------
+
+    /// Drain every pane's shell reader events (the UI's periodic poll).
     ///
-    /// Background tabs keep parsing while you work in another tab, so no
-    /// output is lost and no tab blocks the UI thread.
+    /// Background tabs and unfocused panes keep parsing while you work
+    /// elsewhere, so no output is lost and no tab blocks the UI thread.
     pub fn drain_shells(&mut self) {
         for tab in &mut self.tabs {
-            tab.pane_mut().drain_shell();
+            tab.for_each_pane(|pane, _| pane.drain_shell());
         }
         self.sync_tab_titles();
     }
 
-    /// Take the repaint hint across every tab: `true` when any grid changed
+    /// Take the repaint hint across every pane: `true` when any grid changed
     /// since the last call, so the window layer repaints only on change.
     #[must_use]
     pub fn take_dirty(&mut self) -> bool {
         let mut dirty = false;
         for tab in &mut self.tabs {
-            dirty |= tab.pane_mut().take_dirty();
+            tab.for_each_pane(|pane, _| dirty |= pane.take_dirty());
         }
         dirty
     }
 
-    /// Clear the active grid's damage flags after a damage repaint has put
-    /// the dirty rows on screen ([`crate::render::Renderer::paint_damage`]).
+    /// Clear the active tab's grid damage flags after a damage repaint has
+    /// put the dirty rows on screen ([`crate::render::Renderer::paint_damage`]).
     ///
     /// Background tabs keep their damage set: switching tabs forces a full
     /// repaint, so their pending rows are never lost.
     pub fn clear_grid_damage(&mut self) {
         if let Some(tab) = self.active_tab_mut() {
-            tab.pane_mut().grid_mut().clear_dirty_rows();
+            tab.for_each_pane(|pane, _| pane.grid_mut().clear_dirty_rows());
         }
     }
 
     /// Ask every shell to exit (window close, tab close — TTY-024).
     pub fn close_all_shells(&mut self) {
         for tab in &mut self.tabs {
-            tab.pane_mut().close_shell();
+            tab.for_each_pane(|pane, _| pane.close_shell());
         }
     }
 
-    /// Copy each pane's OSC title onto its tab (tab-bar titles, spec §11).
+    /// Copy the focused pane's OSC title onto its tab (tab-bar titles,
+    /// spec §11, SPLIT-011/012: the tab shows what its focused pane runs).
     pub fn sync_tab_titles(&mut self) {
         for tab in &mut self.tabs {
-            if let Some(title) = tab.pane().title() {
-                let title = title.to_string();
+            let title = tab.pane().title().map(str::to_string);
+            if let Some(title) = title {
                 tab.set_title(title);
             }
         }
@@ -202,6 +360,7 @@ mod tests {
         let app = App::new();
         assert_eq!(app.tab_count(), 1);
         assert_eq!(app.active_index(), 0);
+        assert_eq!(app.pane_count(), 1);
     }
 
     #[test]
@@ -211,6 +370,16 @@ mod tests {
         assert_eq!(idx, 1);
         assert_eq!(app.active_index(), 1);
         assert_eq!(app.tab_count(), 2);
+    }
+
+    #[test]
+    fn add_tab_matches_the_active_tab_size() {
+        let mut app = App::with_size(120, 30, 1000);
+        app.add_tab();
+        assert_eq!(
+            app.active_tab().map(|t| (t.cols(), t.rows())),
+            Some((120, 30))
+        );
     }
 
     #[test]
@@ -245,16 +414,21 @@ mod tests {
     }
 
     #[test]
-    fn resize_reaches_active_grid() {
-        let mut app = App::new();
-        // No shell attached yet: the grid resizes and the ConPTY leg
+    fn resize_reaches_every_pane_grid() {
+        let mut app = App::with_size(80, 24, 1000);
+        app.split_active(Dir::Vertical);
+        // No shell attached yet: the grids resize and the ConPTY leg
         // reports NotRunning (spec §17 chain, never a panic).
         assert!(matches!(
             app.resize_active(120, 30),
             Err(ShellError::NotRunning)
         ));
-        let grid = app.active_tab().map(|t| t.pane().grid());
-        assert_eq!(grid.map(|g| (g.cols, g.rows)), Some((120, 30)));
+        let sizes = app.active_tab().map(|tab| {
+            let mut out = Vec::new();
+            tab.for_each_pane_ref(|pane, _| out.push((pane.grid().cols, pane.grid().rows)));
+            out
+        });
+        assert_eq!(sizes, Some(vec![(60, 30), (60, 30)]));
     }
 
     #[test]
@@ -262,10 +436,61 @@ mod tests {
         let mut app = App::new();
         app.feed_active(b"ls\x1b]0; ~/src\x07");
         assert_eq!(app.active_tab().map(|t| t.title()), Some(" ~/src"));
-        assert_eq!(
-            app.active_tab().map(|t| t.pane().grid().line_text(0)),
-            Some(Some("ls".to_string()))
+        let line = app
+            .active_tab()
+            .map(|t| t.pane().grid().line_text(0).unwrap_or_default());
+        assert_eq!(line.as_deref(), Some("ls"));
+    }
+
+    #[test]
+    fn split_then_feed_targets_the_new_pane() {
+        let mut app = App::with_size(80, 24, 1000);
+        assert_eq!(app.split_active(Dir::Vertical), Some(1));
+        app.feed_active(b"right");
+        let left = app
+            .active_tab()
+            .and_then(|t| t.pane_at(0))
+            .map(|p| p.grid().line_text(0).unwrap_or_default());
+        assert_eq!(left.as_deref(), Some(""));
+        let right = app.active_tab().map(|t| t.pane().grid().line_text(0));
+        assert_eq!(right.flatten().as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn close_active_pane_reports_last_pane() {
+        let mut app = App::with_size(80, 24, 1000);
+        app.split_active(Dir::Vertical);
+        assert_eq!(app.pane_count(), 2);
+        assert!(
+            !app.close_active_pane(),
+            "the sibling stays, so the tab stays open"
         );
+        assert_eq!(app.pane_count(), 1);
+        assert!(app.close_active_pane(), "last pane: caller closes the tab");
+        assert_eq!(app.pane_count(), 1);
+    }
+
+    #[test]
+    fn pane_focus_and_ratio_keys_walk_the_active_tab() {
+        let mut app = App::with_size(80, 24, 1000);
+        app.split_active(Dir::Vertical);
+        assert!(app.focus_neighbor(Side::Left));
+        let idx = app.active_tab().and_then(Tab::focused_index);
+        assert_eq!(idx, Some(0));
+        assert!(app.adjust_ratio(Dir::Vertical, Tab::ratio_step()));
+        assert_eq!(app.active_rect().map(|r| r.cols), Some(44));
+        assert!(!app.focus_neighbor(Side::Up));
+    }
+
+    #[test]
+    fn tab_title_follows_the_focused_pane() {
+        let mut app = App::with_size(80, 24, 1000);
+        app.split_active(Dir::Vertical);
+        app.feed_active(b"\x1b]0;right shell\x07");
+        assert_eq!(app.active_tab().map(|t| t.title()), Some("right shell"));
+        app.focus_pane(0);
+        app.feed_active(b"\x1b]0;left shell\x07");
+        assert_eq!(app.active_tab().map(|t| t.title()), Some("left shell"));
     }
 
     #[test]
@@ -275,5 +500,16 @@ mod tests {
         app.drain_shells();
         app.close_all_shells();
         assert_eq!(app.tab_count(), 2);
+    }
+
+    #[test]
+    fn dirty_flags_cover_every_pane() {
+        let mut app = App::with_size(80, 24, 1000);
+        app.split_active(Dir::Vertical);
+        let _ = app.take_dirty();
+        assert!(!app.take_dirty(), "a fresh split frame is drained once");
+        app.focus_pane(0);
+        app.feed_active(b"x");
+        assert!(app.take_dirty(), "an unfocused pane's output repaints");
     }
 }

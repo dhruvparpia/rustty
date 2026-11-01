@@ -17,17 +17,15 @@ fn fresh_app_has_one_tab_and_a_live_grid() {
     // Drive the grid through the pane parser, the way shell output will.
     app.feed_active(b"smoke");
 
-    let grid = app.active_tab().map(|t| t.pane().grid());
+    let size = app.active_tab().map(|t| {
+        let pane = t.pane();
+        let g = pane.grid();
+        (g.cols, g.rows)
+    });
+    let first_line = app.active_tab().and_then(|t| t.pane().grid().line_text(0));
     let shell = app.active_tab().map(|t| t.pane().shell().state());
-    assert_eq!(
-        grid.map(|g| (g.cols, g.rows)),
-        Some((80, 24)),
-        "new grid is 80x24"
-    );
-    assert_eq!(
-        grid.map(|g| g.line_text(0).unwrap()),
-        Some("smoke".to_string())
-    );
+    assert_eq!(size, Some((80, 24)), "new grid is 80x24");
+    assert_eq!(first_line, Some("smoke".to_string()));
     assert_eq!(
         shell,
         Some(ShellState::Inactive),

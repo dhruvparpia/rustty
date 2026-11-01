@@ -24,6 +24,10 @@ pub struct Theme {
     pub tab_bar: Color,
     /// Active tab background.
     pub tab_active: Color,
+    /// Pane border between split panes (SPLIT-014).
+    pub split_border: Color,
+    /// Border of the focused split pane (SPLIT-015).
+    pub split_focus: Color,
     /// ANSI-16 palette (indices 0..=15).
     pub palette: [Color; 16],
 }
@@ -49,6 +53,8 @@ impl Theme {
             selection: Color::from_hex(0x4C465C),
             tab_bar: Color::from_hex(0x1A1822),
             tab_active: Color::from_hex(0x3A3646),
+            split_border: Color::from_hex(0x4C465C),
+            split_focus: Color::from_hex(0x61C0FF),
             palette: ansi_palette(),
         }
     }
@@ -64,6 +70,8 @@ impl Theme {
             selection: Color::from_hex(0x313244),
             tab_bar: Color::from_hex(0x181825),
             tab_active: Color::from_hex(0x313244),
+            split_border: Color::from_hex(0x45475A),
+            split_focus: Color::from_hex(0xF5E0DC),
             palette: [
                 Color::from_hex(0x45475A),
                 Color::from_hex(0xF38BA8),
@@ -96,6 +104,8 @@ impl Theme {
             selection: Color::from_hex(0x504945),
             tab_bar: Color::from_hex(0x1D2021),
             tab_active: Color::from_hex(0x3C3836),
+            split_border: Color::from_hex(0x504945),
+            split_focus: Color::from_hex(0xEBDBB2),
             palette: [
                 Color::from_hex(0x282828),
                 Color::from_hex(0xCC241D),
@@ -128,6 +138,8 @@ impl Theme {
             selection: Color::from_hex(0x3E4451),
             tab_bar: Color::from_hex(0x21252B),
             tab_active: Color::from_hex(0x3E4451),
+            split_border: Color::from_hex(0x3E4451),
+            split_focus: Color::from_hex(0x528BFF),
             palette: [
                 Color::from_hex(0x282C34),
                 Color::from_hex(0xE06C75),
@@ -160,6 +172,8 @@ impl Theme {
             selection: Color::from_hex(0x073642),
             tab_bar: Color::from_hex(0x00212B),
             tab_active: Color::from_hex(0x073642),
+            split_border: Color::from_hex(0x073642),
+            split_focus: Color::from_hex(0x93A1A1),
             palette: [
                 Color::from_hex(0x002B36),
                 Color::from_hex(0xDC322F),

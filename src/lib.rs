@@ -50,6 +50,8 @@ mod perf_bench;
 pub mod portable;
 pub mod selection;
 pub mod shell;
+/// Pane tree for splits (SPEC SPLIT-001..015): pure Rust tree math.
+pub mod split;
 // Direct2D/DirectWrite renderer FFI boundary (spec WIN-002, WIN-003).
 #[cfg(windows)]
 #[allow(
