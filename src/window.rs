@@ -771,9 +771,17 @@ fn drain_and_cleanup(hwnd: HWND) {
     let tab_closed = {
         let Some(s) = state_mut(hwnd) else { return };
         s.app.drain_shells();
-        // Repaint only when a grid actually changed (NFR-113: no idle repaints).
+        // Repaint only when a grid actually changed (NFR-113: no idle
+        // repaints), and only the rows the grid wrote: paint the damage
+        // directly instead of invalidating the client area, so a burst of
+        // shell output costs one partial frame per tick (NFR-113/114).
         if s.app.take_dirty() {
-            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            if let Some(r) = &mut s.renderer {
+                r.paint_damage(&s.app, &s.theme);
+                s.app.clear_grid_damage();
+            } else {
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            }
         }
         let dead: Vec<usize> = s
             .app

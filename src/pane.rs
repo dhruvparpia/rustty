@@ -216,8 +216,13 @@ impl Pane {
     /// Resize the pane's grid, the saved main grid, the parser's bounds and
     /// the pseudo-console, in that order (spec §17: UI -> grid -> ConPTY ->
     /// shell). A ConPTY resize failure is reported, never a panic.
+    ///
+    /// The mouse selection is dropped: it is stored in absolute grid rows,
+    /// and reflow moves those rows, so keeping it would highlight the wrong
+    /// text (the resize repaint clears the highlight).
     pub fn resize(&mut self, cols: usize, rows: usize) -> Result<(), ShellError> {
         self.dirty = true;
+        self.selection = None;
         self.grid.resize(cols, rows);
         if let Some(main) = &mut self.main_grid {
             main.resize(cols, rows);
@@ -244,6 +249,7 @@ impl Default for Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selection::Pos;
 
     #[test]
     fn new_pane_is_inactive() {
@@ -282,5 +288,21 @@ mod tests {
         let mut pane = Pane::new();
         assert!(matches!(pane.resize(100, 30), Err(ShellError::NotRunning)));
         assert_eq!((pane.grid().cols, pane.grid().rows), (100, 30));
+    }
+
+    #[test]
+    fn resize_clears_the_selection() {
+        let mut pane = Pane::new();
+        pane.feed(b"line one\r\nline two\r\n");
+        pane.set_selection(Some(Selection::between(
+            Pos { row: 0, col: 0 },
+            Pos { row: 1, col: 4 },
+        )));
+        assert!(pane.selection().is_some(), "selection set before resize");
+        let _ = pane.resize(40, 12);
+        assert!(
+            pane.selection().is_none(),
+            "reflow invalidates the selection's line ids"
+        );
     }
 }

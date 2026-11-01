@@ -1,0 +1,385 @@
+//! Render hot-path benchmark (NFR-113/NFR-114, ROADMAP perf P0s): paints a
+//! 10k-line burst through a real Direct2D target and measures the
+//! damage-only path, what one frame costs, and what it allocates.
+//!
+//! Every test here is `#[ignore]`d: Direct2D needs a desktop session, so
+//! plain `cargo test` stays headless-safe. Run the numbers with
+//! `cargo test --release -- --ignored --nocapture`.
+//!
+//! The counting allocator below records every Rust-side allocation, so the
+//! "no allocations in the render hot path" rule shows up as a number in the
+//! report instead of as a code-reading exercise. Direct2D's own heap is not
+//! Rust's allocator, so what is measured here is this crate's hot path.
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, Once};
+use std::time::{Duration, Instant};
+
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Gdi::HBRUSH;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, HICON, RegisterClassW,
+    WINDOW_EX_STYLE, WNDCLASSW, WS_CLIPCHILDREN, WS_POPUP, WS_VISIBLE,
+};
+use windows::core::PCWSTR;
+
+use crate::app::App;
+use crate::config::FontConfig;
+use crate::render::Renderer;
+use crate::tabbar::TAB_BAR_HEIGHT;
+use crate::theme::Theme;
+
+/// Rust-side allocation counter (see the module docs).
+static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+
+/// Pass-through allocator that counts `alloc`/`realloc` calls.
+struct Counting;
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        unsafe { System.alloc_zeroed(layout) }
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+/// The benchmarks share a window and a GPU/software device: serializing them
+/// keeps the timings and the allocation counts honest.
+static BENCH: Mutex<()> = Mutex::new(());
+
+/// Take the bench lock, surviving a poisoned mutex (a failed bench must not
+/// cascade into the other bench tests).
+fn bench_lock() -> MutexGuard<'static, ()> {
+    match BENCH.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+const CLASS_NAME: &str = "rusttyterm-perf-bench";
+
+/// Number of shell lines painted per frame in the burst benchmark. A real
+/// ConPTY burst delivers far more than this per poll tick, so this is the
+/// pessimistic shape: 100 frames to move 10k lines.
+const LINES_PER_FRAME: usize = 100;
+
+/// Total lines in the burst benchmark (ROADMAP: 10k-line burst under 1 s).
+const BURST_LINES: usize = 10_000;
+
+fn wstr(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+unsafe extern "system" fn bench_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// A visible window off the edge of every monitor, plus the renderer for it.
+///
+/// The window must be visible: `CheckWindowState` reports OCCLUDED for
+/// invisible windows and `Renderer` skips those frames, which would time an
+/// empty paint instead of a real one.
+fn bench_target(cols: usize, rows: usize) -> (HWND, Renderer) {
+    static REGISTER: Once = Once::new();
+    let hinstance = unsafe { GetModuleHandleW(None) }.expect("bench: module handle");
+    let class_name = wstr(CLASS_NAME);
+    REGISTER.call_once(|| {
+        let class = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(bench_wnd_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinstance.into(),
+            hIcon: HICON::default(),
+            hCursor: Default::default(),
+            hbrBackground: HBRUSH::default(),
+            lpszMenuName: PCWSTR::null(),
+            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+        };
+        assert_ne!(
+            unsafe { RegisterClassW(&class) },
+            0,
+            "bench: window class registration failed"
+        );
+    });
+    let title = wstr("rusttyterm perf bench");
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
+            -32_000,
+            -32_000,
+            1_600,
+            1_200,
+            None,
+            None,
+            Some(hinstance.into()),
+            None,
+        )
+    }
+    .expect("bench: window creation failed");
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let renderer = Renderer::new(
+        hwnd,
+        dpi,
+        &FontConfig::default(),
+        cols,
+        rows,
+        TAB_BAR_HEIGHT,
+    )
+    .expect("bench: renderer creation failed");
+    (hwnd, renderer)
+}
+
+/// Shell output for `count` lines: plain text plus the CRLF ConPTY sends.
+fn lines(from: usize, count: usize) -> String {
+    let mut out = String::with_capacity(count * 32);
+    for i in from..from + count {
+        out.push_str("rusttyterm perf line ");
+        out.push_str(&i.to_string());
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// Cost of a frame that paints nothing: `ID2D1HwndRenderTarget::Present`
+/// blocks until the display's next refresh, so every frame pays the display's
+/// refresh interval before any of our own work counts. Measured here so the
+/// burst budget can be charged for the paint, not for the monitor.
+fn present_floor(app: &mut App, renderer: &mut Renderer, theme: &Theme) -> Duration {
+    app.clear_grid_damage();
+    // Prime: the first frame of a fresh renderer is a full repaint.
+    renderer.paint_damage(app, theme);
+    app.clear_grid_damage();
+    let mut sum = Duration::ZERO;
+    for _ in 0..20 {
+        let start = Instant::now();
+        renderer.paint_damage(app, theme);
+        sum += start.elapsed();
+    }
+    let floor = sum / 20;
+    eprintln!(
+        "rusttyterm bench present floor: {:.2} ms/frame (display refresh, not paint work)",
+        floor.as_secs_f64() * 1_000.0,
+    );
+    floor
+}
+
+/// Paint `frames` damage frames over `lines` worth of fresh output and
+/// report the wall time, the paint time (wall minus the `Present` floor),
+/// and the allocations the paint calls make (NFR-113/NFR-114).
+fn paint_burst(
+    app: &mut App,
+    renderer: &mut Renderer,
+    theme: &Theme,
+    frames: usize,
+    floor: Duration,
+) -> BenchReport {
+    // Warm the reused buffers first (mask, tab-bar titles, UTF-16 scratch,
+    // brushes): their first frame may grow a Vec, the steady state may not.
+    app.feed_active(b"warm-up\r\n");
+    let _ = app.take_dirty();
+    for _ in 0..3 {
+        renderer.paint_damage(app, theme);
+        app.clear_grid_damage();
+    }
+
+    let mut wall = Duration::ZERO;
+    let mut paint = Duration::ZERO;
+    let mut worst = Duration::ZERO;
+    let mut allocations = 0usize;
+    let mut fed = 0usize;
+    for _ in 0..frames {
+        let chunk = lines(fed, LINES_PER_FRAME);
+        fed += LINES_PER_FRAME;
+        app.feed_active(chunk.as_bytes());
+        let _ = app.take_dirty();
+        // Count only the paint: feeding is the parser's cost, not the
+        // renderer's.
+        ALLOCS.store(0, Ordering::Relaxed);
+        let start = Instant::now();
+        renderer.paint_damage(app, theme);
+        let elapsed = start.elapsed();
+        allocations += ALLOCS.swap(0, Ordering::Relaxed);
+        app.clear_grid_damage();
+        wall += elapsed;
+        let frame_paint = elapsed.saturating_sub(floor);
+        paint += frame_paint;
+        worst = worst.max(frame_paint);
+    }
+    BenchReport {
+        frames,
+        fed,
+        wall,
+        paint,
+        worst,
+        allocations,
+    }
+}
+
+struct BenchReport {
+    frames: usize,
+    fed: usize,
+    wall: Duration,
+    paint: Duration,
+    worst: Duration,
+    allocations: usize,
+}
+
+impl BenchReport {
+    fn print(&self, label: &str) {
+        let per_frame = self.paint.as_secs_f64() / self.frames.max(1) as f64;
+        eprintln!(
+            "rusttyterm bench {label}: {} frames, {} lines, {:.1} ms wall, \
+             {:.1} ms paint, {:.2} ms/frame paint, {:.2} ms worst frame paint, \
+             {} allocations",
+            self.frames,
+            self.fed,
+            self.wall.as_secs_f64() * 1_000.0,
+            self.paint.as_secs_f64() * 1_000.0,
+            per_frame * 1_000.0,
+            self.worst.as_secs_f64() * 1_000.0,
+            self.allocations,
+        );
+    }
+}
+
+/// ROADMAP perf P0: a 10k-line burst paints inside one second.
+///
+/// The bound is charged to the paint work, not to the display: `Present` on
+/// an `ID2D1HwndRenderTarget` blocks for the monitor's refresh, so 100
+/// frames can never take less than 100 refreshes of wall time. The floor is
+/// measured on the same device and subtracted per frame.
+///
+/// The bound is strict in release (the shipped shape) and loose in debug,
+/// where every Direct2D marshalling call is interpreted.
+#[test]
+#[ignore = "needs a desktop session: cargo test --release -- --ignored"]
+fn burst_of_10000_lines_paints_inside_the_budget() {
+    let _guard = bench_lock();
+    let (hwnd, mut renderer) = bench_target(80, 24);
+    let (cols, rows) = renderer.grid_size();
+    let mut app = App::with_size(cols, rows, 1_000);
+    let theme = Theme::predawn();
+    let floor = present_floor(&mut app, &mut renderer, &theme);
+    let report = paint_burst(
+        &mut app,
+        &mut renderer,
+        &theme,
+        BURST_LINES / LINES_PER_FRAME,
+        floor,
+    );
+    report.print("10k-line burst");
+
+    let budget = if cfg!(debug_assertions) {
+        // Debug Direct2D marshalling is several times slower than shipped
+        // code: this catches a regression, not the shipped number.
+        Duration::from_secs(4)
+    } else {
+        Duration::from_secs(1)
+    };
+    assert!(
+        report.paint < budget,
+        "bench: {} frames over {} lines painted in {:?}, budget {budget:?}",
+        report.frames,
+        report.fed,
+        report.paint,
+    );
+    // 60 fps budget for one frame (NFR-113).
+    let frame_budget = if cfg!(debug_assertions) {
+        Duration::from_millis(50)
+    } else {
+        Duration::from_millis(17)
+    };
+    assert!(
+        report.worst < frame_budget,
+        "bench: worst frame painted in {:?}, over the {frame_budget:?} budget",
+        report.worst,
+    );
+    let _ = unsafe { DestroyWindow(hwnd) };
+}
+
+/// NFR-113 hot-path rule: a steady-state damage frame allocates nothing.
+#[test]
+#[ignore = "needs a desktop session: cargo test --release -- --ignored"]
+fn damage_frames_allocate_nothing() {
+    let _guard = bench_lock();
+    let (hwnd, mut renderer) = bench_target(80, 24);
+    let (cols, rows) = renderer.grid_size();
+    let mut app = App::with_size(cols, rows, 1_000);
+    let theme = Theme::predawn();
+    let floor = present_floor(&mut app, &mut renderer, &theme);
+    let report = paint_burst(&mut app, &mut renderer, &theme, 20, floor);
+    report.print("damage allocations");
+
+    assert_eq!(
+        report.allocations, 0,
+        "bench: the render hot path allocated {} times in {} frames (NFR-113)",
+        report.allocations, report.frames,
+    );
+    let _ = unsafe { DestroyWindow(hwnd) };
+}
+
+/// NFR-113 damage-only redraw: after the screen is painted once, one line of
+/// output repaints a couple of rows, not the whole grid.
+#[test]
+#[ignore = "needs a desktop session: cargo test --release -- --ignored"]
+fn damage_frames_cover_only_the_dirty_rows() {
+    let _guard = bench_lock();
+    let (hwnd, mut renderer) = bench_target(80, 24);
+    let (cols, rows) = renderer.grid_size();
+    let mut app = App::with_size(cols, rows, 1_000);
+    let theme = Theme::predawn();
+
+    // First frame is a full repaint: every row is in the mask.
+    app.feed_active(lines(0, rows).as_bytes());
+    let _ = app.take_dirty();
+    renderer.paint_damage(&app, &theme);
+    assert_eq!(
+        renderer.last_mask_rows(),
+        rows,
+        "bench: the first frame must cover every row"
+    );
+    app.clear_grid_damage();
+
+    // Home the cursor, write one line, repaint: only that row and the row the
+    // cursor block moved between may be repainted.
+    app.feed_active("\x1b[1;1Hone line\r\n".as_bytes());
+    let _ = app.take_dirty();
+    renderer.paint_damage(&app, &theme);
+    let damaged = renderer.last_mask_rows();
+    app.clear_grid_damage();
+    eprintln!("rusttyterm bench damage rows: {damaged} of {rows}");
+
+    assert!(
+        damaged < rows / 2,
+        "bench: a one-line change repainted {damaged} of {rows} rows",
+    );
+    let _ = unsafe { DestroyWindow(hwnd) };
+}

@@ -158,6 +158,17 @@ impl App {
         dirty
     }
 
+    /// Clear the active grid's damage flags after a damage repaint has put
+    /// the dirty rows on screen ([`crate::render::Renderer::paint_damage`]).
+    ///
+    /// Background tabs keep their damage set: switching tabs forces a full
+    /// repaint, so their pending rows are never lost.
+    pub fn clear_grid_damage(&mut self) {
+        if let Some(tab) = self.active_tab_mut() {
+            tab.pane_mut().grid_mut().clear_dirty_rows();
+        }
+    }
+
     /// Ask every shell to exit (window close, tab close — TTY-024).
     pub fn close_all_shells(&mut self) {
         for tab in &mut self.tabs {

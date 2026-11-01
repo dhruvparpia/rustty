@@ -31,6 +31,14 @@ pub mod clipboard;
 pub mod keyboard;
 pub mod pane;
 pub mod parser;
+// Render hot-path benchmark (NFR-113/NFR-114): tests only, ignored by
+// default because Direct2D needs a desktop session.
+#[cfg(all(test, windows))]
+#[allow(
+    unsafe_code,
+    reason = "NFR-113: the bench drives the Direct2D/Win32 render hot path"
+)]
+mod perf_bench;
 pub mod selection;
 pub mod shell;
 // Direct2D/DirectWrite renderer FFI boundary (spec WIN-002, WIN-003).

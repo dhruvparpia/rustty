@@ -599,6 +599,52 @@ impl Grid {
             .collect()
     }
 
+    /// `true` when a full-redraw event (resize, scroll, erase) is pending,
+    /// i.e. every viewport row needs repainting.
+    #[must_use]
+    pub fn all_dirty(&self) -> bool {
+        self.full_dirty
+    }
+
+    /// Report every viewport row needing repaint, in ascending order,
+    /// without allocating (NFR-113 hot path: the renderer keeps its own
+    /// row mask and calls this once per frame).
+    pub fn for_each_dirty_row(&self, mut f: impl FnMut(usize)) {
+        if self.full_dirty {
+            for row in 0..self.rows {
+                f(row);
+            }
+            return;
+        }
+        let top = self.top();
+        for row in 0..self.rows {
+            let virtual_index = top + row;
+            if virtual_index < self.total && self.lines[self.slot(virtual_index)].is_dirty {
+                f(row);
+            }
+        }
+    }
+
+    /// Clear every damage flag. Call after the dirty rows have been painted;
+    /// rows that were not painted must be marked dirty again by the caller.
+    pub fn clear_dirty_rows(&mut self) {
+        if self.full_dirty {
+            for line in &mut self.lines {
+                line.is_dirty = false;
+            }
+            self.full_dirty = false;
+            return;
+        }
+        let top = self.top();
+        for row in 0..self.rows {
+            let virtual_index = top + row;
+            if virtual_index < self.total {
+                let slot = self.slot(virtual_index);
+                self.lines[slot].is_dirty = false;
+            }
+        }
+    }
+
     /// Collect the dirty rows and clear their damage flags
     pub fn take_dirty_rows(&mut self) -> Vec<usize> {
         let rows = self.dirty_rows();
@@ -874,6 +920,34 @@ mod tests {
         assert_eq!(grid.dirty_rows(), (0..24).collect::<Vec<_>>());
         grid.take_dirty_rows();
         assert!(grid.dirty_rows().is_empty());
+    }
+
+    #[test]
+    fn test_for_each_dirty_row_matches_dirty_rows() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        grid.clear_dirty_rows();
+        grid.write_line(3, make_line("a", grid.cols));
+        grid.mark_dirty(7);
+        let mut rows = Vec::new();
+        grid.for_each_dirty_row(|row| rows.push(row));
+        assert_eq!(rows, grid.dirty_rows());
+        grid.clear_dirty_rows();
+        assert!(grid.dirty_rows().is_empty());
+    }
+
+    #[test]
+    fn test_full_dirty_reports_every_row() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        grid.clear_dirty_rows();
+        grid.scroll_up(1);
+        assert!(grid.all_dirty());
+        let mut count = 0;
+        grid.for_each_dirty_row(|_| count += 1);
+        assert_eq!(count, 24);
+        grid.clear_dirty_rows();
+        assert!(!grid.all_dirty());
+        grid.for_each_dirty_row(|_| count += 1);
+        assert_eq!(count, 24);
     }
 
     #[test]

@@ -52,21 +52,26 @@ pub fn tab_width(title: &str, cell_width: f32) -> f32 {
 /// the hit test simply never reports a click outside the bar width.
 #[must_use]
 pub fn layout(titles: &[String], width: f32, cell_width: f32) -> Layout {
-    let mut tabs = Vec::with_capacity(titles.len());
+    let mut out = Layout::default();
+    layout_into(titles, width, cell_width, &mut out);
+    out
+}
+
+/// [`layout`] writing into a reused [`Layout`]: the tab-bar paint path calls
+/// it every frame and must not allocate (NFR-113).
+pub fn layout_into(titles: &[String], width: f32, cell_width: f32, out: &mut Layout) {
+    out.tabs.clear();
     let mut x = 0.0f32;
     for title in titles {
         let w = tab_width(title, cell_width);
-        tabs.push((x, (x + w).min(width.max(x))));
+        out.tabs.push((x, (x + w).min(width.max(x))));
         x += w;
     }
     let plus_start = x.min(width.max(0.0));
-    Layout {
-        tabs,
-        plus: (
-            plus_start,
-            (plus_start + PLUS_WIDTH).min(width.max(plus_start)),
-        ),
-    }
+    out.plus = (
+        plus_start,
+        (plus_start + PLUS_WIDTH).min(width.max(plus_start)),
+    );
 }
 
 /// Hit-test a pointer x (DIPs) against a laid-out bar. The caller has
@@ -87,17 +92,26 @@ pub fn hit_test(layout: &Layout, x: f32) -> Hit {
 /// minus [`TAB_CHROME`].
 #[must_use]
 pub fn fit_title(title: &str, text_width: f32, cell_width: f32) -> String {
-    let chars: Vec<char> = title.chars().filter(|c| !c.is_control()).collect();
+    let mut out = String::new();
+    fit_title_into(title, text_width, cell_width, &mut out);
+    out
+}
+
+/// [`fit_title`] writing into a reused `String` (tab-bar paint path,
+/// NFR-113: no allocation per frame).
+pub fn fit_title_into(title: &str, text_width: f32, cell_width: f32, out: &mut String) {
+    out.clear();
     let room = (text_width / cell_width).floor().max(0.0) as usize;
-    if chars.len() <= room {
-        return chars.into_iter().collect();
+    let visible = title.chars().filter(|c| !c.is_control());
+    if visible.clone().count() <= room {
+        out.extend(visible);
+        return;
     }
     if room == 0 {
-        return String::new();
+        return;
     }
-    let mut out: String = chars[..room - 1].iter().collect();
+    out.extend(visible.take(room - 1));
     out.push('…');
-    out
 }
 
 #[cfg(test)]
@@ -140,5 +154,34 @@ mod tests {
         assert!(fitted.ends_with('…'));
         assert_eq!(fit_title("short", 60.0, 10.0), "short");
         assert_eq!(fit_title("long text here", 0.0, 10.0), "");
+    }
+
+    #[test]
+    fn the_reuse_variants_match_the_allocating_ones() {
+        let titles = vec![
+            "bash".to_string(),
+            "C:\\Users\\dhruv\\OneDrive\\Projects\\winttyghost\\src".to_string(),
+            "".to_string(),
+        ];
+        let want = layout(&titles, 640.0, 10.0);
+        let mut reuse = Layout {
+            tabs: vec![(9.0, 9.0), (9.0, 9.0), (9.0, 9.0), (9.0, 9.0)],
+            plus: (9.0, 9.0),
+        };
+        layout_into(&titles, 640.0, 10.0, &mut reuse);
+        assert_eq!(reuse, want);
+        assert_eq!(reuse.tabs.len(), titles.len());
+
+        for width in [0.0, 10.0, 15.0, 16.0, 60.0, 400.0] {
+            for title in [
+                &titles[0].as_str(),
+                &titles[1].as_str(),
+                &titles[2].as_str(),
+            ] {
+                let mut out = String::from("stale buffer");
+                fit_title_into(title, width, 10.0, &mut out);
+                assert_eq!(&out, &fit_title(title, width, 10.0), "width {width}");
+            }
+        }
     }
 }
