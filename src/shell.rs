@@ -87,6 +87,16 @@ impl fmt::Display for ShellError {
 
 impl std::error::Error for ShellError {}
 
+/// Count `CSI 6n` (cursor position query) sequences in an output chunk.
+///
+/// A shell that sends this query blocks until the terminal answers with a
+/// CPR report; the reader thread answers each occurrence (TTY-004 path).
+/// Pure byte-scan, so it is unit-tested on every platform.
+#[must_use]
+pub fn count_cursor_position_queries(chunk: &[u8]) -> usize {
+    chunk.windows(4).filter(|w| *w == b"\x1b[6n").count()
+}
+
 #[cfg(windows)]
 struct Inner {
     conpty: conpty::ConPty,
@@ -172,11 +182,24 @@ impl Shell {
 
         let (tx, rx) = mpsc::channel::<ShellEvent>();
         let pump_tx = tx.clone();
+        // The shell answers terminal queries (CSI 6n) inline: cmd.exe and
+        // bash query the cursor position at startup and block until the
+        // terminal replies with a CPR report.
+        let reply_tx = conpty.input_writer().map_err(|e| ShellError::Spawn {
+            program: opts.program.clone(),
+            source: e,
+        })?;
         let reader = std::thread::spawn(move || {
             // Pump output until EOF/broken pipe; a hard failure is treated
             // like EOF so the pane always converges to Exited (TTY-026:
             // ConPTY failure must not crash the UI).
             let _ = conpty::read_output_loop(&reader_handle, |chunk| {
+                let n = count_cursor_position_queries(chunk);
+                for _ in 0..n {
+                    // Answer "you are at row 1, col 1"; shells use this
+                    // only as a "is a terminal there" probe.
+                    let _ = reply_tx.write(b"\x1b[1;1R");
+                }
                 let _ = pump_tx.send(ShellEvent::Chunks(chunk.to_vec()));
             });
             let code = conpty::wait_exit_code(&process);
@@ -298,6 +321,19 @@ mod tests {
         let shell = Shell::new();
         assert_eq!(shell.state(), ShellState::Inactive);
         assert!(!shell.is_running());
+    }
+
+    #[test]
+    fn cursor_position_queries_are_counted() {
+        assert_eq!(count_cursor_position_queries(b""), 0);
+        assert_eq!(count_cursor_position_queries(b"plain text"), 0);
+        assert_eq!(count_cursor_position_queries(b"\x1b[6n"), 1);
+        assert_eq!(
+            count_cursor_position_queries(b"\x1b[?1h\x1b[6ntext\x1b[6n"),
+            2
+        );
+        // Similar-looking sequences must not count.
+        assert_eq!(count_cursor_position_queries(b"\x1b[6;1R\x1b[5n"), 0);
     }
 
     #[test]

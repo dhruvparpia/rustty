@@ -137,6 +137,17 @@ impl App {
         self.sync_tab_titles();
     }
 
+    /// Take the repaint hint across every tab: `true` when any grid changed
+    /// since the last call, so the window layer repaints only on change.
+    #[must_use]
+    pub fn take_dirty(&mut self) -> bool {
+        let mut dirty = false;
+        for tab in &mut self.tabs {
+            dirty |= tab.pane_mut().take_dirty();
+        }
+        dirty
+    }
+
     /// Ask every shell to exit (window close, tab close — TTY-024).
     pub fn close_all_shells(&mut self) {
         for tab in &mut self.tabs {

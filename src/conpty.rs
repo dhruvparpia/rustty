@@ -22,7 +22,8 @@ use std::mem::size_of;
 use std::ptr::null_mut;
 
 use windows::Win32::Foundation::{
-    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, SetLastError, WIN32_ERROR,
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE,
+    INVALID_HANDLE_VALUE, SetLastError, WIN32_ERROR,
 };
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::Console::{
@@ -31,10 +32,10 @@ use windows::Win32::System::Console::{
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, INFINITE,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOEXW,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
 use windows::core::{HRESULT, Owned, PWSTR};
@@ -48,6 +49,20 @@ pub struct SendHandle(Owned<HANDLE>);
 // process thread, and this type is the sole owner, so moving it between threads is
 // sound (the reader thread and the UI thread never share the same handle object).
 unsafe impl Send for SendHandle {}
+
+/// The ConPTY input side, owned by one worker thread.
+///
+/// Created by [`ConPty::input_writer`]; writes keyboard/query-reply bytes
+/// into the shell's input (same path as [`ConPty::write_input`]).
+pub struct ConPtyWriter(SendHandle);
+
+impl ConPtyWriter {
+    /// Write bytes into the shell's input.
+    pub fn write(&self, bytes: &[u8]) -> Result<(), io::Error> {
+        // Safety: WriteFile against our own duplicated pipe handle.
+        unsafe { WriteFile(*self.0.0, Some(bytes), None, None).map_err(|e| io_error(&e)) }
+    }
+}
 
 /// A live ConPTY session holding the two parent-side pipe handles.
 pub struct ConPty {
@@ -114,7 +129,10 @@ impl ConPty {
             };
 
             // Extended startup info carrying the pseudo-console handle.
-            // MSDN: first call with a null list to learn the buffer size.
+            // MSDN: the probe call with a null list fails with
+            // ERROR_INSUFFICIENT_BUFFER and reports the buffer size in
+            // `attr_size`. That failure is the documented sizing step, not
+            // an error (ConPTY sample checks for exactly this code).
             let mut attr_size = 0usize;
             if let Err(e) = InitializeProcThreadAttributeList(
                 Some(LPPROC_THREAD_ATTRIBUTE_LIST(null_mut())),
@@ -122,10 +140,13 @@ impl ConPty {
                 None,
                 &mut attr_size,
             ) {
-                ClosePseudoConsole(pcon);
-                CloseHandle(parent_input_write).ok();
-                CloseHandle(parent_output_read).ok();
-                return Err(io_error(&e));
+                let is_size_probe = (e.code().0 & 0xFFFF) == ERROR_INSUFFICIENT_BUFFER.0 as i32;
+                if !is_size_probe || attr_size == 0 {
+                    ClosePseudoConsole(pcon);
+                    CloseHandle(parent_input_write).ok();
+                    CloseHandle(parent_output_read).ok();
+                    return Err(io_error(&e));
+                }
             }
             let mut attr_list: Vec<u8> = vec![0; attr_size];
             let attr = LPPROC_THREAD_ATTRIBUTE_LIST(attr_list.as_mut_ptr().cast());
@@ -158,8 +179,14 @@ impl ConPty {
             let mut cmdline = wide_command_line(program, args);
             let mut startup = STARTUPINFOEXW::default();
             startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
-            startup.StartupInfo.dwFlags = STARTF_USESHOWWINDOW;
-            startup.StartupInfo.wShowWindow = 0; // SW_HIDE
+            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            // The std handles are set explicitly (to invalid): the child must
+            // not inherit the parent's own stdio, it talks to the
+            // pseudo-console through the attribute list only.
+            // Same convention as portable-pty/WezTerm.
+            startup.StartupInfo.hStdInput = INVALID_HANDLE_VALUE;
+            startup.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
+            startup.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
             startup.lpAttributeList = attr;
 
             let mut process = PROCESS_INFORMATION::default();
@@ -169,7 +196,7 @@ impl ConPty {
                 None,
                 None,
                 false,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
                 None,
                 PWSTR::null(),
                 core::ptr::from_ref(&startup.StartupInfo),
@@ -223,6 +250,30 @@ impl ConPty {
         if pcon.0 != 0 {
             // Safety: ClosePseudoConsole on a handle we own.
             unsafe { ClosePseudoConsole(pcon) }
+        }
+    }
+
+    /// The input side, for a worker thread that must write query replies.
+    ///
+    /// The reader answers terminal queries (CSI 6n) that arrive on the
+    /// output stream; those answers are written back into the shell's
+    /// input, exactly like keyboard bytes.
+    pub fn input_writer(&self) -> Result<ConPtyWriter, io::Error> {
+        // Safety: plain DuplicateHandle of our own pipe write end.
+        unsafe {
+            let me = GetCurrentProcess();
+            let mut dup = HANDLE::default();
+            DuplicateHandle(
+                me,
+                *self.input_write,
+                me,
+                core::ptr::from_mut(&mut dup),
+                0,
+                false,
+                DUPLICATE_SAME_ACCESS,
+            )
+            .map(|()| ConPtyWriter(SendHandle(own(dup))))
+            .map_err(|e| io_error(&e))
         }
     }
 

@@ -24,6 +24,8 @@ pub struct Pane {
     /// Main screen kept while the alternate screen is active (TTY-018).
     main_grid: Option<Grid>,
     in_alt: bool,
+    /// Grid changed since the renderer last asked (repaint hint).
+    dirty: bool,
 }
 
 impl Pane {
@@ -37,6 +39,7 @@ impl Pane {
             title: None,
             main_grid: None,
             in_alt: false,
+            dirty: true,
         }
     }
 
@@ -93,6 +96,7 @@ impl Pane {
     /// DSR/DA replies) and snap the viewport back to the live edge when the
     /// bytes printed (`printed` in [`crate::parser::AdvanceOutcome`]).
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.dirty = true;
         let outcome = self.parser.advance(&mut self.grid, bytes);
         let cols = self.grid.cols;
         let rows = self.grid.rows;
@@ -172,12 +176,21 @@ impl Pane {
     /// the pseudo-console, in that order (spec §17: UI -> grid -> ConPTY ->
     /// shell). A ConPTY resize failure is reported, never a panic.
     pub fn resize(&mut self, cols: usize, rows: usize) -> Result<(), ShellError> {
+        self.dirty = true;
         self.grid.resize(cols, rows);
         if let Some(main) = &mut self.main_grid {
             main.resize(cols, rows);
         }
         self.parser.fit(&self.grid);
         self.shell.resize(cols, rows)
+    }
+
+    /// Take the repaint hint: `true` when the grid changed since the last
+    /// call. The window layer invalidates its client area on `true` only,
+    /// so an idle terminal costs no repaints (NFR-113/114).
+    #[must_use]
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
     }
 }
 

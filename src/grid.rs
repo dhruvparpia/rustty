@@ -198,6 +198,16 @@ impl Grid {
         self.lines.len()
     }
 
+    /// Viewport width in columns
+    pub const fn cols(&self) -> usize {
+        self.cols
+    }
+
+    /// Viewport height in rows
+    pub const fn rows(&self) -> usize {
+        self.rows
+    }
+
     /// Virtual index of the viewport's first line
     fn top(&self) -> usize {
         self.total.saturating_sub(self.rows + self.scroll_offset)
