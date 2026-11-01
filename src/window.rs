@@ -18,8 +18,13 @@
 //! Mouse (WIN-004): click focuses a pane, drag-selects text, double-click
 //! selects a word, middle-click pastes, wheel scrolls the pane under the
 //! cursor, tab-bar clicks switch tabs / press `+`.
+//!
+//! Menus (MENU-001..015): native Win32 File/Edit/View/Window/Help menus
+//! expose tab, pane, split, search, theme, profile, clipboard, window and
+//! help commands with visible shortcuts.
 
 use std::ffi::c_void;
+use std::os::windows::ffi::OsStrExt;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -36,24 +41,28 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_MENU,
     VK_SHIFT,
 };
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRect, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
-    DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
-    GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, HICON, IDC_ARROW,
-    IDC_IBEAM, IDYES, LoadCursorW, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO, MINMAXINFO, MSG,
-    MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOW, SWP_FRAMECHANGED,
-    SWP_NOZORDER, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_COPY, WM_CREATE, WM_DESTROY,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_SETCURSOR, WM_SETFOCUS,
-    WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_VISIBLE,
+    AdjustWindowRect, AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+    CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClientRect,
+    GetCursorPos, GetMenu, GetMessageW, GetSubMenu, GetWindowLongPtrW, GetWindowRect, HICON, HMENU,
+    IDC_ARROW, IDC_IBEAM, IDYES, IsZoomed, LoadCursorW, MB_DEFBUTTON2, MB_ICONWARNING, MB_OK,
+    MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOZORDER, SetCursor,
+    SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    TranslateMessage, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_COPY, WM_CREATE,
+    WM_DESTROY, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, Result};
 
 use crate::app::{App, PaneClose};
 use crate::clipboard;
-use crate::config::{Config, FontConfig, TabBar};
+use crate::config::{self, Config, FontConfig, TabBar};
 use crate::keyboard::{self, Modifiers};
 use crate::pane::Pane;
 use crate::parser::bracketed_paste_bytes;
@@ -63,7 +72,7 @@ use crate::selection::{Pos, Selection};
 use crate::shell::SpawnOptions;
 use crate::split::{Dir, Rect, Side};
 use crate::tabbar::{self, Hit, TAB_BAR_HEIGHT};
-use crate::theme::Theme;
+use crate::theme::{self, Theme};
 
 /// Window class name.
 const CLASS_NAME: &str = "rusttyterm";
@@ -85,6 +94,27 @@ const MIN_COLS: usize = 10;
 /// Smallest cell count the window can be resized to.
 const MIN_ROWS: usize = 4;
 
+/// Native menu command ids (MENU-001..015). They live above the reserved
+/// system command range and below the generated profile/theme bases.
+const MENU_NEW_TAB: usize = 0xE801;
+const MENU_CLOSE_TAB: usize = 0xE802;
+const MENU_SPLIT_RIGHT: usize = 0xE803;
+const MENU_SPLIT_DOWN: usize = 0xE804;
+const MENU_PREFERENCES: usize = 0xE805;
+const MENU_QUIT: usize = 0xE806;
+const MENU_COPY: usize = 0xE811;
+const MENU_PASTE: usize = 0xE812;
+const MENU_SEARCH: usize = 0xE821;
+const MENU_FULLSCREEN: usize = 0xE822;
+const MENU_NEXT_TAB: usize = 0xE831;
+const MENU_PREV_TAB: usize = 0xE832;
+const MENU_MINIMIZE: usize = 0xE833;
+const MENU_MAXIMIZE: usize = 0xE834;
+const MENU_CLOSE_WINDOW: usize = 0xE835;
+const MENU_ABOUT: usize = 0xE841;
+const MENU_THEME_BASE: usize = 0xF000;
+const MENU_PROFILE_BASE: usize = 0xF100;
+
 /// NUL-terminated UTF-16 for `PCWSTR` parameters.
 fn wstr(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -98,6 +128,335 @@ fn read_mods() -> Modifiers {
             alt: GetKeyState(VK_MENU.0 as i32) < 0,
             shift: GetKeyState(VK_SHIFT.0 as i32) < 0,
         }
+    }
+}
+
+/// Built-in shell selector entries shown under File > Profiles.
+///
+/// This is deliberately small for v0.2: profile config (`CONFIG-002`,
+/// `SHELL-012`) needs TOML/profile wiring, while the menu requirement only
+/// needs a native profile selector. Selecting an entry starts a new tab
+/// with that shell; splits inherit the selector's current shell.
+#[derive(Clone, Copy)]
+struct BuiltinProfile {
+    name: &'static str,
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+const PROFILES: [BuiltinProfile; 6] = [
+    BuiltinProfile {
+        name: "PowerShell",
+        program: "powershell.exe",
+        args: &[],
+    },
+    BuiltinProfile {
+        name: "Command Prompt",
+        program: "cmd.exe",
+        args: &[],
+    },
+    BuiltinProfile {
+        name: "Git Bash",
+        program: r"C:\Program Files\Git\bin\bash.exe",
+        args: &["-l"],
+    },
+    BuiltinProfile {
+        name: "WSL",
+        program: "wsl.exe",
+        args: &[],
+    },
+    BuiltinProfile {
+        name: "MSYS2",
+        program: r"C:\msys64\usr\bin\bash.exe",
+        args: &["-l"],
+    },
+    BuiltinProfile {
+        name: "Cygwin",
+        program: r"C:\cygwin64\bin\bash.exe",
+        args: &["-l"],
+    },
+];
+
+fn append_menu_item(parent: HMENU, text: &str, id: usize) -> Result<()> {
+    let wide = wstr(text);
+    unsafe { AppendMenuW(parent, MF_STRING, id, PCWSTR(wide.as_ptr())) }
+}
+
+fn append_menu_separator(parent: HMENU) -> Result<()> {
+    unsafe { AppendMenuW(parent, MF_SEPARATOR, 0, PCWSTR::null()) }
+}
+
+fn append_menu_submenu(parent: HMENU, text: &str, submenu: HMENU) -> Result<()> {
+    let wide = wstr(text);
+    unsafe { AppendMenuW(parent, MF_POPUP, submenu.0 as usize, PCWSTR(wide.as_ptr())) }
+}
+
+/// Build the native menu bar (MENU-001..015). Menu labels carry the visible
+/// keyboard shortcut text; the app's existing keybindings execute them.
+fn build_menu() -> Result<HMENU> {
+    unsafe {
+        let menu = CreateMenu()?;
+
+        let file = CreatePopupMenu()?;
+        append_menu_item(file, "&New Tab\tCtrl+Shift+T", MENU_NEW_TAB)?;
+        append_menu_item(file, "Close Pane/&Tab\tCtrl+Shift+W", MENU_CLOSE_TAB)?;
+        append_menu_separator(file)?;
+        append_menu_item(file, "&Split Right\tCtrl+Shift+Enter", MENU_SPLIT_RIGHT)?;
+        append_menu_item(file, "Split &Below\tCtrl+Shift+-", MENU_SPLIT_DOWN)?;
+        append_menu_separator(file)?;
+        let profiles = CreatePopupMenu()?;
+        for (idx, profile) in PROFILES.iter().enumerate() {
+            append_menu_item(
+                profiles,
+                &format!("&{}", profile.name),
+                MENU_PROFILE_BASE + idx,
+            )?;
+        }
+        append_menu_submenu(file, "&Profiles", profiles)?;
+        append_menu_separator(file)?;
+        append_menu_item(file, "&Preferences", MENU_PREFERENCES)?;
+        append_menu_separator(file)?;
+        append_menu_item(file, "E&xit\tCtrl+Shift+Q", MENU_QUIT)?;
+        append_menu_submenu(menu, "&File", file)?;
+
+        let edit = CreatePopupMenu()?;
+        append_menu_item(edit, "&Copy\tCtrl+Shift+C", MENU_COPY)?;
+        append_menu_item(edit, "&Paste\tCtrl+Shift+V", MENU_PASTE)?;
+        append_menu_submenu(menu, "&Edit", edit)?;
+
+        let view = CreatePopupMenu()?;
+        append_menu_item(view, "&Search\tCtrl+F", MENU_SEARCH)?;
+        append_menu_separator(view)?;
+        append_menu_item(view, "Split &Right\tCtrl+Shift+Enter", MENU_SPLIT_RIGHT)?;
+        append_menu_item(view, "Split Be&low\tCtrl+Shift+-", MENU_SPLIT_DOWN)?;
+        append_menu_separator(view)?;
+        append_menu_item(view, "Full &Screen\tF11", MENU_FULLSCREEN)?;
+        append_menu_separator(view)?;
+        let themes = CreatePopupMenu()?;
+        for (idx, name) in theme::PRESETS.iter().enumerate() {
+            append_menu_item(themes, &format!("&{name}"), MENU_THEME_BASE + idx)?;
+        }
+        append_menu_submenu(view, "&Themes", themes)?;
+        append_menu_submenu(menu, "&View", view)?;
+
+        let window = CreatePopupMenu()?;
+        append_menu_item(window, "&Next Tab\tCtrl+Shift+]", MENU_NEXT_TAB)?;
+        append_menu_item(window, "&Previous Tab\tCtrl+Shift+[", MENU_PREV_TAB)?;
+        append_menu_separator(window)?;
+        append_menu_item(window, "&Minimize", MENU_MINIMIZE)?;
+        append_menu_item(window, "Maxi&mize / Restore", MENU_MAXIMIZE)?;
+        append_menu_separator(window)?;
+        append_menu_item(window, "&Close Window", MENU_CLOSE_WINDOW)?;
+        append_menu_submenu(menu, "&Window", window)?;
+
+        let help = CreatePopupMenu()?;
+        append_menu_item(help, "&About rusttyterm", MENU_ABOUT)?;
+        append_menu_submenu(menu, "&Help", help)?;
+
+        Ok(menu)
+    }
+}
+
+fn check_menu_item(menu: HMENU, id: usize, checked: bool) {
+    let flags = MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED };
+    unsafe {
+        let _ = CheckMenuItem(menu, id as u32, flags.0);
+    }
+}
+
+fn enable_menu_item(menu: HMENU, id: usize, enabled: bool) {
+    let flags = MF_BYCOMMAND | if enabled { MF_ENABLED } else { MF_GRAYED };
+    unsafe {
+        let _ = EnableMenuItem(menu, id as u32, flags);
+    }
+}
+
+fn submenu_of(menu: HMENU, idx: i32) -> Option<HMENU> {
+    let submenu = unsafe { GetSubMenu(menu, idx) };
+    (!submenu.0.is_null()).then_some(submenu)
+}
+
+fn same_menu(a: HMENU, b: HMENU) -> bool {
+    a.0 == b.0
+}
+
+fn active_profile(s: &WindowState) -> &BuiltinProfile {
+    &PROFILES[s.profile.min(PROFILES.len() - 1)]
+}
+
+fn profile_opts(s: &WindowState, cols: usize, rows: usize) -> SpawnOptions {
+    let profile = active_profile(s);
+    SpawnOptions {
+        program: profile.program.to_string(),
+        args: profile.args.iter().map(|arg| (*arg).to_string()).collect(),
+        cols,
+        rows,
+    }
+}
+
+fn active_theme_index(s: &WindowState) -> usize {
+    theme::PRESETS
+        .iter()
+        .position(|name| *name == s.theme.name)
+        .unwrap_or(0)
+}
+
+fn theme_command(id: usize) -> Option<usize> {
+    id.checked_sub(MENU_THEME_BASE)
+        .filter(|idx| *idx < theme::PRESETS.len())
+}
+
+fn profile_command(id: usize) -> Option<usize> {
+    id.checked_sub(MENU_PROFILE_BASE)
+        .filter(|idx| *idx < PROFILES.len())
+}
+
+/// Update check marks and enabled state for the popup about to open.
+fn update_menu_checks(hwnd: HWND, wparam: WPARAM) {
+    let popup = HMENU(wparam.0 as *mut c_void);
+    let menu = unsafe { GetMenu(hwnd) };
+    if menu.0.is_null() {
+        return;
+    }
+    let Some(state) = state_ref(hwnd) else {
+        return;
+    };
+    let tabs = state.app.tab_count();
+
+    if let Some(file) = submenu_of(menu, 0)
+        && same_menu(popup, file)
+    {
+        enable_menu_item(file, MENU_CLOSE_TAB, tabs > 0);
+        if let Some(profiles) = submenu_of(file, 6) {
+            for idx in 0..PROFILES.len() {
+                check_menu_item(profiles, MENU_PROFILE_BASE + idx, state.profile == idx);
+            }
+        }
+    }
+
+    if let Some(view) = submenu_of(menu, 2)
+        && same_menu(popup, view)
+    {
+        if let Some(themes) = submenu_of(view, 7) {
+            let active = active_theme_index(state);
+            for idx in 0..theme::PRESETS.len() {
+                check_menu_item(themes, MENU_THEME_BASE + idx, idx == active);
+            }
+        }
+        enable_menu_item(view, MENU_SEARCH, tabs > 0);
+        check_menu_item(view, MENU_FULLSCREEN, state.fullscreen.is_some());
+    }
+
+    if let Some(window) = submenu_of(menu, 3)
+        && same_menu(popup, window)
+    {
+        enable_menu_item(window, MENU_NEXT_TAB, tabs > 1);
+        enable_menu_item(window, MENU_PREV_TAB, tabs > 1);
+        enable_menu_item(window, MENU_CLOSE_WINDOW, tabs > 0);
+    }
+}
+
+fn handle_command(hwnd: HWND, wparam: WPARAM) {
+    let id = wparam.0 & 0xFFFF;
+    if let Some(idx) = theme_command(id) {
+        set_theme(hwnd, idx);
+        return;
+    }
+    if let Some(idx) = profile_command(id) {
+        open_profile_tab(hwnd, idx);
+        return;
+    }
+    match id {
+        MENU_NEW_TAB => new_tab(hwnd),
+        MENU_CLOSE_TAB => close_pane_or_tab(hwnd),
+        MENU_SPLIT_RIGHT => split_pane(hwnd, Dir::Vertical),
+        MENU_SPLIT_DOWN => split_pane(hwnd, Dir::Horizontal),
+        MENU_SEARCH => toggle_search(hwnd),
+        MENU_FULLSCREEN => toggle_fullscreen(hwnd),
+        MENU_COPY => copy_screen(hwnd),
+        MENU_PASTE => paste_clipboard(hwnd),
+        MENU_NEXT_TAB => switch_tab_rel(hwnd, 1),
+        MENU_PREV_TAB => switch_tab_rel(hwnd, -1),
+        MENU_MINIMIZE => unsafe {
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+        },
+        MENU_MAXIMIZE => unsafe {
+            if IsZoomed(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            } else {
+                let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            }
+        },
+        MENU_CLOSE_WINDOW | MENU_QUIT => unsafe {
+            let _ = DestroyWindow(hwnd);
+        },
+        MENU_PREFERENCES => open_preferences(hwnd),
+        MENU_ABOUT => show_about(hwnd),
+        _ => {}
+    }
+}
+
+fn set_theme(hwnd: HWND, idx: usize) {
+    let Some(name) = theme::PRESETS.get(idx) else {
+        return;
+    };
+    if let Some(s) = state_mut(hwnd) {
+        s.theme = Theme::preset(name).unwrap_or_default();
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+fn open_profile_tab(hwnd: HWND, idx: usize) {
+    let Some(name) = PROFILES.get(idx).map(|p| p.name) else {
+        return;
+    };
+    if let Some(s) = state_mut(hwnd) {
+        s.profile = idx;
+    }
+    new_tab_with_title(hwnd, Some(name));
+}
+
+fn open_preferences(hwnd: HWND) {
+    let Some(path) = config::config_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if !path.exists() {
+        let _ = std::fs::write(&path, b"# rusttyterm config\n");
+    }
+    let op = wstr("open");
+    let file: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let _ = ShellExecuteW(
+            Some(hwnd),
+            PCWSTR(op.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOW,
+        );
+    }
+}
+
+fn show_about(hwnd: HWND) {
+    let text = wstr(&format!(
+        "rusttyterm {}\n\nA native Windows terminal emulator.\nMIT licensed. No telemetry.",
+        env!("CARGO_PKG_VERSION")
+    ));
+    let caption = wstr("About rusttyterm");
+    unsafe {
+        let _ = MessageBoxW(
+            Some(hwnd),
+            PCWSTR(text.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_OK,
+        );
     }
 }
 
@@ -131,6 +490,9 @@ struct WindowState {
     /// is closed. While active, keystrokes edit the query instead of
     /// reaching the shell.
     search: Option<SearchState>,
+    /// Index of the selected built-in profile (MENU-008). New tabs and
+    /// split panes spawn it.
+    profile: usize,
 }
 
 impl WindowState {
@@ -283,6 +645,14 @@ unsafe extern "system" fn wnd_proc(
             drain_and_cleanup(hwnd);
             LRESULT(0)
         }
+        WM_COMMAND => {
+            handle_command(hwnd, wparam);
+            LRESULT(0)
+        }
+        WM_INITMENUPOPUP => {
+            update_menu_checks(hwnd, wparam);
+            LRESULT(0)
+        }
         WM_SETFOCUS => {
             let _ = unsafe { SetFocus(Some(hwnd)) };
             LRESULT(0)
@@ -327,6 +697,13 @@ fn reclaim_state(hwnd: HWND) -> Option<*mut WindowState> {
 /// WM_CREATE follow-up: show the window, build the renderer, size the
 /// grid, spawn the first shell, start the output-poll timer.
 fn init_window(hwnd: HWND) {
+    // Native menu bar (MENU-001..005). A menu failure leaves the terminal
+    // usable, matching the no-fatal-UI-failure rule.
+    if let Ok(menu) = build_menu() {
+        unsafe {
+            let _ = SetMenu(hwnd, Some(menu));
+        }
+    }
     let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
     let dpi = unsafe {
         let d = GetDpiForWindow(hwnd);
@@ -1105,12 +1482,11 @@ fn split_pane(hwnd: HWND, dir: Dir) {
     // appear with the pane's tab count), then spawn at the pane's box.
     sync_tab_bar(hwnd);
     let Some(s) = state_mut(hwnd) else { return };
-    let opts = SpawnOptions {
-        program: s.spawn.program.clone(),
-        args: s.spawn.args.clone(),
-        cols: s.app.active_tab().map_or(80, |t| t.cols()).max(MIN_COLS),
-        rows: s.app.active_tab().map_or(24, |t| t.rows()).max(MIN_ROWS),
-    };
+    let (cols, rows) = s
+        .app
+        .active_tab()
+        .map_or((s.spawn.cols, s.spawn.rows), |t| (t.cols(), t.rows()));
+    let opts = profile_opts(s, cols.max(MIN_COLS), rows.max(MIN_ROWS));
     // `spawn_active` clamps cols/rows to the focused pane's own box.
     if let Err(e) = s.app.spawn_active(&opts) {
         eprintln!("rusttyterm: split shell spawn failed: {e}");
@@ -1167,6 +1543,10 @@ fn close_pane_or_tab(hwnd: HWND) {
 
 /// Ctrl+Shift+T: append a tab and spawn a shell at the current grid size.
 fn new_tab(hwnd: HWND) {
+    new_tab_with_title(hwnd, None);
+}
+
+fn new_tab_with_title(hwnd: HWND, title: Option<&str>) {
     if let Some(s) = state_mut(hwnd) {
         s.app.add_tab();
     }
@@ -1178,15 +1558,16 @@ fn new_tab(hwnd: HWND) {
         .renderer
         .as_ref()
         .map_or((s.spawn.cols, s.spawn.rows), |r| r.grid_size());
-    let opts = SpawnOptions {
-        program: s.spawn.program.clone(),
-        args: s.spawn.args.clone(),
-        cols: cols.max(MIN_COLS),
-        rows: rows.max(MIN_ROWS),
-    };
+    let opts = profile_opts(s, cols.max(MIN_COLS), rows.max(MIN_ROWS));
     if let Err(e) = s.app.spawn_active(&opts) {
         eprintln!("rusttyterm: shell spawn failed: {e}");
     }
+    if let Some(title) = title
+        && let Some(tab) = s.app.active_tab_mut()
+    {
+        tab.set_title(title);
+    }
+    set_title(hwnd, &s.app);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
@@ -1287,6 +1668,7 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         suppress_char: false,
         fullscreen: None,
         search: None,
+        profile: 0,
     });
     let state_param = Box::into_raw(state) as *const c_void;
 
@@ -1346,4 +1728,17 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         let _ = unsafe { DispatchMessageW(&msg) };
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_generated_command_ranges_stay_disjoint() {
+        assert_eq!(theme_command(MENU_THEME_BASE + 1), Some(1));
+        assert_eq!(theme_command(MENU_THEME_BASE + theme::PRESETS.len()), None);
+        assert_eq!(profile_command(MENU_PROFILE_BASE), Some(0));
+        assert_eq!(profile_command(MENU_THEME_BASE), None);
+    }
 }

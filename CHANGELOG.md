@@ -29,6 +29,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   tab's screen and scrollback; match highlights, next/previous navigation
   that scrolls the viewport, case/word/regex toggles, and a capped result
   list (SEARCH-001..015). Adds `regex` 1.13.1.
+- Native Win32 menus: File/Edit/View/Window/Help with New Tab, Close Tab,
+  built-in shell/profile selector, theme selector, split commands, copy/paste,
+  search, window controls, Preferences, About, and visible shortcuts
+  (MENU-001..015).
 
 ## [0.1.0] — v0.1 MVP (planned)
 
