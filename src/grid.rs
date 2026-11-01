@@ -1,0 +1,640 @@
+//! Core screen buffer: circular line buffer, viewport, resize, damage tracking.
+//!
+//! Grid semantics (spec §"Grid semantics", MVP):
+//! - One screen buffer per tab/pane: a circular buffer of lines, capacity = rows + scrollback.
+//! - The viewport is the last `rows` lines of the buffer; `scroll_offset` shifts it backwards.
+//! - Writes target viewport-relative rows; appends grow the buffer and evict the oldest line when full.
+//! - Resize preserves content (keeping the newest lines), clamps scroll, and repaints everything once.
+//! - Writes when scrolled back do not move the viewport.
+
+use crate::color::Color;
+
+/// A single character cell in the grid
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cell {
+    /// The character displayed in this cell (space for blank)
+    pub char: char,
+    /// Foreground color; `None` uses the theme's default foreground
+    pub fg: Option<Color>,
+    /// Background color; `None` uses the theme's default background
+    pub bg: Option<Color>,
+    /// Active SGR attributes
+    pub attributes: CellAttribute,
+}
+
+impl Cell {
+    /// Create a blank cell (space, theme defaults, no attributes)
+    pub fn blank() -> Self {
+        Self {
+            char: ' ',
+            fg: None,
+            bg: None,
+            attributes: CellAttribute::empty(),
+        }
+    }
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self::blank()
+    }
+}
+
+/// SGR attribute flags for a cell
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CellAttribute(u8);
+
+impl CellAttribute {
+    /// Bold (SGR 1)
+    pub const BOLD: Self = Self(1 << 0);
+    /// Dim / faint (SGR 2)
+    pub const DIM: Self = Self(1 << 1);
+    /// Italic (SGR 3)
+    pub const ITALIC: Self = Self(1 << 2);
+    /// Underline (SGR 4)
+    pub const UNDERLINE: Self = Self(1 << 3);
+    /// Blink (SGR 5)
+    pub const BLINK: Self = Self(1 << 4);
+    /// Inverse / reverse video (SGR 7)
+    pub const INVERSE: Self = Self(1 << 5);
+    /// Hidden (SGR 8)
+    pub const HIDDEN: Self = Self(1 << 6);
+    /// Crossed out (SGR 9)
+    pub const STRIKE: Self = Self(1 << 7);
+
+    /// Empty attribute set (plain text)
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// All attribute flags
+    pub const fn all() -> Self {
+        Self(0xFF)
+    }
+
+    /// Raw flag bits (used by the SGR parser and renderer pen construction)
+    #[allow(dead_code, reason = "needed by the parser/renderer milestones")]
+    pub const fn flags(self) -> u8 {
+        self.0
+    }
+
+    /// Union of two attribute sets
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Intersection of two attribute sets
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// True if every flag in `other` is set in `self`
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+impl std::ops::BitOr for CellAttribute {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        Self::union(self, rhs)
+    }
+}
+
+impl std::ops::BitAnd for CellAttribute {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self {
+        Self::intersection(self, rhs)
+    }
+}
+
+/// A line in the screen buffer
+#[derive(Debug, Clone, Default)]
+pub struct Line {
+    /// Cells making up this line
+    pub cells: Vec<Cell>,
+    /// Damage flag, cleared by [`Grid::take_dirty_rows`]
+    pub is_dirty: bool,
+}
+
+impl Line {
+    /// Create a line of `cols` blank cells
+    pub fn blank(cols: usize) -> Self {
+        Self {
+            cells: vec![Cell::blank(); cols],
+            is_dirty: false,
+        }
+    }
+}
+
+/// Circular screen buffer with a scrolling viewport.
+///
+/// The buffer holds at most `rows + scrollback` lines. The virtual line
+/// stream is addressed from oldest (`0`) to newest (`total - 1`); physical
+/// slots are `(head + virtual) % capacity`. The viewport shows `rows`
+/// consecutive lines starting at `total - rows - scroll_offset`.
+#[derive(Debug, Clone)]
+pub struct Grid {
+    /// Number of columns
+    pub cols: usize,
+    /// Number of visible rows (viewport height)
+    pub rows: usize,
+    /// Number of lines kept above the viewport
+    pub scrollback: usize,
+    lines: Vec<Line>,
+    head: usize,
+    total: usize,
+    scroll_offset: usize,
+    full_dirty: bool,
+}
+
+impl Grid {
+    /// Create a new grid with custom dimensions and scrollback
+    pub fn with_size(cols: usize, rows: usize, scrollback: usize) -> Self {
+        let rows = rows.max(1);
+        let capacity = rows + scrollback;
+        Self {
+            cols,
+            rows,
+            scrollback,
+            lines: (0..capacity).map(|_| Line::blank(cols)).collect(),
+            head: 0,
+            total: rows,
+            scroll_offset: 0,
+            full_dirty: true,
+        }
+    }
+
+    /// Create a grid with default 80x24 dimensions and 1000-line scrollback
+    pub fn new() -> Self {
+        Self::with_size(80, 24, 1000)
+    }
+
+    /// Total number of lines currently held in the buffer
+    pub fn total_lines(&self) -> usize {
+        self.total
+    }
+
+    /// Current scroll offset in lines above the viewport
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    /// Number of lines of scrollback retained above the viewport
+    pub fn scrollback(&self) -> usize {
+        self.scrollback
+    }
+
+    /// Buffer capacity: `rows + scrollback` lines
+    pub fn capacity(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// Virtual index of the viewport's first line
+    fn top(&self) -> usize {
+        self.total.saturating_sub(self.rows + self.scroll_offset)
+    }
+
+    /// Physical slot for a virtual line index
+    fn slot(&self, virtual_index: usize) -> usize {
+        (self.head + virtual_index) % self.capacity()
+    }
+
+    /// Clamp the scroll offset so the viewport stays on the buffer
+    fn clamp_scroll(&mut self) {
+        self.scroll_offset = self.scroll_offset.min(self.total.saturating_sub(self.rows));
+    }
+
+    /// Append a line at the end of the buffer, evicting the oldest when full
+    pub fn append_line(&mut self, line: Line) {
+        let idx = if self.total < self.capacity() {
+            let idx = (self.head + self.total) % self.capacity();
+            self.total += 1;
+            idx
+        } else {
+            let idx = self.head;
+            self.head = (self.head + 1) % self.capacity();
+            idx
+        };
+        self.lines[idx] = line;
+        self.lines[idx].is_dirty = true;
+        self.full_dirty = false;
+    }
+
+    /// Write a line to a viewport row (0-based). Rows past the end of the
+    /// buffer pad with blank lines; the viewport never moves on a write.
+    pub fn write_line(&mut self, row: usize, line: Line) {
+        let row = row.min(self.rows.saturating_sub(1));
+        let virtual_index = self.top() + row;
+        while self.total <= virtual_index {
+            self.append_line(Line::blank(self.cols));
+        }
+        let slot = self.slot(virtual_index);
+        self.lines[slot] = line;
+        self.lines[slot].is_dirty = true;
+        self.full_dirty = false;
+    }
+
+    /// Write a stub line containing plain text (helper for tests and scaffolding)
+    pub fn write_line_stub(&mut self, row: usize, content: &str) {
+        let mut line = Line::blank(self.cols);
+        for (i, ch) in content.chars().take(self.cols).enumerate() {
+            line.cells[i].char = ch;
+        }
+        self.write_line(row, line);
+    }
+
+    /// Write a cell to a viewport position
+    pub fn write_cell(&mut self, row: usize, col: usize, cell: Cell) {
+        let row = row.min(self.rows.saturating_sub(1));
+        let virtual_index = self.top() + row;
+        while self.total <= virtual_index {
+            self.append_line(Line::blank(self.cols));
+        }
+        let slot = self.slot(virtual_index);
+        if col < self.cols {
+            self.lines[slot].cells[col] = cell;
+        }
+        self.lines[slot].is_dirty = true;
+        self.full_dirty = false;
+    }
+
+    /// Get a reference to a viewport line
+    pub fn row(&self, row: usize) -> Option<&Line> {
+        if row >= self.rows {
+            return None;
+        }
+        let virtual_index = self.top() + row;
+        if virtual_index >= self.total {
+            return None;
+        }
+        Some(&self.lines[self.slot(virtual_index)])
+    }
+
+    /// Text content of a viewport line, with trailing blanks trimmed.
+    ///
+    /// Handy for tests and renderer debugging; `None` when `row` is outside
+    /// the viewport or not backed by a line.
+    #[must_use]
+    pub fn line_text(&self, row: usize) -> Option<String> {
+        Some(
+            self.row(row)?
+                .cells
+                .iter()
+                .map(|c| c.char)
+                .collect::<String>()
+                .trim_end()
+                .to_string(),
+        )
+    }
+
+    /// Get a mutable reference to a viewport line, marking it dirty
+    pub fn row_mut(&mut self, row: usize) -> Option<&mut Line> {
+        if row >= self.rows {
+            return None;
+        }
+        let virtual_index = self.top() + row;
+        if virtual_index >= self.total {
+            return None;
+        }
+        let slot = self.slot(virtual_index);
+        self.lines[slot].is_dirty = true;
+        self.full_dirty = false;
+        Some(&mut self.lines[slot])
+    }
+
+    /// Resize the viewport and reallocate the buffer.
+    ///
+    /// Content is preserved by keeping the newest lines (the oldest are
+    /// evicted when the capacity shrinks, the newly available slots on
+    /// growth come back blank). Scroll is clamped and every row is marked
+    /// dirty so the next frame repaints once.
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+
+        // Drain the live lines in virtual order.
+
+        let mut content = Vec::with_capacity(self.total);
+        for v in 0..self.total {
+            let slot = self.slot(v);
+            content.push(std::mem::take(&mut self.lines[slot]));
+        }
+
+        let rows = rows.min(rows + self.scrollback);
+        let new_capacity = rows + self.scrollback;
+        let keep = content.len().min(new_capacity);
+        let start = content.len() - keep;
+
+        let mut lines = Vec::with_capacity(new_capacity);
+        lines.extend(content.into_iter().skip(start));
+        while lines.len() < new_capacity {
+            lines.push(Line::blank(cols));
+        }
+
+        self.cols = cols;
+        self.rows = rows;
+        self.lines = lines;
+        self.head = 0;
+        self.total = keep;
+        self.clamp_scroll();
+        self.mark_all_dirty();
+    }
+
+    /// Change the scrollback depth and re-allocate the buffer
+    pub fn set_scrollback(&mut self, scrollback: usize) {
+        self.scrollback = scrollback;
+        let (cols, rows) = (self.cols, self.rows);
+        self.resize(cols, rows);
+    }
+
+    /// Scroll the viewport up by `n` lines (into history)
+    pub fn scroll_up(&mut self, n: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(n);
+        self.clamp_scroll();
+        self.mark_all_dirty();
+    }
+
+    /// Scroll the viewport down by `n` lines (towards the live edge)
+    pub fn scroll_down(&mut self, n: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+        self.clamp_scroll();
+        self.mark_all_dirty();
+    }
+
+    /// Mark every row in the viewport dirty (full repaint)
+    pub fn mark_all_dirty(&mut self) {
+        self.full_dirty = true;
+    }
+
+    /// Mark a single viewport row dirty
+    pub fn mark_dirty(&mut self, row: usize) {
+        if row < self.rows {
+            let virtual_index = self.top() + row;
+            if virtual_index < self.total {
+                let slot = self.slot(virtual_index);
+                self.lines[slot].is_dirty = true;
+            }
+        }
+    }
+
+    /// Viewport rows that need repainting.
+    ///
+    /// Returns all rows after a full-redraw event (resize, scroll),
+    /// otherwise only the rows written to since the last take.
+    pub fn dirty_rows(&self) -> Vec<usize> {
+        if self.full_dirty {
+            return (0..self.rows).collect();
+        }
+        let top = self.top();
+        (0..self.rows)
+            .filter(|&row| {
+                let virtual_index = top + row;
+                virtual_index < self.total && self.lines[self.slot(virtual_index)].is_dirty
+            })
+            .collect()
+    }
+
+    /// Collect the dirty rows and clear their damage flags
+    pub fn take_dirty_rows(&mut self) -> Vec<usize> {
+        let rows = self.dirty_rows();
+        if self.full_dirty {
+            for line in &mut self.lines {
+                line.is_dirty = false;
+            }
+            self.full_dirty = false;
+        } else {
+            let top = self.top();
+            for row in &rows {
+                let virtual_index = top + row;
+                if virtual_index < self.total {
+                    let slot = self.slot(virtual_index);
+                    self.lines[slot].is_dirty = false;
+                }
+            }
+        }
+        rows
+    }
+}
+
+impl Default for Grid {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_line(content: &str, cols: usize) -> Line {
+        let mut line = Line::blank(cols);
+        for (i, ch) in content.chars().take(cols).enumerate() {
+            line.cells[i].char = ch;
+        }
+        line
+    }
+
+    /// Simulate a terminal printing `n` distinct lines (append at the live edge)
+    fn append_lines(grid: &mut Grid, n: usize) {
+        for i in 1..=n {
+            grid.append_line(make_line(&format!("line {i}"), grid.cols));
+        }
+    }
+
+    fn row_text(grid: &Grid, row: usize) -> String {
+        grid.line_text(row).unwrap()
+    }
+
+    #[test]
+    fn test_grid_initialization() {
+        let grid = Grid::new();
+        assert_eq!(grid.cols, 80);
+        assert_eq!(grid.rows, 24);
+        assert_eq!(grid.scrollback(), 1000);
+        assert_eq!(grid.capacity(), 1024);
+        assert_eq!(grid.total_lines(), 24);
+        assert_eq!(grid.scroll_offset(), 0);
+
+        let grid = Grid::with_size(80, 24, 100);
+        assert_eq!(grid.cols, 80);
+        assert_eq!(grid.rows, 24);
+        assert_eq!(grid.scrollback(), 100);
+        assert_eq!(grid.capacity(), 124);
+    }
+
+    #[test]
+    fn test_initial_frame_is_dirty() {
+        let grid = Grid::with_size(80, 24, 100);
+        assert_eq!(grid.dirty_rows(), (0..24).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_append_and_viewport() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        // The viewport starts as `rows` blank lines; appending pushes them up.
+        append_lines(&mut grid, 50);
+        assert_eq!(grid.total_lines(), 24 + 50);
+        assert_eq!(row_text(&grid, 23), "line 50");
+        assert_eq!(row_text(&grid, 0), "line 27");
+    }
+
+    #[test]
+    fn test_eviction_when_buffer_full() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        append_lines(&mut grid, 124);
+        assert_eq!(grid.total_lines(), 124);
+        assert_eq!(row_text(&grid, 0), "line 101");
+        assert_eq!(row_text(&grid, 23), "line 124");
+        // One more line evicts the oldest (line 1); oldest kept is line 2.
+        append_lines(&mut grid, 1);
+        assert_eq!(grid.total_lines(), 124);
+    }
+
+    #[test]
+    fn test_eviction_discards_oldest_line() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        append_lines(&mut grid, 125);
+        assert_eq!(grid.total_lines(), 124);
+        // Scrolled fully to the top, the first retained line is "line 2".
+        grid.scroll_up(100);
+        assert_eq!(grid.scroll_offset(), 100);
+        assert_eq!(row_text(&grid, 0), "line 2");
+    }
+
+    #[test]
+    fn test_scrolling() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        append_lines(&mut grid, 50);
+        // total 74, top at live edge = 50
+        grid.scroll_up(20);
+        assert_eq!(grid.scroll_offset(), 20);
+        assert_eq!(row_text(&grid, 0), "line 7");
+        grid.scroll_down(10);
+        assert_eq!(grid.scroll_offset(), 10);
+        grid.scroll_down(999);
+        assert_eq!(grid.scroll_offset(), 0);
+        assert_eq!(row_text(&grid, 0), "line 27");
+    }
+
+    #[test]
+    fn test_write_while_scrolled_back_does_not_move_viewport() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        append_lines(&mut grid, 50);
+        grid.scroll_up(10);
+        grid.write_line(23, make_line("typed", grid.cols));
+        assert_eq!(grid.scroll_offset(), 10);
+        assert_eq!(row_text(&grid, 23), "typed");
+        assert_eq!(grid.total_lines(), 74);
+    }
+
+    #[test]
+    fn test_resize_preserves_newest_lines() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        append_lines(&mut grid, 200);
+        // Buffer full at capacity 124; shrink rows to 10 -> capacity 110
+        grid.resize(80, 10);
+        assert_eq!(grid.rows, 10);
+        assert_eq!(grid.capacity(), 110);
+        assert_eq!(grid.total_lines(), 110);
+        assert_eq!(row_text(&grid, 9), "line 200");
+        // Grow back: viewport shows the last 24 of the 110 retained lines
+        grid.resize(80, 24);
+        assert_eq!(grid.rows, 24);
+        assert_eq!(grid.total_lines(), 110);
+        assert_eq!(row_text(&grid, 23), "line 200");
+        assert_eq!(row_text(&grid, 0), "line 177");
+    }
+
+    #[test]
+    fn test_resize_marks_all_dirty() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        let mut line = Line::blank(80);
+        line.cells[0].char = 'x';
+        grid.write_line(5, line);
+        assert_eq!(grid.take_dirty_rows(), vec![5]);
+        assert!(grid.dirty_rows().is_empty());
+        grid.resize(100, 30);
+        assert_eq!(grid.dirty_rows(), (0..30).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_resize_clamps_scroll() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        append_lines(&mut grid, 50);
+        grid.scroll_up(40);
+        grid.resize(80, 10);
+        // total is 60 now, max offset = 60 - 10 = 50; 40 fits, viewport at top
+        assert_eq!(grid.scroll_offset(), 40);
+        assert_eq!(row_text(&grid, 0), "line 1");
+    }
+
+    #[test]
+    fn test_set_scrollback() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        append_lines(&mut grid, 200);
+        grid.set_scrollback(50);
+        assert_eq!(grid.scrollback(), 50);
+        assert_eq!(grid.capacity(), 74);
+        assert_eq!(grid.total_lines(), 74);
+        assert_eq!(row_text(&grid, 23), "line 200");
+    }
+
+    #[test]
+    fn test_dirty_tracking() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        grid.take_dirty_rows();
+        assert!(grid.dirty_rows().is_empty());
+
+        grid.write_line(3, make_line("a", grid.cols));
+        grid.write_line(7, make_line("b", grid.cols));
+        assert_eq!(grid.dirty_rows(), vec![3, 7]);
+
+        let taken = grid.take_dirty_rows();
+        assert_eq!(taken, vec![3, 7]);
+        assert!(grid.dirty_rows().is_empty());
+
+        grid.mark_dirty(2);
+        assert_eq!(grid.dirty_rows(), vec![2]);
+
+        grid.mark_all_dirty();
+        assert_eq!(grid.dirty_rows(), (0..24).collect::<Vec<_>>());
+        grid.take_dirty_rows();
+        assert!(grid.dirty_rows().is_empty());
+    }
+
+    #[test]
+    fn test_write_line_and_row_access() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        grid.write_line(2, make_line("hello", grid.cols));
+        assert_eq!(row_text(&grid, 2), "hello");
+        assert!(grid.row(24).is_none());
+        assert!(grid.row_mut(24).is_none());
+        assert!(grid.row_mut(0).is_some());
+    }
+
+    #[test]
+    fn test_write_cell() {
+        let mut grid = Grid::with_size(80, 24, 100);
+        let cell = Cell {
+            char: 'Z',
+            fg: Some(Color::rgb(255, 0, 0)),
+            bg: None,
+            attributes: CellAttribute::BOLD,
+        };
+        grid.write_cell(4, 10, cell.clone());
+        let line = grid.row(4).unwrap();
+        assert_eq!(line.cells[10], cell);
+    }
+
+    #[test]
+    fn test_cell_attribute_flags() {
+        let attrs = CellAttribute::BOLD | CellAttribute::UNDERLINE;
+        assert!(attrs.contains(CellAttribute::BOLD));
+        assert!(attrs.contains(CellAttribute::UNDERLINE));
+        assert!(!attrs.contains(CellAttribute::ITALIC));
+        assert!(CellAttribute::empty().flags() == 0);
+    }
+}

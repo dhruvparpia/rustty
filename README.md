@@ -1,0 +1,65 @@
+# rusttyterm
+
+A fast, native-feeling terminal emulator for Windows, written in Rust, released under the MIT license.
+
+`rusttyterm` is a from-scratch implementation. It borrows ideas and default values
+from mature terminals (Ghostty, kitty, Alacritty, WezTerm, Windows Terminal) — the
+behaviors users praise — and implements them natively on Windows with no Electron,
+no web UI, no bundled interpreted runtime.
+
+> **Early development.** `rusttyterm` is currently a scaffolded data model: tabs,
+> panes, grid, config, themes. There is no window, renderer, or shell backend yet.
+> See [`ROADMAP.md`](ROADMAP.md) for what ships in each version.
+
+## Vision
+
+- **Native** — DirectWrite + Direct2D, DirectInput scan codes, DWM-aware. No HTML.
+- **Fast** — GPU-accelerated rendering, damage tracking, zero allocations in the
+  render hot path.
+- **Familiar** — Ghostty-compatible default keybindings, tab behavior that matches
+  what Windows Terminal users expect: tabs always visible, `+` button, close
+  destroys the shell, tab switching stays in the terminal.
+- **Open** — MIT, no telemetry, TOML config, portable ZIP first.
+
+## Roadmap summary
+
+| Version | Theme | Headline features |
+|---|---|---|
+| v0.1 (MVP) | Native terminal works | Tabs, ConPTY, Direct2D rendering, TOML config, keybindings |
+| v0.2 | Ghostty feature parity | Splits, visual effects, themes + theme browser, session restore, quick terminal |
+| v0.3 | Linux | Wayland (TBC) + X11 backends, Wayland protocol parity |
+| v0.4 | Ghostty parity | Full parity feature set |
+| v0.5+ | Ecosystem | Graphics protocols, plugin system, mobile/tablet |
+
+Full plan: [`ROADMAP.md`](ROADMAP.md). Complete requirements: [`docs/SPEC.md`](docs/SPEC.md).
+
+## Development
+
+Requirements: a current Rust toolchain (MSRV **1.92**) and Windows.
+
+```sh
+cargo check            # type-check
+cargo test             # unit + integration tests
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+cargo run              # CLI stub (prints version + theme list)
+cargo build --release
+```
+
+Conventions: `cargo fmt` and the CI clippy flags are mandatory; write unit tests
+inline (`#[cfg(test)] mod tests`) and integration tests in `tests/`; keep hot-path
+code allocation-free. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## Documentation
+
+| Doc | Purpose |
+|---|---|
+| [`docs/SPEC.md`](docs/SPEC.md) | Full product specification / SRS |
+| [`ROADMAP.md`](ROADMAP.md) | Versioned release plan |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Dev setup, conventions, PR process |
+| [`SECURITY.md`](SECURITY.md) | Vulnerability reporting |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release history |
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). No telemetry. No phone-home.

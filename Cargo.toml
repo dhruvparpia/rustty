@@ -1,0 +1,25 @@
+[package]
+name = "rusttyterm"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "A fast, native-feeling, MIT-licensed terminal emulator for Windows (spec: docs/SPEC.md)"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/dhruvparpia/rusttyterm"
+homepage = "https://github.com/dhruvparpia/rusttyterm"
+keywords = ["terminal", "terminal-emulator", "windows", "conpty", "cli"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+
+[lints.rust]
+missing_docs = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,10 @@
+# Build artifacts
+/target
+
+# IDE
+.idea/
+.vscode/
+
+# OS cruft on shared drives
+Thumbs.db
+Desktop.ini
