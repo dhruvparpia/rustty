@@ -7,7 +7,7 @@ The owner-approved next-work sequence is recorded in
 [Post-v0.5 — Daily-driver excellence and project workflows](#post-v05--daily-driver-excellence-and-project-workflows)
 and [master backlog #45](https://github.com/dhruvparpia/rusttyterm/issues/45).
 
-## v0.1 — MVP (target: 2026-12-31 → 2027-Q1)
+## v0.1 — MVP
 
 A native Windows terminal that developers use daily.
 
@@ -33,7 +33,7 @@ A native Windows terminal that developers use daily.
 accessibility, IME, session restore, quick terminal, theme browser, graphics
 protocols, plugin system, Electron/web UI of any kind.
 
-## v0.2 — Ghostty feature parity, part 1 (target: 2027-Q2)
+## v0.2 — Ghostty feature parity, part 1
 
 | Feature | Notes |
 |---|---|
@@ -46,7 +46,7 @@ protocols, plugin system, Electron/web UI of any kind.
 | Quick terminal | Hotkey summon from screen edge |
 | Windows Jump List | Full implementation (MVP carries the P1 item) |
 
-## v0.3 — Linux (target: 2027-Q3)
+## v0.3 — Linux
 
 | Feature | Notes |
 |---|---|
@@ -55,25 +55,25 @@ protocols, plugin system, Electron/web UI of any kind.
 | Wayland protocol parity | `fractional-scale-v1` required; viewport, IME, clipboard (spec §26) |
 | Linux packaging | deb/rpm + portable builds |
 
-## v0.4 — Ghostty parity (target: 2027-Q4 / 2028-Q1)
+## v0.4 — Ghostty parity
 
 Full feature parity with Ghostty, verified against the spec parity matrix (§27).
 Remaining accessibility (screen reader matrix), IME parity, key-binding parity,
 terminal capability parity.
 
-## v0.5+ — Ecosystem (2028+)
+## v0.5+ — Ecosystem
 
 | Feature | Status |
 |---|---|
-| Graphics protocols (kitty, 6bit SGR) | Done 2026-11-02: kitty subset (transmit/put/delete/query, PNG/JPEG via WIC); 6bit SGR renders as text (SGR 256 + block chars) |
+| Graphics protocols (kitty, 6bit SGR) | Done: kitty subset (transmit/put/delete/query, PNG/JPEG via WIC); 6bit SGR renders as text (SGR 256 + block chars) |
 | Plugin system / MCP | Design phase done: [`docs/design-plugins-mcp.md`](docs/design-plugins-mcp.md); implementation not scheduled |
 | Mobile / tablet | Design phase done: [`docs/design-mobile-tablet.md`](docs/design-mobile-tablet.md); implementation not scheduled |
-| Windows ARM64 | Done 2026-11-02: cross-check gate in CI; ARM64 release ZIP ships with the v0.5 packaging |
+| Windows ARM64 | Cross-check gate in CI: done. Release ZIP blocked: needs the HostX64/arm64 MSVC tools on the build box |
 | macOS backend | Open — no committed date |
 
 ## Post-v0.5 — Daily-driver excellence and project workflows
 
-Approved 2026-11-02. Build an exceptional native Windows terminal for managing
+Approved. Build an exceptional native Windows terminal for managing
 an entire development project: reliable sessions, reusable workspaces,
 command-aware output and first-class Windows integration. Preserve native UI,
 local-first operation, portable support and no telemetry.
