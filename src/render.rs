@@ -440,6 +440,11 @@ pub struct Renderer {
     atlas: Option<GlyphAtlas>,
     /// Atlas creation failed: stop retrying per frame and stop logging.
     atlas_failed: bool,
+    /// Cached-glyph `DrawBitmap` calls (issue #28: counters proving the
+    /// atlas is consulted, not just baked).
+    glyph_blits: u64,
+    /// Glyph runs that fell back to `DrawText`.
+    glyph_fallbacks: u64,
     /// Ligatures on (FONT-010): the atlas is per-cell, so ligature text is
     /// shaped as runs through DirectWrite instead, with no atlas at all.
     ligatures: bool,
@@ -698,6 +703,8 @@ impl Renderer {
             shape: (0, 0, 0),
             atlas: None,
             atlas_failed: false,
+            glyph_blits: 0,
+            glyph_fallbacks: 0,
             ligatures: font.ligatures,
             wic,
             image_cache: HashMap::new(),
@@ -1055,6 +1062,14 @@ impl Renderer {
             .map_or(glyph_cache::AtlasStats::default(), GlyphAtlas::stats)
     }
 
+    /// Cached-glyph blit and fallback-run counters ([`crate::perf_bench`]).
+    /// Not API. Issue #28: proves the atlas is consulted during painting.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn glyph_draw_counts(&self) -> (u64, u64) {
+        (self.glyph_blits, self.glyph_fallbacks)
+    }
+
     /// Create the glyph atlas on the current render target (lazily, from the
     /// paint path: the target only exists once the window is up). A creation
     /// failure is permanent for this renderer: the frame paints through the
@@ -1192,6 +1207,10 @@ impl Renderer {
             }
             atlas.render_pending(&self.formats, self.metrics.text_height);
         }
+        // Issue #28: return the atlas before painting rows. `paint_row_text`
+        // takes it from `self.atlas` per row; holding it in a local across
+        // the frame made every warm lookup miss and fell back to DrawText.
+        self.atlas = atlas;
         unsafe { self.target.BeginDraw() };
         if full {
             self.fill_rect(0.0, 0.0, width, height, theme.background);
@@ -1316,7 +1335,6 @@ impl Renderer {
                 idx += 1;
             });
         }
-        self.atlas = atlas;
         if self.tab_bar_height > 0.0 {
             self.paint_tab_bar(app, theme, width, height);
         }
@@ -1877,6 +1895,7 @@ impl Renderer {
             if let Some(tile) = tile {
                 if let Some(atlas) = atlas.as_ref() {
                     self.blit_glyph(atlas, tile, left + i as f32 * cw, top);
+                    self.glyph_blits += 1;
                 }
                 i += 1;
                 continue;
@@ -1925,6 +1944,7 @@ impl Renderer {
             };
             let format = &self.formats[format_index(attrs)];
             self.draw_units(&units, format, rect, &brush);
+            self.glyph_fallbacks += 1;
             i = end;
         }
         units.clear();

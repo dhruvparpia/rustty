@@ -147,15 +147,16 @@ fn bench_target(cols: usize, rows: usize) -> (HWND, Renderer) {
     }
     .expect("bench: window creation failed");
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-    let renderer = Renderer::new(
-        hwnd,
-        dpi,
-        &FontConfig::default(),
-        cols,
-        rows,
-        TAB_BAR_HEIGHT,
-    )
-    .expect("bench: renderer creation failed");
+    // Ligatures off (the shipped default is on): with ligatures on the
+    // atlas is never built (FONT-010), and the bench would measure the
+    // DrawText fallback while reporting a "healthy" atlas. Issue #28
+    // requires real blit counters.
+    let font = FontConfig {
+        ligatures: false,
+        ..FontConfig::default()
+    };
+    let renderer = Renderer::new(hwnd, dpi, &font, cols, rows, TAB_BAR_HEIGHT)
+        .expect("bench: renderer creation failed");
     (hwnd, renderer)
 }
 
@@ -231,6 +232,7 @@ fn paint_burst(
     let mut index = LINES_PER_FRAME;
     let mut fed = 0usize;
     let atlas_before = renderer.atlas_stats();
+    let draws_before = renderer.glyph_draw_counts();
     for _ in 0..frames {
         let chunk = lines(index, LINES_PER_FRAME);
         index += LINES_PER_FRAME;
@@ -251,6 +253,7 @@ fn paint_burst(
         worst = worst.max(frame_paint);
     }
     let atlas = renderer.atlas_stats();
+    let draws = renderer.glyph_draw_counts();
     BenchReport {
         frames,
         fed,
@@ -261,6 +264,8 @@ fn paint_burst(
         tiles: atlas.tiles,
         inserts: atlas.inserts.saturating_sub(atlas_before.inserts),
         evictions: atlas.evictions.saturating_sub(atlas_before.evictions),
+        blits: draws.0 - draws_before.0,
+        fallbacks: draws.1 - draws_before.1,
     }
 }
 
@@ -278,6 +283,10 @@ struct BenchReport {
     inserts: u64,
     /// Atlas clears during the measured frames (tile budget overflow).
     evictions: u64,
+    /// Cached-glyph `DrawBitmap` calls during the measured frames (issue #28).
+    blits: u64,
+    /// Glyph runs painted through the `DrawText` fallback.
+    fallbacks: u64,
 }
 
 impl BenchReport {
@@ -296,8 +305,9 @@ impl BenchReport {
             self.allocations,
         );
         eprintln!(
-            "rusttyterm bench {label}: atlas {} tiles, {} new, {} evictions",
-            self.tiles, self.inserts, self.evictions,
+            "rusttyterm bench {label}: atlas {} tiles, {} new, {} evictions, \
+             {} glyph blits, {} fallback runs",
+            self.tiles, self.inserts, self.evictions, self.blits, self.fallbacks,
         );
     }
 }
@@ -387,6 +397,20 @@ fn damage_frames_allocate_nothing() {
         "bench: the glyph atlas overflowed {} times in {} steady-state frames \
          (NFR-113: {} tiles is inside the atlas' budget)",
         report.evictions, report.frames, report.tiles,
+    );
+    // Issue #28: baking alone proved nothing. A warm steady-state frame must
+    // paint cached glyphs through DrawBitmap, not the DrawText fallback.
+    assert!(
+        report.blits > 0,
+        "bench: {} steady-state frames drew 0 cached glyphs with DrawBitmap \
+         (issue #28: every glyph was a DrawText fallback)",
+        report.frames,
+    );
+    assert_eq!(
+        report.fallbacks, 0,
+        "bench: {} steady-state frames fell back to DrawText {} times \
+         with a full atlas of {} tiles (issue #28)",
+        report.frames, report.fallbacks, report.tiles,
     );
     let _ = unsafe { DestroyWindow(hwnd) };
 }
