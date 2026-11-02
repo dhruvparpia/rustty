@@ -26,6 +26,7 @@ pub mod glyph_cache;
 // ConPTY FFI boundary (spec WIN-001). The crate-level `deny(unsafe_code)`
 // below is lifted only for this module, so every unsafe block in the crate
 // lives inside the FFI-boundary files.
+#[cfg(windows)]
 #[allow(unsafe_code, reason = "WIN-001: ConPTY is a raw Win32 FFI boundary")]
 pub mod conpty;
 // Clipboard FFI boundary (spec WIN-004).

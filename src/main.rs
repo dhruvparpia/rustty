@@ -1,10 +1,12 @@
 //! `rusttyterm` CLI entry point: load config, probe a shell, open the
 //! terminal window (spec §32, window milestone).
 
+#[cfg(windows)]
 use std::path::Path;
 use std::process::ExitCode;
 
 use rusttyterm::config::Config;
+#[cfg(windows)]
 use rusttyterm::shell::SpawnOptions;
 use rusttyterm::theme;
 

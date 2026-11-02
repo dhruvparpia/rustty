@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
+#[cfg(windows)]
 use std::sync::mpsc::{self, Receiver, Sender};
 
 #[cfg(windows)]
