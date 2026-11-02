@@ -1174,6 +1174,21 @@ policy are in [docs/design-workspaces.md](design-workspaces.md).
 | WORKSPACE-008 | Workspace names, directories and commands shall round-trip Unicode, spaces, WSL profiles, nested splits and repeated launches. | P2 |
 | WORKSPACE-009 | The storage schema shall be versioned; a newer file version shall be reported and left untouched, never silently rewritten. | P2 |
 
+## 9.28 Command palette requirements
+
+The command palette (#39, roadmap Stage 1) is a keyboard-first, fuzzy
+launcher for every command. One action registry drives the palette, the
+native menus and the keybindings, so a command listed anywhere is the
+same action everywhere.
+
+| ID | Requirement | Priority |
+|---|---|---|
+| PALETTE-001 | Ctrl+Shift+P shall open and close the palette; while open, typed text edits the query (WM_CHAR/IME commits included), Up/Down select, Enter runs, and Esc closes and restores terminal focus. | P1 |
+| PALETTE-002 | Each row shall display its shortcut: a user `[keybindings]` binding wins over the built-in default, and duplicate bindings for one action shall be reported at config load. | P1 |
+| PALETTE-003 | A disabled action shall remain visible with a plain-language reason (e.g. needs 2+ panes, no command history, tab already active). | P1 |
+| PALETTE-004 | Typing in the palette shall never reach the PTY; while open, every keydown is consumed by the overlay. | P1 |
+| PALETTE-005 | The hit list shall be responsive and bounded (case-insensitive fuzzy subsequence scoring, capped hits and visible rows) with a bounded recently-run history. | P1 |
+
 ---
 
 # 10. Non-Functional Requirements
@@ -1672,6 +1687,10 @@ Search UI shall expose:
 - close button
 - case toggle
 - regex toggle
+
+The command palette (PALETTE-001..005) shall expose an equivalent node: an
+editable element named "Command palette" whose value carries the query and
+the current/total match position, present only while the palette is open.
 
 ## UIA-005: Window interface
 
