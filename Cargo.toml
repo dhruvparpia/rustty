@@ -67,6 +67,11 @@ windows-core = "0.62.2"
 [target.'cfg(windows)'.dev-dependencies]
 windows = { version = "0.62", features = ["Win32_Storage_Xps"] }
 
+[build-dependencies]
+# Unconditional: build scripts compile for the host, and main() gates the
+# embed on the TARGET (cross-checks to Linux must skip the resource compiler).
+winresource = "0.1.34"
+
 # Session host (issue #46, docs/design-session-host.md): a separate
 # executable beside rusttyterm.exe so host-owned shells outlive every
 # client. GUI subsystem: the host must never flash a console window.

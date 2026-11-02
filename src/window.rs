@@ -66,8 +66,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DialogBoxIndirectParamW, DispatchMessageW, EnableMenuItem, EndDialog, GW_CHILD, GW_HWNDNEXT,
     GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClientRect, GetCursorPos, GetForegroundWindow,
     GetMenu, GetMenuItemCount, GetMessageW, GetSubMenu, GetWindow, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextW, HICON, HMENU, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM,
-    IDCANCEL, IDOK, IDYES, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW,
+    GetWindowRect, GetWindowTextW, HMENU, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM, IDCANCEL,
+    IDOK, IDYES, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW, LoadIconW,
     MB_DEFBUTTON2, MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_BYPOSITION,
     MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
     MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_HIDE,
@@ -5140,6 +5140,21 @@ pub fn run(
     let state_param = Box::into_raw(state) as *const c_void;
 
     let hinstance = unsafe { GetModuleHandleW(None) }?;
+    // The app icon build.rs embeds (winresource puts its icon group at
+    // resource ID 1 = MAKEINTRESOURCE(1)). A NULL class hIcon leaves the
+    // title bar showing the generic window glyph.
+    #[allow(
+        clippy::manual_dangling_ptr,
+        reason = "MAKEINTRESOURCE(1): Win32 passes resource IDs as pseudo-pointers"
+    )]
+    let icon = unsafe {
+        LoadIconW(
+            Some(hinstance.into()),
+            PCWSTR::from_raw(1usize as *const u16),
+        )
+    }
+    .ok()
+    .unwrap_or_default();
     let class_name = wstr(CLASS_NAME);
     let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }?;
     let class = WNDCLASSW {
@@ -5148,7 +5163,7 @@ pub fn run(
         cbClsExtra: 0,
         cbWndExtra: 0,
         hInstance: hinstance.into(),
-        hIcon: HICON::default(),
+        hIcon: icon,
         hCursor: cursor,
         hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH::default(),
         lpszMenuName: PCWSTR::null(),
