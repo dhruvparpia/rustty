@@ -48,6 +48,10 @@ pub const OPS: &[&str] = &[
     "session.list",
     "session.info",
     "session.terminate",
+    "session.attach",
+    "session.input",
+    "session.resize",
+    "session.detach",
     "host.shutdown",
 ];
 
@@ -61,6 +65,8 @@ pub const EXIT_NOT_FOUND: u8 = 3;
 pub const EXIT_HOST_UNAVAILABLE: u8 = 5;
 /// Protocol version incompatible with the live host.
 pub const EXIT_PROTOCOL: u8 = 6;
+/// The session is controlled by another client.
+pub const EXIT_BUSY: u8 = 7;
 
 /// Pipe name base; the full name is `\\.\pipe\rusttyhost.<user>`.
 /// The user suffix keeps two accounts on one machine apart; the real
@@ -266,6 +272,63 @@ pub fn read_frame(r: &mut impl Read, max: usize) -> io::Result<Value> {
     serde_json::from_slice(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// `WriteFile` with an event + wait, the overlapped pattern every pipe
+/// handle in this project uses: a blocking `ReadFile` on a synchronous
+/// handle locks the file object, and a concurrent writer on the same
+/// handle (or a duplicate) is starved until the next read completes
+/// (measured: the pump's response only went out when the next request
+/// arrived).
+///
+/// # Errors
+/// Transport errors.
+#[cfg(windows)]
+#[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
+pub fn overlapped_write(
+    handle: windows::Win32::Foundation::HANDLE,
+    buf: &[u8],
+) -> io::Result<usize> {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, GetLastError};
+    use windows::Win32::Storage::FileSystem::WriteFile;
+    use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+    use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    // Safety: event + OVERLAPPED live through the wait; `handle` is a
+    // valid pipe handle opened with FILE_FLAG_OVERLAPPED by the caller.
+    unsafe {
+        let Ok(event) = CreateEventW(None, true, false, None) else {
+            return Err(io::Error::last_os_error());
+        };
+        let mut ov = OVERLAPPED {
+            hEvent: event,
+            ..Default::default()
+        };
+        let mut done = 0u32;
+        let started = WriteFile(
+            handle,
+            Some(buf),
+            Some(core::ptr::from_mut(&mut done)),
+            Some(core::ptr::from_mut(&mut ov)),
+        );
+        let n = if started.is_ok() {
+            done
+        } else if GetLastError() == ERROR_IO_PENDING {
+            WaitForSingleObject(event, INFINITE);
+            GetOverlappedResult(handle, core::ptr::from_ref(&ov), &mut done, false)
+                .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
+            done
+        } else {
+            let code = GetLastError();
+            CloseHandle(event).ok();
+            return Err(io::Error::from_raw_os_error(code.0 as i32));
+        };
+        CloseHandle(event).ok();
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+}
+
 /// The Windows session host: App state, per-session job objects, the
 /// RPC dispatch table. The `rusttyhost.exe` bin drives it; clients
 /// speak through [`client`].
@@ -275,11 +338,14 @@ pub mod server {
     use std::io;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use serde_json::{Value, json};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+    use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+    use windows::Win32::Foundation::{
+        CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, WAIT_OBJECT_0,
+    };
     use windows::Win32::Security::*;
     use windows::Win32::Storage::FileSystem::SYNCHRONIZE;
     use windows::Win32::System::JobObjects::*;
@@ -309,6 +375,12 @@ pub mod server {
         job: SendHandle,
         /// Reader thread handle; detached at drop.
         _reader: std::thread::JoinHandle<()>,
+        /// Attached clients: per-connection token + queue of frames to
+        /// write (output chunks, input, resize, exit). The connection's
+        /// pump thread is the only writer of its pipe.
+        subs: Vec<(u64, std::sync::mpsc::SyncSender<Value>)>,
+        /// Token of the client with input rights; `None` = uncontrolled.
+        controller: Option<u64>,
     }
 
     /// Shared host state. One `Mutex` guards it; requests are short.
@@ -491,6 +563,10 @@ pub mod server {
 
             let (alias, id) = g.ids.allocate();
             g.save_ids();
+            // Self-attach prevention (attach ADR): a shell started by the
+            // host knows its alias and refuses to attach to its own session.
+            opts.env
+                .insert("RUSTTYTERM_SESSION".into(), alias.to_string());
             let job = create_kill_job().map_err(|e| Fail::Code("internal", e.to_string()))?;
             let spawned = ConPty::spawn(
                 &opts.program,
@@ -558,16 +634,62 @@ pub mod server {
             let reader = conpty
                 .output_reader()
                 .map_err(|e| Fail::Code("internal", e.to_string()))?;
+            // A headless session has no pane to answer terminal queries,
+            // and bash/readline blocks on a cursor-position query (CSI 6n)
+            // until a report arrives; the reader thread answers it.
+            let query_writer = conpty
+                .input_writer()
+                .map_err(|e| Fail::Code("internal", e.to_string()))?;
+            let app_for_reader = Arc::clone(app);
             let exit = exit_notifier(app, alias, id);
             let managed = Managed {
                 record: record.clone(),
                 conpty,
                 process: managed_process,
                 job,
+                subs: Vec::new(),
+                controller: None,
                 _reader: std::thread::spawn(move || {
-                    // shortcut: #46 discards output; #47/#58 stream
-                    // bounded pages to attached clients.
-                    let _ = conpty::read_output_loop(&reader, |_| {});
+                    let on_chunk = |chunk: &[u8]| {
+                        // Answer the cursor-position query so the shell's
+                        // input loop unblocks. shortcut: fixed 1;1 report
+                        // (readline only needs a valid one); emulate
+                        // queries against the attached console with #48.
+                        if chunk.windows(4).any(|w| w == b"\x1b[6n") {
+                            let _ = query_writer.write(b"\x1b[1;1R");
+                        }
+                        // Hex keeps JSON frames pure ASCII; the client
+                        // decodes and writes the bytes to its console.
+                        const HEX: &[u8; 16] = b"0123456789abcdef";
+                        let mut hex = String::with_capacity(chunk.len() * 2);
+                        for b in chunk {
+                            hex.push(HEX[usize::from(b >> 4)] as char);
+                            hex.push(HEX[usize::from(b & 0xf)] as char);
+                        }
+                        if let Ok(mut app) = app_for_reader.lock()
+                            && let Some(m) = app.live.get_mut(&alias)
+                            && m.record.id == id
+                        {
+                            let (cols, rows) = (m.record.cols, m.record.rows);
+                            let note = json!({
+                                "jsonrpc": "2.0",
+                                "method": "session.output",
+                                "params": {
+                                    "alias": alias,
+                                    "id": id,
+                                    "data": hex,
+                                    "cols": cols,
+                                    "rows": rows,
+                                    "schema": SCHEMA,
+                                },
+                            });
+                            m.subs.retain(|(_, tx)| tx.try_send(note.clone()).is_ok());
+                        }
+                        // try_send fails only when a client is full or
+                        // gone; the slow client is dropped (its pump
+                        // closes the connection).
+                    };
+                    let _ = conpty::read_output_loop(&reader, on_chunk);
                     let code = conpty::wait_exit_code(&process);
                     exit(code.map(|c| c.cast_unsigned()));
                 }),
@@ -640,6 +762,14 @@ pub mod server {
             m.record.exit_code = code;
             let record = m.record.clone();
             g.push_exited(record.clone());
+            let exit_note = json!({
+                "jsonrpc": "2.0",
+                "method": "session.exit",
+                "params": { "alias": alias, "id": record.id, "exitCode": code, "schema": SCHEMA },
+            });
+            for (_, tx) in &m.subs {
+                let _ = tx.try_send(exit_note.clone());
+            }
             drop(m); // closes conpty + job handles (tree already down)
             // The reader thread finds no live session and no-ops.
             Ok(record)
@@ -686,6 +816,19 @@ pub mod server {
                 if live && let Some(mut m) = app.live.remove(&alias) {
                     m.record.state = "exited".into();
                     m.record.exit_code = code;
+                    let exit_note = json!({
+                        "jsonrpc": "2.0",
+                        "method": "session.exit",
+                        "params": {
+                            "alias": alias,
+                            "id": id,
+                            "exitCode": code,
+                            "schema": SCHEMA,
+                        },
+                    });
+                    for (_, tx) in &m.subs {
+                        let _ = tx.try_send(exit_note.clone());
+                    }
                     app.push_exited(m.record.clone());
                 }
                 // Dropping Managed closes conpty + job: the tree goes
@@ -696,16 +839,242 @@ pub mod server {
 
     /// One request in, one response out (the client thread loop).
     /// Unknown methods and malformed params answer `bad-params`.
-    pub fn handle(app: &Arc<Mutex<App>>, req: &Value) -> Value {
+    pub fn handle(app: &Arc<Mutex<App>>, req: &Value, conn: &Conn<'_>) -> Value {
         let id = req.get("id").cloned().unwrap_or(Value::Null);
-        match dispatch(app, req) {
+        match dispatch(app, req, conn) {
             Ok(v) => response(id, v),
             Err(Fail::Code(code, msg)) => error(id, code, &msg),
         }
     }
 
+    /// Per-connection identity: the attach token (control ownership +
+    /// subscription key) and the queue the connection's pump drains.
+    pub struct Conn<'a> {
+        /// Unique token for this connection.
+        pub token: u64,
+        /// Frame queue; `session.attach` registers a clone of it.
+        pub tx: &'a SyncSender<Value>,
+    }
+
+    static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+    /// Unique per-connection token (issue #47).
+    #[must_use]
+    pub fn new_token() -> u64 {
+        NEXT_TOKEN.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Start the connection's writer thread: the sole writer of the
+    /// (duplicated) pipe handle. It drains `rx` — output/input/resize
+    /// frames from other threads — and when the queue closes (the
+    /// connection thread ended) it releases the attach and closes the
+    /// handle.
+    ///
+    /// # Errors
+    /// IO error duplicating the handle.
+    pub fn new_pump(
+        pipe: HANDLE,
+        app: Arc<Mutex<App>>,
+        token: u64,
+        rx: Receiver<Value>,
+    ) -> io::Result<std::thread::JoinHandle<()>> {
+        // Safety: duplicate our own pipe handle with the same access.
+        let dup = {
+            let mut h = HANDLE::default();
+            unsafe {
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    pipe,
+                    GetCurrentProcess(),
+                    &mut h,
+                    0,
+                    false,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            }
+            .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
+            // Safety: h is the fresh handle we just duplicated and now own.
+            unsafe { SendHandle::from_owned(Owned::new(h)) }
+        };
+        Ok(std::thread::spawn(move || {
+            let mut conn_pipe = DupConn { handle: dup };
+            while let Ok(frame) = rx.recv() {
+                if crate::host::write_frame(&mut conn_pipe, &frame).is_err() {
+                    break;
+                }
+            }
+            // The connection thread ended: release control + subscription.
+            let req = json!({
+                "jsonrpc": "2.0", "id": serde_json::Value::Null,
+                "method": "session.detach", "params": { "token": token },
+            });
+            let (tx, _drain) = sync_channel(1);
+            let conn = Conn { token, tx: &tx };
+            handle(&app, &req, &conn);
+            // Dropping `conn_pipe` closes the duplicated handle.
+        }))
+    }
+
+    /// Attach: subscribe to a live session's stream; with `readOnly`
+    /// false, take controller rights (busy → `session-busy`; `takeControl`
+    /// demotes the current controller to a watcher, per the ADR).
+    /// The attach snapshot is the output from now on — scrollback replay
+    /// is #48. shortcut: no replay, add it with the delta model.
+    fn session_attach(
+        app: &Arc<Mutex<App>>,
+        params: &Value,
+        conn: &Conn<'_>,
+    ) -> Result<Value, Fail> {
+        let alias = param_alias(params)?;
+        let readonly = params
+            .get("readOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let takeover = params
+            .get("takeControl")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut g = app
+            .lock()
+            .map_err(|_| Fail::Code("internal", "state lock poisoned".to_string()))?;
+        let m = g.live.get_mut(&alias).ok_or_else(|| {
+            Fail::Code(
+                "target-stale",
+                format!("no live session with alias {alias}"),
+            )
+        })?;
+        if !readonly && m.controller.is_some() && m.controller != Some(conn.token) && !takeover {
+            return Err(Fail::Code(
+                "session-busy",
+                format!("session {alias} is controlled by another client (use --take-control)"),
+            ));
+        }
+        m.subs.push((conn.token, conn.tx.clone()));
+        let granted = if readonly {
+            false
+        } else {
+            // takeover silently demotes the previous controller (ADR).
+            m.controller = Some(conn.token);
+            true
+        };
+        Ok(json!({
+            "alias": alias,
+            "id": m.record.id,
+            "pid": m.record.pid,
+            "cols": m.record.cols,
+            "rows": m.record.rows,
+            "state": "live",
+            "controlGranted": granted,
+            "schema": SCHEMA,
+        }))
+    }
+
+    /// Input bytes (hex) to the PTY. Controller only.
+    fn session_input(
+        app: &Arc<Mutex<App>>,
+        params: &Value,
+        conn: &Conn<'_>,
+    ) -> Result<Value, Fail> {
+        let alias = param_alias(params)?;
+        let data = params
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Fail::Code("bad-params", "data (hex string) required".to_string()))?;
+        let bytes = hex_decode(data)?;
+        if bytes.len() > crate::host::MAX_REQUEST_BYTES {
+            return Err(Fail::Code(
+                "bad-params",
+                "input frame too large".to_string(),
+            ));
+        }
+        let mut g = app
+            .lock()
+            .map_err(|_| Fail::Code("internal", "state lock poisoned".to_string()))?;
+        let m = g
+            .live
+            .get_mut(&alias)
+            .ok_or_else(|| Fail::Code("target-stale", "session gone".to_string()))?;
+        if m.controller != Some(conn.token) {
+            return Err(Fail::Code(
+                "session-busy",
+                "not the controller of this session".to_string(),
+            ));
+        }
+        m.conpty
+            .write_input(&bytes)
+            .map_err(|e| Fail::Code("internal", e.to_string()))?;
+        Ok(json!({ "written": bytes.len() }))
+    }
+
+    /// Resize the PTY + record; forwarded to every watcher. Controller only.
+    fn session_resize(
+        app: &Arc<Mutex<App>>,
+        params: &Value,
+        conn: &Conn<'_>,
+    ) -> Result<Value, Fail> {
+        let alias = param_alias(params)?;
+        let cols = param_u16(params, "cols")?;
+        let rows = param_u16(params, "rows")?;
+        let mut g = app
+            .lock()
+            .map_err(|_| Fail::Code("internal", "state lock poisoned".to_string()))?;
+        let m = g
+            .live
+            .get_mut(&alias)
+            .ok_or_else(|| Fail::Code("target-stale", "session gone".to_string()))?;
+        if m.controller != Some(conn.token) {
+            return Err(Fail::Code(
+                "session-busy",
+                "not the controller of this session".to_string(),
+            ));
+        }
+        m.conpty
+            .resize(usize::from(cols), usize::from(rows))
+            .map_err(|e| Fail::Code("internal", e.to_string()))?;
+        m.record.cols = usize::from(cols);
+        m.record.rows = usize::from(rows);
+        let note = json!({
+            "jsonrpc": "2.0",
+            "method": "session.resize",
+            "params": { "alias": alias, "id": m.record.id, "cols": cols, "rows": rows, "schema": SCHEMA },
+        });
+        m.subs.retain(|(_, tx)| tx.try_send(note.clone()).is_ok());
+        Ok(json!({ "cols": cols, "rows": rows }))
+    }
+
+    /// Release a connection's attach everywhere: unregister its stream
+    /// and free the controller slot it held.
+    pub fn detach_token(app: &Arc<Mutex<App>>, token: u64) -> Value {
+        if let Ok(mut g) = app.lock() {
+            for m in g.live.values_mut() {
+                m.subs.retain(|(t, _)| *t != token);
+                if m.controller == Some(token) {
+                    m.controller = None;
+                }
+            }
+        }
+        json!({ "detached": true })
+    }
+
+    fn param_alias(params: &Value) -> Result<u32, Fail> {
+        params
+            .get("alias")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(|| Fail::Code("bad-params", "alias (number) required".to_string()))
+    }
+
+    fn param_u16(params: &Value, key: &str) -> Result<u16, Fail> {
+        params
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|v| u16::try_from(v).ok())
+            .filter(|v| *v > 0)
+            .ok_or_else(|| Fail::Code("bad-params", format!("{key} (number > 0) required")))
+    }
+
     /// The method table; `handle` attaches the envelope id.
-    fn dispatch(app: &Arc<Mutex<App>>, req: &Value) -> Result<Value, Fail> {
+    fn dispatch(app: &Arc<Mutex<App>>, req: &Value, conn: &Conn<'_>) -> Result<Value, Fail> {
         let method = req
             .get("method")
             .and_then(Value::as_str)
@@ -761,6 +1130,10 @@ pub mod server {
             }
             "session.terminate" => App::terminate_session(app, &params)
                 .map(|r| json!({"schema": SCHEMA, "session": r.json()})),
+            "session.attach" => session_attach(app, &params, conn),
+            "session.input" => session_input(app, &params, conn),
+            "session.resize" => session_resize(app, &params, conn),
+            "session.detach" => Ok(detach_token(app, conn.token)),
             "host.shutdown" => {
                 let g = app
                     .lock()
@@ -926,6 +1299,47 @@ pub mod server {
             }
         }
     }
+
+    /// A duplicated connection handle used by the pump thread; it only
+    /// writes (the connection thread owns the reads).
+    pub struct DupConn {
+        handle: SendHandle,
+    }
+
+    impl io::Write for DupConn {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            super::overlapped_write(self.handle.raw(), buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Decode a hex string (session.input payloads).
+    fn hex_decode(s: &str) -> Result<Vec<u8>, Fail> {
+        let bad = || {
+            Fail::Code(
+                "bad-params",
+                "data must be an even-length hex string".to_string(),
+            )
+        };
+        let bytes = s.as_bytes();
+        if !bytes.len().is_multiple_of(2) {
+            return Err(bad());
+        }
+        let mut out = Vec::with_capacity(bytes.len() / 2);
+        for pair in bytes.chunks(2) {
+            let Ok(text) = std::str::from_utf8(pair) else {
+                return Err(bad());
+            };
+            let Ok(v) = u8::from_str_radix(text, 16) else {
+                return Err(bad());
+            };
+            out.push(v);
+        }
+        Ok(out)
+    }
 }
 
 /// The client side: connect to the live host, spawning one on demand
@@ -933,7 +1347,6 @@ pub mod server {
 /// [`read_frame`] over the pipe.
 #[cfg(windows)]
 pub mod client {
-    use std::fs::File;
     use std::io;
     use std::time::{Duration, Instant};
 
@@ -943,7 +1356,7 @@ pub mod client {
 
     /// A connected host session.
     pub struct Client {
-        pipe: File,
+        pipe: DupHandle,
         id: u64,
         /// Protocol version negotiated in `initialize`.
         pub protocol: u32,
@@ -1006,14 +1419,36 @@ pub mod client {
         Ok(())
     }
 
-    /// Open the host pipe read+write: frames go both ways, and the
-    /// read-only handle `File::open` yields refuses `WriteFile`
-    /// (Access is denied).
-    fn open_pipe() -> io::Result<File> {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(pipe_name())
+    /// Open the host pipe read+write, overlapped: the attach frontend
+    /// reads on a dedicated thread while its main thread writes, and a
+    /// blocking read on a synchronous handle starves a concurrent
+    /// writer (see [`super::overlapped_write`]).
+    #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
+    fn open_pipe() -> io::Result<DupHandle> {
+        use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE};
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE,
+            OPEN_EXISTING,
+        };
+
+        let name = pipe_name();
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        // Safety: FFI boundary (NFR-401); `wide` lives through the call.
+        unsafe {
+            CreateFileW(
+                windows::core::PCWSTR(wide.as_ptr()),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                FILE_SHARE_MODE::default(),
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(FILE_FLAG_OVERLAPPED.0),
+                Some(HANDLE::default()),
+            )
+            .map(DupHandle)
+            // System HRESULTs carry the Win32 code in the low 16 bits
+            // (connect()'s retry loop matches ERROR_FILE_NOT_FOUND = 2).
+            .map_err(|e| io::Error::from_raw_os_error(i32::from(e.code().0 as u16)))
+        }
     }
 
     impl Client {
@@ -1047,7 +1482,7 @@ pub mod client {
             }
         }
 
-        fn handshake(pipe: File) -> io::Result<Self> {
+        fn handshake(pipe: DupHandle) -> io::Result<Self> {
             let mut me = Self {
                 pipe,
                 id: 0,
@@ -1084,6 +1519,151 @@ pub mod client {
             let req = json!({"jsonrpc": "2.0", "id": self.id, "method": method, "params": params});
             write_frame(&mut self.pipe, &req)?;
             read_frame(&mut self.pipe, MAX_PAGE_BYTES)
+        }
+
+        /// Fire-and-forget request (the attach frontend's input/resize
+        /// frames). The answer is ignored: it arrives on the reader
+        /// thread as an unsolicited response and is dropped there.
+        ///
+        /// # Errors
+        ///
+        /// Transport errors.
+        pub fn send(&mut self, method: &str, params: Value) -> io::Result<()> {
+            self.id += 1;
+            let req = json!({"jsonrpc": "2.0", "id": self.id, "method": method, "params": params});
+            write_frame(&mut self.pipe, &req)
+        }
+
+        /// A read handle for the connection, for a dedicated reader
+        /// thread while this thread keeps writing.
+        ///
+        /// # Errors
+        ///
+        /// Handle duplication failure.
+        #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
+        pub fn reader(&self) -> io::Result<DupReader> {
+            use windows::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE};
+            use windows::Win32::System::Threading::GetCurrentProcess;
+
+            // Safety: duplicate our own pipe handle with the same access.
+            let dup = unsafe {
+                let mut h = HANDLE::default();
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    self.pipe.0,
+                    GetCurrentProcess(),
+                    &mut h,
+                    0,
+                    false,
+                    DUPLICATE_SAME_ACCESS,
+                )
+                .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
+                h
+            };
+            Ok(DupReader {
+                handle: std::sync::Arc::new(DupHandle(dup)),
+            })
+        }
+    }
+
+    /// Sendable owner of a duplicated pipe handle.
+    /// Safety: kernel HANDLE values are valid in any thread.
+    #[cfg(windows)]
+    pub struct DupHandle(windows::Win32::Foundation::HANDLE);
+    #[cfg(windows)]
+    unsafe impl Send for DupHandle {}
+    // Safety: every I/O call uses its own event and completes before
+    // the call returns; concurrent read (reader thread) + write (main
+    // thread) on one pipe is the design (overlapped handles).
+    #[cfg(windows)]
+    unsafe impl Sync for DupHandle {}
+    #[cfg(windows)]
+    impl Drop for DupHandle {
+        fn drop(&mut self) {
+            // Safety: closing the handle we duplicated.
+            unsafe {
+                windows::Win32::Foundation::CloseHandle(self.0).ok();
+            }
+        }
+    }
+
+    /// `ReadFile` with an event + wait (the overlapped pattern; see
+    /// [`super::overlapped_write`]). A zero-length result is EOF.
+    #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
+    fn overlapped_read(
+        handle: windows::Win32::Foundation::HANDLE,
+        buf: &mut [u8],
+    ) -> io::Result<usize> {
+        use windows::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, GetLastError};
+        use windows::Win32::Storage::FileSystem::ReadFile;
+        use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+        use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        // Safety: event + OVERLAPPED live through the wait; `handle` is
+        // a valid pipe handle opened with FILE_FLAG_OVERLAPPED.
+        unsafe {
+            let Ok(event) = CreateEventW(None, true, false, None) else {
+                return Err(io::Error::last_os_error());
+            };
+            let mut ov = OVERLAPPED {
+                hEvent: event,
+                ..Default::default()
+            };
+            let mut done = 0u32;
+            let started = ReadFile(
+                handle,
+                Some(buf),
+                Some(core::ptr::from_mut(&mut done)),
+                Some(core::ptr::from_mut(&mut ov)),
+            );
+            let n = if started.is_ok() {
+                done
+            } else if GetLastError() == ERROR_IO_PENDING {
+                WaitForSingleObject(event, INFINITE);
+                GetOverlappedResult(handle, core::ptr::from_ref(&ov), &mut done, false)
+                    .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
+                done
+            } else {
+                let code = GetLastError();
+                CloseHandle(event).ok();
+                return Err(io::Error::from_raw_os_error(code.0 as i32));
+            };
+            CloseHandle(event).ok();
+            Ok(usize::try_from(n).unwrap_or(0))
+        }
+    }
+
+    #[cfg(windows)]
+    impl io::Read for DupHandle {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            overlapped_read(self.0, buf)
+        }
+    }
+
+    #[cfg(windows)]
+    impl io::Write for DupHandle {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            super::overlapped_write(self.0, buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The connection's read side (blocking).
+    #[cfg(windows)]
+    pub struct DupReader {
+        handle: std::sync::Arc<DupHandle>,
+    }
+
+    #[cfg(windows)]
+    impl io::Read for DupReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            overlapped_read(self.handle.0, buf)
         }
     }
 }

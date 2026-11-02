@@ -1,9 +1,10 @@
 //! `rusttyterm` CLI entry point: load config, probe a shell, open the
 //! terminal window (spec §32, window milestone).
 
-// GUI subsystem: launching the app (double-click, Jump List, autostart)
-// must not allocate a console window next to the terminal.
-#![cfg_attr(windows, windows_subsystem = "windows")]
+// Console subsystem (issue #47): `rusttyterm --attach <n>` must run in
+// the caller's console in the foreground (PowerShell only waits for
+// console-subsystem processes), which a GUI-subsystem exe cannot do.
+// A GUI launch closes the allocated console window right away.
 
 use std::process::ExitCode;
 
@@ -19,11 +20,16 @@ fn main() -> ExitCode {
         || cli.terminate_session.is_some()
         || cli.attach.is_some();
     if cli.help || cli.version || cli.workspaces || is_session_verb {
-        // The binary is a GUI-subsystem exe, so no console is attached at
-        // startup; attach to the calling console so --help/--version/
-        // --workspaces/verbs print where they were typed, keeping any
-        // redirection intact.
+        // Launched by a taskbar/Jump List task with no parent console,
+        // the console subsystem allocated a window; attach to the
+        // calling console so output prints where it was typed, keeping
+        // any redirection intact. From a real console this is a no-op.
         rusttyterm::cli::attach_parent_console();
+    } else {
+        // GUI launch: close the console window the subsystem allocated.
+        // shortcut: it flashes briefly on double-click; a GUI-subsystem
+        // launcher stub hides it if that ever matters.
+        rusttyterm::cli::free_console();
     }
     for unknown in &cli.unknown {
         eprintln!("rusttyterm: ignoring unknown argument {unknown:?}");
@@ -111,12 +117,10 @@ fn session_verb(cli: &rusttyterm::cli::Cli) -> ExitCode {
         eprintln!("rusttyterm: --name needs a value");
         return ExitCode::from(EXIT_USAGE);
     }
-    // Attach and console attach are the #47 entry point. This build
-    // accepts the grammar so `--attach` can never fall through to
-    // opening a GUI window (docs/design-session-attach.md: a malformed
-    // verb fails visibly, never launching a shell). Attaching with
-    // --profile is an error: attach never replaces the original
-    // profile. A valid alias is reported as not-yet-implemented.
+    // Console attach (issue #47). Parsed in cli.rs so a malformed verb
+    // fails visibly and never falls through to opening a GUI window
+    // (docs/design-session-attach.md). Attaching with --profile is an
+    // error: attach never replaces the session's original profile.
     if cli.attach.is_some() && cli.profile.is_some() {
         eprintln!("rusttyterm: --attach does not accept --profile");
         return ExitCode::from(EXIT_USAGE);
@@ -127,12 +131,44 @@ fn session_verb(cli: &rusttyterm::cli::Cli) -> ExitCode {
         eprintln!("rusttyterm: session alias must be a positive number");
         return ExitCode::from(EXIT_USAGE);
     }
-    if cli.attach.is_some() {
-        eprintln!(
-            "rusttyterm: console attach (--attach) is not in this build; session {} left untouched",
-            cli.attach.unwrap_or(0)
-        );
-        return ExitCode::from(EXIT_USAGE);
+    if let Some(alias) = cli.attach {
+        if cli.read_only && cli.take_control {
+            eprintln!("rusttyterm: --read-only and --take-control are mutually exclusive");
+            return ExitCode::from(EXIT_USAGE);
+        }
+        // The detach prefix comes from the config; a broken config
+        // falls back to defaults like every other entry point.
+        let cfg = match Config::load() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("rusttyterm: {e}; using defaults");
+                Config::default()
+            }
+        };
+        let prefix = match rusttyterm::attach::parse_prefix(&cfg.detach_prefix) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("rusttyterm: {e}");
+                return ExitCode::from(EXIT_USAGE);
+            }
+        };
+        return match rusttyterm::attach::run(alias, cli.read_only, cli.take_control, prefix) {
+            Ok(code) => ExitCode::from(code),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+                ) =>
+            {
+                // Not a TTY, or a self-attach: usage-class failures.
+                eprintln!("rusttyterm: {e}");
+                ExitCode::from(EXIT_USAGE)
+            }
+            Err(e) => {
+                eprintln!("rusttyterm: {e}");
+                ExitCode::from(rusttyterm::host::EXIT_HOST_UNAVAILABLE)
+            }
+        };
     }
 
     let mut c = match client::Client::connect() {

@@ -49,6 +49,10 @@ pub struct Cli {
     pub session_rows: Option<u32>,
     /// `--json`: structured output for the session verbs (#46).
     pub json: bool,
+    /// `--read-only`: with `--attach`, watch without sending (#47).
+    pub read_only: bool,
+    /// `--take-control`: with `--attach`, demote the current controller (#47).
+    pub take_control: bool,
     /// Arguments this version does not know.
     pub unknown: Vec<String>,
 }
@@ -81,6 +85,8 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Cli {
             "--cols" => cli.session_cols = numeric(&args.next()),
             "--rows" => cli.session_rows = numeric(&args.next()),
             "--json" => cli.json = true,
+            "--read-only" => cli.read_only = true,
+            "--take-control" => cli.take_control = true,
             "-h" | "--help" => cli.help = true,
             "--version" => cli.version = true,
             // First positional is the working directory (Open terminal
@@ -119,7 +125,7 @@ fn alias<I: Iterator<Item = OsString>>(args: &mut I) -> Option<u32> {
 #[must_use]
 pub const fn usage() -> &'static str {
     "usage: rusttyterm [directory] [--profile <name>] [--theme <name>] [--workspace <name> | --workspaces] [--version] [-h|--help]\n\
-       session host: rusttyterm --list-sessions [--json] | --new-session [--profile <name>] [--name <label>] [--cwd <dir>] [--cols <n>] [--rows <n>] [--detach] [--ephemeral] | --session-info <n> [--json] | --terminate-session <n> [--force] | --attach <n> (not in this build)"
+       session host: rusttyterm --list-sessions [--json] | --new-session [--profile <name>] [--name <label>] [--cwd <dir>] [--cols <n>] [--rows <n>] [--detach] [--ephemeral] | --session-info <n> [--json] | --terminate-session <n> [--force] | --attach <n> [--read-only | --take-control]"
 }
 
 /// Attach to the calling console so a GUI-subsystem exe can print to
@@ -131,8 +137,8 @@ pub const fn usage() -> &'static str {
 pub fn attach_parent_console() {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Console::{
-        ATTACH_PARENT_PROCESS, AttachConsole, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE,
-        STD_OUTPUT_HANDLE, SetStdHandle,
+        ATTACH_PARENT_PROCESS, AttachConsole, CONSOLE_MODE, GetConsoleMode, GetStdHandle,
+        STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
     };
 
     // Safety: FFI boundary (NFR-401); all calls act on this process's
@@ -140,11 +146,13 @@ pub fn attach_parent_console() {
     let out = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }.unwrap_or(HANDLE::default());
     let err = unsafe { GetStdHandle(STD_ERROR_HANDLE) }.unwrap_or(HANDLE::default());
     // A redirected handle (file/pipe) is not a console: it fails
-    // GetConsoleMode. Those must survive the attach.
+    // GetConsoleMode. Those must survive the attach. (The out-param
+    // must be a real address: a null one access-violates in conhost.)
+    let mut m = CONSOLE_MODE(0);
     let out_redir =
-        !out.is_invalid() && unsafe { GetConsoleMode(out, std::ptr::null_mut()) }.is_err();
+        !out.is_invalid() && unsafe { GetConsoleMode(out, core::ptr::from_mut(&mut m)) }.is_err();
     let err_redir =
-        !err.is_invalid() && unsafe { GetConsoleMode(err, std::ptr::null_mut()) }.is_err();
+        !err.is_invalid() && unsafe { GetConsoleMode(err, core::ptr::from_mut(&mut m)) }.is_err();
     if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_ok() {
         if out_redir {
             unsafe { SetStdHandle(STD_OUTPUT_HANDLE, out) }.ok();
@@ -153,6 +161,18 @@ pub fn attach_parent_console() {
             unsafe { SetStdHandle(STD_ERROR_HANDLE, err) }.ok();
         }
     }
+}
+
+/// Detach this process from its console: a GUI launch under the console
+/// subsystem gets a window the subsystem allocates at startup; closing
+/// the console hides it (writes to the freed handles fail harmlessly).
+#[cfg(windows)]
+#[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
+pub fn free_console() {
+    use windows::Win32::System::Console::FreeConsole;
+
+    // Safety: FFI boundary (NFR-401); detaches this process from its console.
+    unsafe { FreeConsole() }.ok();
 }
 
 #[cfg(test)]

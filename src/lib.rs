@@ -11,6 +11,11 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod app;
+/// Console attach frontend (issue #47, docs/design-session-attach.md).
+/// Raw Win32 console FFI boundary (NFR-401).
+#[cfg(windows)]
+#[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
+pub mod attach;
 pub mod cli;
 pub mod color;
 /// Per-command metadata from OSC 133 transitions (SHELLINT-006/010/013-019,

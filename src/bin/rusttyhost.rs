@@ -105,7 +105,16 @@ fn serve_loop(
                         std::thread::Builder::new()
                             .stack_size(4 << 20)
                             .spawn(move || {
-                                client_thread(&thread_app, current);
+                                // Per-connection attach identity (issue #47).
+                                let token = rusttyterm::host::server::new_token();
+                                client_thread(&thread_app, current, token);
+                                // Release is idempotent: client_thread already
+                                // cleared this token before joining its pump.
+                                // Now drop the client count, then the ephemeral rule.
+                                rusttyterm::host::server::detach_token(&thread_app, token);
+                                state(&thread_app)
+                                    .clients
+                                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                 App::reap_ephemeral(&thread_app);
                             });
                     if spawned.is_err() {
@@ -188,7 +197,7 @@ fn bind(name: &str, security: &mut PipeSecurity) -> Result<ClientPipe, HostExit>
     let pipe = unsafe {
         let r = CreateNamedPipeW(
             PCWSTR(wide.as_ptr()),
-            PIPE_ACCESS_DUPLEX,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
             64 * 1024,
@@ -301,7 +310,7 @@ fn create_instance(name: &str, security: &mut PipeSecurity) -> io::Result<Client
     let client = unsafe {
         let r = CreateNamedPipeW(
             PCWSTR(wide.as_ptr()),
-            PIPE_ACCESS_DUPLEX,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
             64 * 1024,
@@ -318,12 +327,22 @@ fn create_instance(name: &str, security: &mut PipeSecurity) -> io::Result<Client
 }
 
 /// One client: framed requests in, framed responses out, until the pipe
-/// closes. Every request touches `last_activity` (idle-exit budget).
+/// closes. A second (pump) thread owns the write side of the handle so
+/// streaming frames (output/input/resize) from other connections can
+/// interleave safely. Every request touches `last_activity` (idle-exit
+/// budget).
 #[cfg(windows)]
-fn client_thread(app: &std::sync::Arc<std::sync::Mutex<App>>, client: ClientPipe) {
+fn client_thread(app: &std::sync::Arc<std::sync::Mutex<App>>, client: ClientPipe, token: u64) {
     use rusttyterm::host::MAX_REQUEST_BYTES;
-    use rusttyterm::host::server::handle;
+    use rusttyterm::host::server::{Conn, handle, new_pump};
 
+    // Single writer: every frame (responses + streams) goes out through
+    // the pump, preserving frame order. The read thread only reads.
+    let (wt, wr) = std::sync::mpsc::sync_channel(64);
+    let pump = match new_pump(client.raw(), std::sync::Arc::clone(app), token, wr) {
+        Ok(j) => j,
+        Err(_) => return,
+    };
     let mut pipe = PipeStream {
         handle: client.raw(),
         _owner: client,
@@ -335,12 +354,20 @@ fn client_thread(app: &std::sync::Arc<std::sync::Mutex<App>>, client: ClientPipe
                 *t = std::time::Instant::now();
             }
         }
-        let resp = handle(app, &req);
-        if rusttyterm::host::write_frame(&mut pipe, &resp).is_err() {
-            break;
+        let conn = Conn { token, tx: &wt };
+        let resp = handle(app, &req, &conn);
+        if wt.send(resp).is_err() {
+            break; // the pump ended: the write side is gone
         }
     }
-    // Dropping `pipe` closes the client handle.
+    // Dropping `pipe` closes the client handle. Release the attach
+    // BEFORE joining: the session's subscriptions hold sender clones,
+    // so the pump's `rx` can only go idle once detach_token clears
+    // them (join first would deadlock).
+    drop(pipe);
+    drop(wt);
+    rusttyterm::host::server::detach_token(app, token);
+    let _ = pump.join();
 }
 
 /// A named-pipe handle seen as a `Read + Write` stream.
@@ -411,23 +438,7 @@ impl io::Read for PipeStream {
 #[cfg(windows)]
 impl io::Write for PipeStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        use windows::Win32::Storage::FileSystem::WriteFile;
-
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        // Safety: synchronous write on a handle we own.
-        unsafe {
-            let mut done = 0u32;
-            WriteFile(
-                self.handle,
-                Some(buf),
-                Some(core::ptr::from_mut(&mut done)),
-                None,
-            )
-            .map_err(io_error)?;
-            Ok(usize::try_from(done).unwrap_or(0))
-        }
+        rusttyterm::host::overlapped_write(self.handle, buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {

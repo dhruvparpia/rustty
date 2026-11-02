@@ -798,6 +798,10 @@ pub struct Config {
     /// 0 disables the toasts.
     #[serde(rename = "command-notify-ms", default = "default_notify_ms")]
     pub command_notify_ms: u64,
+    /// Detach prefix for `rusttyterm --attach` (issue #47): `C-<char>`,
+    /// default `C-]` (Ctrl+]). `prefix d` detaches, `prefix ?` shows help.
+    #[serde(rename = "detach-prefix", default = "default_detach_prefix")]
+    pub detach_prefix: String,
     /// Profile used for the first tab.
     #[serde(rename = "starting-profile", default)]
     pub starting_profile: String,
@@ -840,6 +844,7 @@ impl Default for Config {
             session_restore: true,
             shell_integration: false,
             command_notify_ms: default_notify_ms(),
+            detach_prefix: default_detach_prefix(),
             starting_profile: String::new(),
             window: WindowConfig::default(),
             split: SplitConfig::default(),
@@ -871,6 +876,7 @@ impl PartialEq for Config {
             && self.session_restore == other.session_restore
             && self.shell_integration == other.shell_integration
             && self.command_notify_ms == other.command_notify_ms
+            && self.detach_prefix == other.detach_prefix
             && self.starting_profile == other.starting_profile
             && self.window == other.window
             && self.split == other.split
@@ -911,6 +917,11 @@ fn default_opacity() -> u8 {
 
 fn default_notify_ms() -> u64 {
     10_000
+}
+
+/// Default detach prefix for the attach frontend (issue #47): Ctrl+].
+fn default_detach_prefix() -> String {
+    "C-]".to_string()
 }
 
 fn validate_keybindings(map: &BTreeMap<String, String>) -> anyhow::Result<()> {
@@ -1031,6 +1042,11 @@ impl Config {
         if self.opacity == 0 || self.opacity > 100 {
             anyhow::bail!("opacity: must be between 1 and 100");
         }
+        // detach-prefix must decode to a control byte ("C-<ascii char>").
+        // The parser lives in the Windows-only attach frontend.
+        #[cfg(windows)]
+        crate::attach::parse_prefix(&self.detach_prefix)
+            .map_err(|e| anyhow::anyhow!("detach-prefix: {e}"))?;
         if self.split.padding > 1000 {
             anyhow::bail!("split.padding: must be at most 1000 pixels");
         }
