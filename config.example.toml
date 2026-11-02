@@ -34,10 +34,14 @@ font-size = 11
 # Line height as a multiple of the font's natural height, 0.5..4.0.
 line-height = 1.25
 
-# Ligature font features (OTF tags), comma separated.
+# Extra font features (OTF tags): "calt=0" or "calt 0" turns one off, a bare
+# comma list like "calt,liga" turns those on. These go after the ligatures
+# switch below, so they win.
 font-features = "calt,liga"
 
-# Turn font ligatures on or off (SPEC-006, FONT-011).
+# Turn font ligatures on or off (SPEC-006, FONT-010/011). Ligature text is
+# shaped as runs, which is slower to paint than the per-cell glyph cache the
+# terminal uses when this is false.
 ligatures = true
 
 # Rows of scrollback per tab, 0..1_000_000.

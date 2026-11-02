@@ -139,6 +139,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   UTF-16 surrogate pairs decode to astral characters; unpaired surrogates
   are dropped, so a partial string never sends garbage (no shell
   corruption).
+- Font ligatures (FONT-010/011, RENDER-033/034; v0.2 scope, landed in the
+  v0.4 parity sweep): ligature text
+  is shaped as whole runs through DirectWrite with `calt`/`liga`/`clig`
+  requested explicitly, so programming ligatures (`=>`, `!=`, `fi`, ...)
+  render. The per-cell glyph atlas cannot form a ligature, so it is bypassed
+  while ligatures are on; `ligatures = false` goes back to atlas blits with
+  the ligature features switched off. `font-features` now accepts `calt 0`,
+  `calt=0` and comma lists (`calt=0,liga=0`, `calt,liga`), and is applied
+  after the `ligatures` switch so a hand-written tag wins.
 
 ### Fixed
 

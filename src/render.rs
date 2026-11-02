@@ -147,18 +147,45 @@ fn font_feature_tag(tag: &str) -> Option<DWRITE_FONT_FEATURE_TAG> {
     ])))
 }
 
+/// Parse a font feature string into `(tag, enabled)` pairs (FONT-011).
+///
+/// Accepted forms: `tag value`, `tag=value`, and comma-separated lists, so
+/// `calt 0`, `calt=0`, `calt=0,liga=0` and a bare `calt,liga` (a list
+/// enables each tag) all work.
+fn parse_font_features(text: &str) -> Vec<(String, bool)> {
+    let normalized = text.replace(['=', ','], " ");
+    let mut tokens = normalized.split_whitespace().peekable();
+    let mut out = Vec::new();
+    while let Some(tag) = tokens.next() {
+        let value = tokens.peek().map(|word| word.to_ascii_lowercase());
+        let enabled = match value.as_deref() {
+            // A value word belongs to this tag; any other token starts the
+            // next feature, which is why a bare list enables everything.
+            Some(word) if is_feature_value(word) => {
+                tokens.next();
+                !matches!(word, "0" | "off" | "false" | "no")
+            }
+            _ => true,
+        };
+        out.push((tag.to_ascii_lowercase(), enabled));
+    }
+    out
+}
+
+fn is_feature_value(word: &str) -> bool {
+    matches!(
+        word,
+        "0" | "1" | "on" | "off" | "true" | "false" | "yes" | "no"
+    )
+}
+
 fn build_typography(
     dwrite: &IDWriteFactory,
     font: &FontConfig,
 ) -> anyhow::Result<Option<IDWriteTypography>> {
     let mut features: Vec<(DWRITE_FONT_FEATURE_TAG, u32)> = Vec::new();
-    let mut tokens = font.features.split_whitespace();
-    while let Some(tag) = tokens.next() {
-        let enabled = match tokens.next() {
-            Some(v) => matches!(v, "1" | "on" | "true" | "yes"),
-            None => true,
-        };
-        let Some(tag) = font_feature_tag(tag) else {
+    for (tag, enabled) in parse_font_features(&font.features) {
+        let Some(tag) = font_feature_tag(&tag) else {
             continue;
         };
         features.push((tag, u32::from(enabled)));
@@ -349,6 +376,9 @@ pub struct Renderer {
     atlas: Option<GlyphAtlas>,
     /// Atlas creation failed: stop retrying per frame and stop logging.
     atlas_failed: bool,
+    /// Ligatures on (FONT-010): the atlas is per-cell, so ligature text is
+    /// shaped as runs through DirectWrite instead, with no atlas at all.
+    ligatures: bool,
 }
 
 /// What the last painted frame looked like: enough to decide which rows a
@@ -511,6 +541,7 @@ impl Renderer {
             shape: (0, 0, 0),
             atlas: None,
             atlas_failed: false,
+            ligatures: font.ligatures,
         })
     }
 
@@ -566,6 +597,7 @@ impl Renderer {
         self.typography = build_typography(&self.dwrite, font)?;
         self.formats = formats;
         self.metrics = metrics;
+        self.ligatures = font.ligatures;
         self.atlas = None;
         Ok(())
     }
@@ -626,7 +658,12 @@ impl Renderer {
             return;
         }
         if let Some(typography) = self.typography.as_ref() {
-            let width = (rect.right - rect.left).max(1.0);
+            // One cell of slack in the layout width: shaping a run at the
+            // exact run width can wrap its last glyph to a second line, and
+            // the clip is one line tall.
+            // shortcut: the layout is built per run per frame; cache layouts
+            // by text+format if the shaped path ever misses the frame budget.
+            let width = (rect.right - rect.left).max(1.0) + self.metrics.cell_width;
             let height = (rect.bottom - rect.top).max(1.0);
             if let Ok(layout) =
                 unsafe { self.dwrite.CreateTextLayout(units, format, width, height) }
@@ -904,7 +941,15 @@ impl Renderer {
         // blits. `render_pending` runs *before* the target's `BeginDraw`:
         // the atlas is its own draw session.
         let max_cols = self.frame_cols(width);
-        let mut atlas = self.ensure_atlas().then(|| self.atlas.take()).flatten();
+        // FONT-010: an atlas tile is one cell, so a ligature can never form
+        // in it. With ligatures on, every run goes through the shaped
+        // `draw_units` path and no atlas is built.
+        // shortcut: all-or-nothing; upgrade to bypassing the atlas only for
+        // runs whose text can form a ligature if the shaped path ever misses
+        // the frame budget.
+        let mut atlas = (!self.ligatures && self.ensure_atlas())
+            .then(|| self.atlas.take())
+            .flatten();
         if let Some(atlas) = atlas.as_mut() {
             if let Some(tab) = app.active_tab() {
                 tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
@@ -1788,4 +1833,32 @@ fn format_index(attrs: CellAttribute) -> usize {
     let bold = usize::from(attrs.contains(CellAttribute::BOLD));
     let italic = usize::from(attrs.contains(CellAttribute::ITALIC));
     bold * 2 + italic
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_font_features;
+
+    #[test]
+    fn font_feature_strings_parse() {
+        let cases = [
+            ("", vec![]),
+            ("calt 0", vec![("calt", false)]),
+            ("calt=0", vec![("calt", false)]),
+            ("calt=0,liga=0", vec![("calt", false), ("liga", false)]),
+            // A bare comma list enables every tag it names.
+            ("calt,liga", vec![("calt", true), ("liga", true)]),
+            ("calt liga", vec![("calt", true), ("liga", true)]),
+            ("CALT OFF", vec![("calt", false)]),
+            (
+                "nonsense 1 calt on",
+                vec![("nonsense", true), ("calt", true)],
+            ),
+        ];
+        for (text, want) in cases {
+            let got = parse_font_features(text);
+            let pairs: Vec<(&str, bool)> = got.iter().map(|(t, e)| (t.as_str(), *e)).collect();
+            assert_eq!(pairs, want, "feature string {text:?}");
+        }
+    }
 }

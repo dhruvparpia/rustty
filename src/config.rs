@@ -187,6 +187,10 @@ pub struct FontConfig {
     pub line_height: f32,
     /// Font feature string (FONT-011, e.g. `"calt off"`).
     pub features: String,
+    /// Ligatures on (FONT-010/011). The renderer shapes runs through
+    /// DirectWrite while this is true; the per-cell glyph atlas cannot form a
+    /// ligature, so it is bypassed.
+    pub ligatures: bool,
 }
 
 impl Default for FontConfig {
@@ -196,6 +200,7 @@ impl Default for FontConfig {
             size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
             features: String::new(),
+            ligatures: true,
         }
     }
 }
@@ -208,6 +213,7 @@ impl PartialEq for FontConfig {
             && self.size.total_cmp(&other.size) == Ordering::Equal
             && self.line_height.total_cmp(&other.line_height) == Ordering::Equal
             && self.features == other.features
+            && self.ligatures == other.ligatures
     }
 }
 
@@ -438,6 +444,7 @@ impl ProfileConfig {
             size: self.font_size.unwrap_or(global.size),
             line_height: self.line_height.unwrap_or(global.line_height),
             features: global.features,
+            ligatures: global.ligatures,
         }
     }
 
@@ -880,14 +887,17 @@ fn validate_keybindings(map: &BTreeMap<String, String>) -> anyhow::Result<()> {
 }
 
 fn font_feature_string(ligatures: bool, features: &str) -> String {
-    let mut out = String::new();
-    if !ligatures {
-        out.push_str("calt 0 liga 0 clig 0 dlig 0");
-    }
+    // The ligature switches are sent explicitly: DirectWrite shaping then
+    // turns the font's ligature features on deterministically instead of
+    // relying on its defaults (FONT-010). `font-features` goes last, so a
+    // hand-written tag overrides the switch.
+    let mut out = String::from(if ligatures {
+        "calt 1 liga 1 clig 1"
+    } else {
+        "calt 0 liga 0 clig 0 dlig 0"
+    });
     if !features.trim().is_empty() {
-        if !out.is_empty() {
-            out.push(' ');
-        }
+        out.push(' ');
         out.push_str(features.trim());
     }
     out
@@ -911,6 +921,7 @@ impl Config {
             size: self.font_size,
             line_height: self.line_height,
             features: font_feature_string(self.ligatures, &self.font_features),
+            ligatures: self.ligatures,
         }
     }
 
@@ -1147,6 +1158,21 @@ background = \"#000000\"
         assert_eq!(font.family, "Courier New");
         assert_eq!(font.size, 9.5);
         assert_eq!(font.line_height, 1.1);
+    }
+
+    #[test]
+    fn ligatures_drive_the_feature_string() {
+        let on = Config::parse("").expect_result().font();
+        assert!(on.ligatures);
+        assert!(on.features.contains("calt 1"), "got {:?}", on.features);
+
+        let off = Config::parse("ligatures = false\n").expect_result().font();
+        assert!(!off.ligatures);
+        assert!(off.features.contains("calt 0"), "got {:?}", off.features);
+
+        // A hand-written tag goes last, so it overrides the switch.
+        let cfg = Config::parse("font-features = \"calt 0\"\n").expect_result();
+        assert!(cfg.font().features.ends_with("calt 0"));
     }
 
     #[test]
