@@ -68,6 +68,10 @@ const FONT_FAMILIES: [&str; 3] = ["Cascadia Mono", "Cascadia Code", "Consolas"];
 /// GHSA-25q6: brush cache bound; a full cache is dropped, not grown.
 const MAX_BRUSHES: usize = 1024;
 
+/// Issue #35: decoded kitty bitmap cache bound; a full cache is dropped,
+/// not grown (entries outlive their store when tabs close).
+const MAX_CACHED_IMAGES: usize = 64;
+
 /// Issue #18: without RETAIN_CONTENTS the swap chain drops the last frame,
 /// so a damaged-only repaint shows garbage. D2D1_PRESENT_OPTIONS_RETAIN_
 /// CONTENTS (0x2): windows-rs 0.62 exposes only NONE as a free constant.
@@ -468,9 +472,11 @@ pub struct Renderer {
     ligatures: bool,
     /// WIC factory: decodes kitty PNG/JPEG payloads (roadmap v0.5).
     wic: IWICImagingFactory,
-    /// Decoded kitty bitmaps: `(pane index, image id) → (store generation,
-    /// bitmap)`. Re-decoded when the pane's store generation changes.
-    image_cache: HashMap<(usize, u32), (u64, Option<ID2D1Bitmap>)>,
+    /// Decoded kitty bitmaps: `(store id, image id) → (store generation,
+    /// bitmap)`. The store id is process-unique (issue #35), so panes in
+    /// different tabs never share a key. Re-decoded when the store
+    /// generation changes.
+    image_cache: HashMap<(u64, u32), (u64, Option<ID2D1Bitmap>)>,
 }
 
 /// What the last painted frame looked like: enough to decide which rows a
@@ -1011,6 +1017,7 @@ impl Renderer {
         self.atlas = None;
         self.atlas_failed = false;
         self.brushes.clear();
+        self.image_cache.clear();
     }
 
     /// Grid size that fits the current client area (the tab bar strip is
@@ -1309,7 +1316,8 @@ impl Renderer {
                 }
                 // kitty graphics (roadmap v0.5): placements paint over this
                 // pane's text, clipped to its content box. Decoded bitmaps
-                // are cached per (pane, id) until the store generation moves.
+                // are cached per (store, id) until the store generation
+                // moves (issue #35: the store id is process-unique).
                 if pane.graphics().visible(grid).next().is_some() {
                     let dpi = self.dpi;
                     let Self {
@@ -1329,12 +1337,18 @@ impl Renderer {
                         let Some(img) = pane.graphics().image(p.id) else {
                             continue;
                         };
-                        let key = (idx, p.id);
+                        let key = (pane.graphics().store_id(), p.id);
                         if image_cache
                             .get(&key)
                             .is_none_or(|(g, _)| *g != img.generation)
                         {
                             let bmp = decode_kitty_image(wic, target, img);
+                            // GHSA-25q6 house style: a full cache is
+                            // dropped, not grown (closed tabs' stores leave
+                            // entries behind otherwise).
+                            if image_cache.len() >= MAX_CACHED_IMAGES {
+                                image_cache.clear();
+                            }
                             image_cache.insert(key, (img.generation, bmp));
                         }
                         let Some(bmp) = image_cache.get(&key).and_then(|(_, b)| b.as_ref()) else {
@@ -1411,6 +1425,7 @@ impl Renderer {
             self.atlas = None;
             self.atlas_failed = false;
             self.brushes.clear();
+            self.image_cache.clear();
             // Issue #27: D2DERR_RECREATE_TARGET means the target itself is
             // dead (driver reset, RDP transition); rebuild it. No other
             // HRESULT proves device loss, so none triggers a rebuild.

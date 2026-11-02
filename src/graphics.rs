@@ -6,34 +6,38 @@
 //! into a [`GraphicsAction`]. This module is pure Rust: it decodes the
 //! base64 payload and the header keys, nothing Windows-specific.
 //!
-//! Supported subset: transmit (`a=t`, chunked with `m=1/2`), placement
-//! (`a=p`), delete (`a=d`, all or by id), and queries (`a=I`/`a=Q`).
-//! PNG and JPEG payloads stay encoded (the renderer decodes them with WIC);
-//! `f=24`/`f=32` are raw RGB/RGBA pixels and need `w=`/`h=`.
+//! Supported subset: transmit (`a=t` load only, `a=T` transmit and display,
+//! chunked with `m=1`), placement (`a=p`), delete (`a=d`, all or by id), and
+//! queries (`a=I`/`a=Q`). PNG and JPEG payloads stay encoded (the renderer
+//! decodes them with WIC); `f=24`/`f=32` are raw RGB/RGBA pixels sized by
+//! `s=`/`v=` (source pixels; `w=`/`h=` take precedence when present).
 //!
 //! Out of scope (shortcut: nothing in the wild uses these from a Windows
 //! terminal; upgrade if a real app asks): compression (`z=i`/`z=o`),
-//! file storage (`t=f`), animation frames (`a=f`), cell cropping (`s=`/`v=`),
-//! unicode placeholders, and z-index layering (every placement draws above
-//! the text).
+//! file storage (`t=f`/`t=s`/`t=t`), animation frames (`a=f`), cropping a
+//! raw payload with `w=`/`h=` at an offset, unicode placeholders, and
+//! z-index layering (every placement draws above the text).
 
 /// One decoded kitty graphics command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphicsAction {
-    /// `a=t`: payload received, base64 already decoded.
+    /// `a=t` / `a=T`: payload received, base64 already decoded.
     Transmit {
         /// Image id (`0` = the pane assigns one).
         id: u32,
         /// `f=`: 100 PNG, 101 JPEG, 24 RGB, 32 RGBA.
         format: u32,
-        /// `w=`/`h=` in pixels (raw formats only).
+        /// `w=`/`s=` in pixels (raw formats only).
         width: u32,
-        /// `h=` in pixels (raw formats only).
+        /// `h=`/`v=` in pixels (raw formats only).
         height: u32,
         /// Decoded payload bytes for this chunk.
         data: Vec<u8>,
-        /// `m=1`: more chunks follow; `m=2`: complete, do not display.
+        /// `m=1`: more chunks follow.
         more: u8,
+        /// `a=T`: display at the cursor when the transmission completes
+        /// (`a=t` loads without placing, issue #31).
+        display: bool,
     },
     /// `a=p`: show an image at the cursor, cursor-relative.
     Place {
@@ -103,14 +107,37 @@ pub fn parse_kitty(payload: &[u8]) -> Option<GraphicsAction> {
     let mut action = String::new();
     let (mut id, mut format, mut more) = (0u32, 100u32, 0u8);
     let (mut width, mut height) = (0u32, 0u32);
+    let (mut src_w, mut src_v) = (0u32, 0u32);
     let (mut x, mut y, mut cols, mut rows) = (0i32, 0i32, 0u16, 0u16);
     let mut transient = false;
     let mut delete_all = false;
     for kv in meta.split(',') {
         let (key, value) = kv.split_once('=')?;
-        if key == "a" {
-            action = value.to_ascii_lowercase();
-            continue;
+        // Issue #29: values are typed by key, not "everything is a number".
+        match key {
+            "a" => {
+                action = value.to_string();
+                continue;
+            }
+            // The transmission medium is a letter (`t=d`: direct, the only
+            // one in the subset; issue #29). A number is the placement's
+            // transient flag (`t=1`), so try numeric first (issue #31).
+            "t" => {
+                match value.parse::<i64>() {
+                    Ok(n) => transient = n == 1,
+                    Err(_) if value.eq_ignore_ascii_case("d") => {}
+                    Err(_) => return None, // t=f/s/t: file media, out of scope
+                }
+                continue;
+            }
+            // `q` is a letter on `a=d` (a=all, i=by id, f=by frame) and a
+            // quiet level (number) on transmit; both parse here.
+            "q" => {
+                delete_all = value.eq_ignore_ascii_case("a");
+                continue;
+            }
+            "z" | "o" | "S" => continue, // z-index, placement mode, frame: out of scope
+            _ => {}
         }
         let number = value.parse::<i64>().ok()?;
         match key {
@@ -123,23 +150,29 @@ pub fn parse_kitty(payload: &[u8]) -> Option<GraphicsAction> {
             "y" => y = i32::try_from(number).ok()?,
             "c" => cols = u16::try_from(number).ok()?,
             "r" => rows = u16::try_from(number).ok()?,
-            "t" => transient = number == 1,
-            "z" => {} // shortcut: every placement draws above the text
-            "q" => delete_all = value.eq_ignore_ascii_case("a"),
-            "s" | "v" | "S" => {} // cropping: out of scope
+            // `s`/`v` are source pixel dimensions on transmit (issue #30)
+            // and cell occupancy on placement.
+            "s" => src_w = u32::try_from(number).ok()?,
+            "v" => src_v = u32::try_from(number).ok()?,
             _ => {}
         }
     }
     // The spec also allows numeric action codes (0=transmit, 1=put,
-    // 2=delete, 3/8=query, 9=image query).
-    let action = match action.as_str() {
-        "" | "0" | "t" => "t",
-        "1" | "p" => "p",
-        "2" | "d" => "d",
-        "3" | "8" | "i" => "I",
-        "9" | "q" => "Q",
+    // 2=delete, 3/8=query, 9=image query). Letter actions keep their case:
+    // `a=t` loads, `a=T` transmits and displays (issue #31).
+    let (action, display) = match action.as_str() {
+        "" | "0" | "t" => ("t", false),
+        "T" => ("t", true),
+        "1" | "p" => ("p", false),
+        "2" | "d" => ("d", false),
+        "3" | "8" | "i" | "I" => ("I", false),
+        "9" | "q" | "Q" => ("Q", false),
         _ => return None,
     };
+    // Raw size: `w=`/`h=` (crop region, cropped at offset 0) take
+    // precedence over `s=`/`v=` source dimensions (issue #30).
+    let width = if width == 0 { src_w } else { width };
+    let height = if height == 0 { src_v } else { height };
     Some(match action {
         "t" => GraphicsAction::Transmit {
             id,
@@ -148,13 +181,22 @@ pub fn parse_kitty(payload: &[u8]) -> Option<GraphicsAction> {
             height,
             data: base64_decode(data),
             more,
+            display,
         },
         "p" => GraphicsAction::Place {
             id,
             x,
             y,
-            cols,
-            rows,
+            cols: if cols == 0 {
+                u16::try_from(src_w).unwrap_or(u16::MAX)
+            } else {
+                cols
+            },
+            rows: if rows == 0 {
+                u16::try_from(src_v).unwrap_or(u16::MAX)
+            } else {
+                rows
+            },
             transient,
         },
         "d" => {
@@ -196,6 +238,7 @@ mod tests {
                 height: 0,
                 data: b"abc".to_vec(),
                 more: 0,
+                display: false,
             }
         );
     }
@@ -212,6 +255,100 @@ mod tests {
                 height: 0,
                 data: b"a".to_vec(),
                 more: 1,
+                display: false,
+            }
+        );
+    }
+
+    #[test]
+    fn standard_wire_forms_parse() {
+        // Issue #29: `t=d` is the direct transmission medium, not a number.
+        // (This is the standard 1x1 RGB pixel form from the protocol docs.)
+        let action = parse_kitty(b"a=T,t=d,f=24,s=1,v=1,i=7;AAAA").expect("t=d parses");
+        assert_eq!(
+            action,
+            GraphicsAction::Transmit {
+                id: 7,
+                format: 24,
+                width: 1,
+                height: 1,
+                data: vec![0, 0, 0],
+                more: 0,
+                display: true,
+            }
+        );
+        // Default medium (no `t=`) transmits as well.
+        assert!(parse_kitty(b"a=t,f=100;YQ").is_some());
+        // File/shared/temp media stay explicitly unsupported.
+        assert_eq!(parse_kitty(b"a=t,t=f,i=1;"), None, "t=f is out of scope");
+        assert_eq!(parse_kitty(b"a=t,t=s,i=1;"), None, "t=s is out of scope");
+        // `a=d,q=i,i=N` deletes by id; `q=a` deletes all (issue #31 asks
+        // for the case-sensitive actions to survive; q must not kill parse).
+        assert_eq!(
+            parse_kitty(b"a=d,q=i,i=4").expect("q=i parses"),
+            GraphicsAction::DeleteId(4)
+        );
+        assert_eq!(
+            parse_kitty(b"a=d,q=a").expect("q=a parses"),
+            GraphicsAction::DeleteAll
+        );
+        // Quiet level is a number on transmit.
+        assert!(parse_kitty(b"a=t,f=100,q=2;YQ").is_some());
+    }
+
+    #[test]
+    fn source_dimensions_size_raw_payloads() {
+        // Issue #30: `s=`/`v=` are source pixel dimensions; `w=`/`h=`
+        // (crop region) win when present.
+        let GraphicsAction::Transmit { width, height, .. } =
+            parse_kitty(b"a=T,f=24,s=2,v=1,i=7;AAAAAA==").expect("parses")
+        else {
+            panic!("transmit");
+        };
+        assert_eq!((width, height), (2, 1), "2x1 RGB = 6 bytes");
+        let GraphicsAction::Transmit { width, height, .. } =
+            parse_kitty(b"a=T,f=32,w=1,h=1,s=2,v=1,i=7;AAAA").expect("parses")
+        else {
+            panic!("transmit");
+        };
+        assert_eq!((width, height), (1, 1), "w/h take precedence");
+        // On placement, `s`/`v` are cell occupancy (issue #30 acceptance).
+        let GraphicsAction::Place { cols, rows, .. } =
+            parse_kitty(b"a=p,i=7,s=4,v=2").expect("parses")
+        else {
+            panic!("place");
+        };
+        assert_eq!((cols, rows), (4, 2));
+    }
+
+    #[test]
+    fn transmit_action_case_is_preserved() {
+        // Issue #31: `a=t` loads only, `a=T` transmits and displays.
+        let load = parse_kitty(b"a=t,f=100,i=7;YWJj").expect("parses");
+        let show = parse_kitty(b"a=T,f=100,i=7;YWJj").expect("parses");
+        assert_eq!(
+            load,
+            GraphicsAction::Transmit {
+                id: 7,
+                format: 100,
+                width: 0,
+                height: 0,
+                data: b"abc".to_vec(),
+                more: 0,
+                display: false,
+            }
+        );
+        assert_ne!(load, show, "a=t and a=T are distinct actions");
+        assert_eq!(
+            show,
+            GraphicsAction::Transmit {
+                id: 7,
+                format: 100,
+                width: 0,
+                height: 0,
+                data: b"abc".to_vec(),
+                more: 0,
+                display: true,
             }
         );
     }

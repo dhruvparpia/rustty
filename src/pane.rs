@@ -71,14 +71,43 @@ pub struct Placement {
     pub transient: bool,
 }
 
+/// Payload bytes plus the header the transmission started with. Issue
+/// #32: continuation frames carry only `m=1`, so format and dimensions
+/// must survive from the first frame until `m=0` finalizes the image.
+#[derive(Debug)]
+struct Chunk {
+    data: Vec<u8>,
+    format: u32,
+    width: u32,
+    height: u32,
+    display: bool,
+}
+
 /// The pane's kitty images and placements (roadmap v0.5).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ImageStore {
     images: std::collections::BTreeMap<u32, StoredImage>,
     placements: Vec<Placement>,
-    chunks: std::collections::BTreeMap<u32, Vec<u8>>,
+    chunks: std::collections::BTreeMap<u32, Chunk>,
     auto_id: u32,
     generation: u64,
+    /// Process-unique id (issue #35): the renderer's bitmap cache is keyed
+    /// by (store, image id), so two tabs' panes never share a key.
+    store_id: u64,
+}
+
+impl Default for ImageStore {
+    fn default() -> Self {
+        static NEXT_STORE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            images: std::collections::BTreeMap::new(),
+            placements: Vec::new(),
+            chunks: std::collections::BTreeMap::new(),
+            auto_id: 0,
+            generation: 0,
+            store_id: NEXT_STORE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 impl ImageStore {
@@ -99,13 +128,36 @@ impl ImageStore {
                 height,
                 data,
                 more,
+                display,
             } => {
-                let id = if id == 0 { self.next_id() } else { id };
+                // Auto ids: the first frame of a group assigns one; later
+                // frames (id=0) join the open group (issue #32).
+                // shortcut: the protocol assembles one group at a time; a
+                // single-frame id=0 command sent mid-chunk joins that chunk.
+                let id = if id != 0 {
+                    id
+                } else if let Some((&open, _)) = self.chunks.iter().next_back() {
+                    open
+                } else {
+                    self.next_id()
+                };
                 if more == 1 {
-                    self.chunks.entry(id).or_default().extend_from_slice(&data);
+                    let chunk = self.chunks.entry(id).or_insert(Chunk {
+                        data: Vec::new(),
+                        format,
+                        width,
+                        height,
+                        display,
+                    });
+                    chunk.data.extend_from_slice(&data);
                     return None;
                 }
-                let mut bytes = self.chunks.remove(&id).unwrap_or_default();
+                // `m=0` completes the transmission; metadata comes from the
+                // first frame (issue #32).
+                let (mut bytes, format, width, height, display) = match self.chunks.remove(&id) {
+                    Some(c) => (c.data, c.format, c.width, c.height, c.display),
+                    None => (Vec::new(), format, width, height, display),
+                };
                 bytes.extend_from_slice(&data);
                 let kind = match format {
                     24 => ImageKind::Rgb { width, height },
@@ -121,9 +173,9 @@ impl ImageStore {
                         generation: self.generation,
                     },
                 );
-                // A completed transmission displays at the cursor unless
-                // `m=2` (load only).
-                if more != 2 {
+                // Only `a=T` displays at the cursor; `a=t` loads and waits
+                // for an explicit `a=p` (issue #31).
+                if display {
                     self.placements.push(Placement {
                         id,
                         top_abs: Self::anchor(grid, cursor_row, 0),
@@ -194,6 +246,13 @@ impl ImageStore {
     #[must_use]
     pub const fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Process-unique store identity for the renderer's bitmap cache
+    /// (issue #35).
+    #[must_use]
+    pub const fn store_id(&self) -> u64 {
+        self.store_id
     }
 
     /// Drop transient placements that scrolled out of the viewport.
@@ -708,7 +767,7 @@ mod tests {
     #[test]
     fn kitty_transmit_stores_and_places_at_cursor() {
         let mut pane = Pane::with_size(10, 5, 20);
-        pane.feed(b"\x1b[2;4H\x1b_Ga=t,f=24,w=1,h=1;AA==\x1b\\");
+        pane.feed(b"\x1b[2;4H\x1b_Ga=T,t=d,f=24,s=1,v=1;AA==\x1b\\");
         let img = pane.graphics().image(1).expect("image stored");
         assert_eq!(img.data, vec![0]);
         assert_eq!(
@@ -725,25 +784,61 @@ mod tests {
     }
 
     #[test]
-    fn kitty_chunks_assemble_and_auto_ids_increment() {
+    fn kitty_load_only_waits_for_explicit_place() {
+        // Issue #31: `a=t` stores with no placement; `a=p` shows it.
         let mut pane = Pane::with_size(10, 5, 20);
-        pane.feed(b"\x1b_Ga=t,m=1,i=9;YQ\x1b\\");
-        assert!(pane.graphics().image(9).is_none(), "m=1 only buffers");
-        pane.feed(b"\x1b_Ga=t,m=0,i=9;Yg==\x1b\\");
-        assert_eq!(pane.graphics().image(9).expect("assembled").data, b"ab");
-        pane.feed(b"\x1b_Ga=t,m=2;AA==\x1b\\");
-        assert!(pane.graphics().image(1).is_some(), "auto id");
-        assert_eq!(
-            pane.graphics().placements().len(),
-            1,
-            "m=2 loads, no placement"
+        pane.feed(b"\x1b_Ga=t,f=24,w=1,h=1,i=5;AA==\x1b\\");
+        assert!(pane.graphics().image(5).is_some(), "a=t stores the image");
+        assert!(
+            pane.graphics().placements().is_empty(),
+            "a=t must not display"
         );
+        pane.feed(b"\x1b_Ga=p,i=5\x1b\\");
+        assert_eq!(pane.graphics().placements().len(), 1, "a=p displays it");
+    }
+
+    #[test]
+    fn kitty_chunks_carry_metadata_and_assemble() {
+        // Issue #32: continuation frames carry only `m=`; format and
+        // dimensions come from the first frame, placement from `a=T`.
+        // Issue #30: `s=`/`v=` size the raw payload.
+        let mut pane = Pane::with_size(10, 5, 20);
+        pane.feed(b"\x1b_Ga=T,t=d,f=24,s=2,v=1,i=9,m=1;AAA=\x1b\\");
+        assert!(pane.graphics().image(9).is_none(), "m=1 only buffers");
+        pane.feed(b"\x1b_Gm=1;AAA=\x1b\\"); // continuation: only m, per the spec
+        pane.feed(b"\x1b_Gm=0;AAA=\x1b\\");
+        let img = pane.graphics().image(9).expect("assembled");
+        assert_eq!(img.data, vec![0; 6], "2x1 RGB");
+        assert_eq!(
+            img.kind,
+            ImageKind::Rgb {
+                width: 2,
+                height: 1
+            },
+            "the final frame carries no f/s/v; the first frame's do"
+        );
+        assert_eq!(pane.graphics().placements().len(), 1, "a=T displays");
+    }
+
+    #[test]
+    fn kitty_auto_ids_increment_and_chunks_join_the_group() {
+        let mut pane = Pane::with_size(10, 5, 20);
+        pane.feed(b"\x1b_Ga=t,m=1;YQ==\x1b\\"); // id=0 first frame assigns 1
+        pane.feed(b"\x1b_Gm=0;Yg==\x1b\\"); // id=0 completion joins group 1
+        assert_eq!(
+            pane.graphics().image(1).expect("assembled").data,
+            b"ab",
+            "the id=0 continuation joined the id=0 group"
+        );
+        pane.feed(b"\x1b_Ga=t;AA==\x1b\\");
+        assert!(pane.graphics().image(2).is_some(), "next auto id");
     }
 
     #[test]
     fn kitty_delete_id_drops_image_and_placements() {
         let mut pane = Pane::with_size(10, 5, 20);
-        pane.feed(b"\x1b_Ga=t,i=3,f=24,w=1,h=1;AA==\x1b\\");
+        pane.feed(b"\x1b_Ga=T,i=3,f=24,w=1,h=1;AA==\x1b\\");
+        assert_eq!(pane.graphics().placements().len(), 1);
         pane.feed(b"\x1b_Ga=d,i=3\x1b\\");
         assert!(pane.graphics().image(3).is_none());
         assert!(pane.graphics().placements().is_empty());
@@ -774,6 +869,15 @@ mod tests {
     }
 
     #[test]
+    fn image_store_ids_are_process_unique() {
+        // Issue #35: the renderer's bitmap cache keys on (store_id, id);
+        // two panes (two tabs' first leaves) must never share a key.
+        let a = ImageStore::default();
+        let b = ImageStore::default();
+        assert_ne!(a.store_id(), b.store_id());
+    }
+
+    #[test]
     fn kitty_query_replies() {
         let mut store = ImageStore::default();
         let grid = Grid::with_size(10, 5, 0);
@@ -793,6 +897,7 @@ mod tests {
                 height: 0,
                 data: vec![1],
                 more: 0,
+                display: true,
             },
             0,
             0,

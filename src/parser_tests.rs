@@ -427,6 +427,7 @@ mod tests {
                 height: 0,
                 data: b"abc".to_vec(),
                 more: 0,
+                display: false,
             })),
             "APC transmit becomes a Graphics event"
         );
