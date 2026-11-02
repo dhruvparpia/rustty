@@ -32,13 +32,16 @@ use windows::Data::Xml::Dom::XmlDocument;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST,
-    MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
-    MonitorFromWindow, PAINTSTRUCT, ScreenToClient,
+    BeginPaint, ClientToScreen, EndPaint, GetMonitorInfoW, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
+    MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT, ScreenToClient,
 };
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetTickCount64;
+use windows::Win32::UI::Accessibility::{
+    IRawElementProviderSimple, UiaReturnRawElementProvider, UiaRootObjectId,
+};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
     SetProcessDpiAwarenessContext,
@@ -57,23 +60,23 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
     GetClientRect, GetCursorPos, GetForegroundWindow, GetMenu, GetMessageW, GetSubMenu,
-    GetWindowLongPtrW, GetWindowRect, HICON, HMENU, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM, IDYES,
-    IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, LoadCursorW, MB_DEFBUTTON2, MB_ICONASTERISK,
-    MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, PostMessageW,
-    PostQuitMessage, RegisterClassW, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, HICON, HMENU, HWND_TOPMOST, IDC_ARROW,
+    IDC_IBEAM, IDYES, IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, LoadCursorW, MB_DEFBUTTON2,
+    MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED,
+    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW,
+    PostMessageW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+    SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
     SetLayeredWindowAttributes, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
     ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_CHAR,
     WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
-    WM_IME_STARTCOMPOSITION, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN,
-    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
-    WS_POPUP, WS_VISIBLE,
+    WM_GETMINMAXINFO, WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
+    WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
-use windows::core::{PCWSTR, Result};
+use windows::core::{ComObject, PCWSTR, Result};
 
 use crate::app::{App, PaneClose};
 use crate::clipboard;
@@ -84,13 +87,16 @@ use crate::config::{
 use crate::keyboard::{self, Modifiers};
 use crate::pane::Pane;
 use crate::parser::{MouseProtocol, bracketed_paste_bytes, mouse_report_bytes};
-use crate::render::{CellMetrics, Renderer, dips_to_px, measure_cells, px_to_dips};
+use crate::render::{
+    CellMetrics, Renderer, SEARCH_BAR_HEIGHT, dips_to_px, measure_cells, px_to_dips,
+};
 use crate::search::SearchState;
 use crate::selection::{Pos, Selection};
 use crate::shell::SpawnOptions;
 use crate::split::{Dir, Rect, Side};
 use crate::tabbar::TAB_BAR_HEIGHT;
 use crate::theme::{self, Theme};
+use crate::uia::{DipRect, Provider};
 
 /// Window class name.
 const CLASS_NAME: &str = "rusttyterm";
@@ -1083,6 +1089,17 @@ unsafe extern "system" fn wnd_proc(
             }
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
+        }
+        // WIN-007 / UIA-001: hand UI Automation this window's root
+        // provider. Other object ids (the native menu's MSAA bridge) go
+        // to DefWindowProc.
+        WM_GETOBJECT if lparam.0 as i32 == UiaRootObjectId => {
+            match ComObject::from(Provider::new(hwnd)).cast::<IRawElementProviderSimple>() {
+                Ok(provider) => unsafe {
+                    UiaReturnRawElementProvider(hwnd, wparam, lparam, &provider)
+                },
+                Err(_) => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+            }
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
@@ -3244,6 +3261,146 @@ fn px_size(metrics: CellMetrics, cols: usize, rows: usize, bar_height: f32) -> (
     let w = (cols.max(1) as f32 * metrics.cell_width).ceil() as i32;
     let h = (rows.max(1) as f32 * metrics.cell_height + bar_height).ceil() as i32;
     (w.max(16), h.max(16))
+}
+
+/// Scrollback lines the UIA grid value exposes above the viewport
+/// (UIA-002: "recent scrollback text", best-effort cap).
+const UIA_SCROLLBACK_CONTEXT_LINES: usize = 500;
+
+/// UIA-001..005 (WIN-007): rebuild the snapshot the provider serves, from
+/// the live window state. Built fresh on every call — there is no cache to
+/// keep in sync with the frame. All rects are client DIPs, laid out
+/// exactly as the renderer paints them (the tab bar sits above the search
+/// strip when the strip is up, SEARCH-001).
+pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
+    let state = state_ref(hwnd)?;
+    let renderer = state.renderer.as_ref()?;
+    let (client_w, client_h) = renderer.client_dips();
+    let m = renderer.metrics();
+    let bar = state.bar_height();
+    let strip = if state.search.is_some() || state.renaming.is_some() {
+        SEARCH_BAR_HEIGHT.min(client_h.max(0.0))
+    } else {
+        0.0
+    };
+    let bar_top = if state.cfg.tab_bar.placement == TabBarPlacement::Bottom {
+        (client_h - bar - strip).max(0.0)
+    } else {
+        0.0
+    };
+    let mut snap = crate::uia::Snapshot {
+        title: String::new(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        tabs: Vec::new(),
+        active: state.app.active_index(),
+        bar_visible: bar > 0.0,
+        bar_bounds: (0.0, bar_top, client_w, bar_top + bar),
+        tab_bounds: Vec::new(),
+        client_w,
+        client_h,
+        dpi: renderer.dpi(),
+        grid_bounds: Vec::new(),
+        panes: Vec::new(),
+        focused_pane: 0,
+        search_bounds: None,
+        search_query: None,
+        search_matches: None,
+    };
+    let mut caption = [0u16; 512];
+    let n = usize::try_from(unsafe { GetWindowTextW(hwnd, &mut caption) }).unwrap_or(0);
+    snap.title = String::from_utf16_lossy(&caption[..n.min(caption.len())]);
+    for tab in state.app.tabs() {
+        let focused = tab.focused_index();
+        let mut cwd = None;
+        let mut idx = 0usize;
+        tab.for_each_pane_ref(&mut |pane: &Pane, _| {
+            if Some(idx) == focused {
+                cwd = pane.cwd().map(str::to_string);
+            }
+            idx += 1;
+        });
+        snap.tabs.push(crate::uia::TabInfo {
+            title: tab.title().to_string(),
+            profile: tab.profile().to_string(),
+            cwd,
+            activity: tab.bell_pending(),
+        });
+    }
+    snap.tab_bounds = renderer.tab_layout().tabs;
+    if let Some(tab) = state.app.active_tab() {
+        snap.focused_pane = tab.focused_index().unwrap_or(0);
+        tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
+            let grid = pane.grid();
+            let rows = grid.rows();
+            let viewport_top = grid.total_lines().saturating_sub(rows);
+            let mut screen_text = String::new();
+            for r in 0..rows {
+                if r > 0 {
+                    screen_text.push('\n');
+                }
+                if let Some(line) = grid.line_text(r) {
+                    screen_text.push_str(&line);
+                }
+            }
+            let start = viewport_top.saturating_sub(UIA_SCROLLBACK_CONTEXT_LINES);
+            let mut scrollback_text = String::new();
+            for l in start..viewport_top {
+                if !scrollback_text.is_empty() {
+                    scrollback_text.push('\n');
+                }
+                if let Some(line) = grid.line_text_abs(l) {
+                    scrollback_text.push_str(&line);
+                }
+            }
+            let cursor = if grid.scroll_offset() == 0 {
+                Some((pane.parser().cursor_row, pane.parser().cursor_col))
+            } else {
+                None
+            };
+            snap.grid_bounds.push((
+                renderer.grid_left() + rect.col as f32 * m.cell_width,
+                renderer.grid_top() + rect.row as f32 * m.cell_height,
+                renderer.grid_left() + (rect.col + rect.cols) as f32 * m.cell_width,
+                renderer.grid_top() + (rect.row + rect.rows) as f32 * m.cell_height,
+            ));
+            snap.panes.push(crate::uia::PaneInfo {
+                screen_text,
+                scrollback_text,
+                cursor,
+                scrollback_lines: viewport_top,
+                selection: pane.selection_text(),
+            });
+        });
+    }
+    if let Some(s) = &state.search {
+        snap.search_bounds = Some((0.0, (client_h - strip).max(0.0), client_w, client_h));
+        snap.search_query = Some(s.query.clone());
+        snap.search_matches = Some((s.current, s.matches.len()));
+    }
+    Some(snap)
+}
+
+/// UIA-002: the window rect in physical screen pixels plus the client
+/// origin, the pair that turns the snapshot's client DIPs into screen px.
+pub(crate) fn uia_geometry(hwnd: HWND) -> Option<(DipRect, (f32, f32))> {
+    state_ref(hwnd)?;
+    let mut win = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut win) }.is_err() {
+        return None;
+    }
+    let mut origin = POINT { x: 0, y: 0 };
+    if !unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool() {
+        return None;
+    }
+    Some((
+        (
+            win.left as f32,
+            win.top as f32,
+            win.right as f32,
+            win.bottom as f32,
+        ),
+        (origin.x as f32, origin.y as f32),
+    ))
 }
 
 /// Open the terminal window and run the message loop until the last tab

@@ -632,13 +632,32 @@ impl Renderer {
         self.pad_x
     }
 
+    /// Client-area size in DIPs (UIA-002 bounds building).
+    #[must_use]
+    pub fn client_dips(&self) -> (f32, f32) {
+        let px = unsafe { self.target.GetPixelSize() };
+        (
+            px_to_dips(px.width, self.dpi),
+            px_to_dips(px.height, self.dpi),
+        )
+    }
+
+    /// DPI scale the target renders at (UIA-002 bounds building).
+    #[must_use]
+    pub fn dpi(&self) -> f32 {
+        self.dpi
+    }
+
     /// Top padding above the grid, on top of the tab-bar strip (WINDOW-011).
     #[must_use]
     pub fn grid_pad_y(&self) -> f32 {
         self.pad_y
     }
 
-    fn grid_top(&self) -> f32 {
+    /// Y of the grid's top edge in client DIPs: below the tab-bar strip
+    /// when the bar is at the top (WINDOW-011, TAB-022).
+    #[must_use]
+    pub fn grid_top(&self) -> f32 {
         let bar = if self.tab_bar_placement == TabBarPlacement::Top {
             self.tab_bar_height
         } else {

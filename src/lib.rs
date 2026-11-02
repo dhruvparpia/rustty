@@ -73,6 +73,13 @@ pub mod split;
 pub mod render;
 pub mod tab;
 pub mod tabbar;
+// UIA-001..005 / WIN-007: the UI Automation COM provider is an FFI boundary.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "WIN-007: the UIA COM provider is a raw Win32 FFI boundary"
+)]
+pub mod uia;
 // THEME-010: reading the system dark/light setting is a Win32 registry call.
 #[allow(
     unsafe_code,
