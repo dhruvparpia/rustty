@@ -472,7 +472,7 @@ impl Default for Damage {
 }
 
 /// Last painted state of one pane: the row-damage inputs tracked per pane
-/// (grid size, cursor row, selection).
+/// (grid size, cursor cell, selection).
 #[derive(Debug, Default, Clone, Copy)]
 struct PaneDamage {
     /// Grid size the pane was painted at.
@@ -480,6 +480,8 @@ struct PaneDamage {
     grid_rows: usize,
     /// Row the cursor block was painted on (`usize::MAX` when not drawn).
     cursor_row: usize,
+    /// Column the cursor block was painted on (`usize::MAX` when not drawn).
+    cursor_col: usize,
     /// Mouse selection painted on this pane.
     selection: Option<Selection>,
     /// Kitty store generation painted on this pane: a change (add, delete,
@@ -1378,14 +1380,15 @@ impl Renderer {
                 }
             });
             let d = prev.get(idx).copied().unwrap_or_default();
-            // A moved block leaves a hole in the row it was painted on.
-            let cursor_row = cursor_cell(pane, grid).map(|(row, _)| row);
-            if cursor_row != Some(d.cursor_row) {
+            // A moved block leaves a hole wherever it was painted, including
+            // same-row moves (issue #14).
+            let cursor = cursor_cell(pane, grid).unwrap_or((usize::MAX, usize::MAX));
+            if cursor != (d.cursor_row, d.cursor_col) {
                 if d.cursor_row < rows {
                     self.mask[rect.row + d.cursor_row] = true;
                 }
-                if let Some(row) = cursor_row.filter(|r| *r < rows) {
-                    self.mask[rect.row + row] = true;
+                if cursor.0 < rows {
+                    self.mask[rect.row + cursor.0] = true;
                 }
             }
             // The overlay has to be cleared where it was and drawn where it is.
@@ -1424,10 +1427,13 @@ impl Renderer {
             snapshot.clear();
             tab.for_each_pane_ref(&mut |pane: &Pane, _| {
                 let grid = pane.grid();
+                let (cursor_row, cursor_col) =
+                    cursor_cell(pane, grid).unwrap_or((usize::MAX, usize::MAX));
                 snapshot.push(PaneDamage {
                     grid_cols: grid.cols(),
                     grid_rows: grid.rows(),
-                    cursor_row: cursor_cell(pane, grid).map_or(usize::MAX, |(row, _)| row),
+                    cursor_row,
+                    cursor_col,
                     selection: pane.selection(),
                     graphics_generation: pane.graphics().generation(),
                 });
@@ -2200,7 +2206,22 @@ fn format_index(attrs: CellAttribute) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_font_features;
+    use super::{Pane, cursor_cell, parse_font_features};
+
+    #[test]
+    fn cursor_move_without_text_moves_the_painted_cell() {
+        // Issue #14: damage compares the whole cursor cell, so a same-row
+        // CSI G move with no text reports a moved block (both rows repaint).
+        let mut pane = Pane::with_size(10, 3, 10);
+        pane.feed(b"abc");
+        let before = cursor_cell(&pane, pane.grid()).unwrap();
+        pane.grid_mut().clear_dirty_rows();
+        pane.feed(b"\x1b[5G");
+        let after = cursor_cell(&pane, pane.grid()).unwrap();
+        assert_eq!(before, (0, 3));
+        assert_eq!(after, (0, 4));
+        assert!(pane.grid().dirty_rows().is_empty());
+    }
 
     #[test]
     fn font_feature_strings_parse() {
