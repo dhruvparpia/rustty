@@ -22,7 +22,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_WINDOW_STATE_OCCLUDED,
     D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
 };
@@ -64,6 +64,9 @@ pub const SEARCH_BAR_HEIGHT: f32 = 24.0;
 /// first, Consolas last. The configured family (FONT-002) is tried before
 /// this chain.
 const FONT_FAMILIES: [&str; 3] = ["Cascadia Mono", "Cascadia Code", "Consolas"];
+
+/// GHSA-25q6: brush cache bound; a full cache is dropped, not grown.
+const MAX_BRUSHES: usize = 1024;
 
 /// Cell geometry derived from the font, in DIPs.
 #[derive(Debug, Clone, Copy)]
@@ -591,7 +594,11 @@ impl Renderer {
         let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
             hwnd,
             pixelSize: D2D_SIZE_U { width, height },
-            presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+            // Issue #18: without RETAIN_CONTENTS the swap chain drops
+            // the last frame, so a damaged-only repaint shows garbage.
+            // D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS (0x2): windows-rs 0.62 exposes
+            // only NONE as a free constant (issue #18).
+            presentOptions: D2D1_PRESENT_OPTIONS(0x2),
         };
         let target = unsafe { factory.CreateHwndRenderTarget(&props, &hwnd_props) }?;
         let wic: IWICImagingFactory =
@@ -2002,6 +2009,12 @@ impl Renderer {
     fn brush(&mut self, color: Color) -> Option<ID2D1SolidColorBrush> {
         if let Some(brush) = self.brushes.get(&color_key(color)) {
             return Some(brush.clone());
+        }
+        // GHSA-25q6: truecolor output can mint a new brush per glyph;
+        // drop history when the cache is full. Colors in current use are
+        // recreated immediately.
+        if self.brushes.len() >= MAX_BRUSHES {
+            self.brushes.clear();
         }
         let created = unsafe { self.target.CreateSolidColorBrush(&color_f(color), None) };
         match created {

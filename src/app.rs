@@ -114,10 +114,10 @@ impl App {
     /// Append a new tab (sized like the current one) and make it active;
     /// returns its index.
     pub fn add_tab(&mut self) -> usize {
-        let (cols, rows) = self
-            .active_tab()
-            .map_or((80, 24), |tab| (tab.cols(), tab.rows()));
-        self.tabs.push(Tab::with_size(cols, rows, 1000));
+        let (cols, rows, scrollback) = self.active_tab().map_or((80, 24, 1000), |tab| {
+            (tab.cols(), tab.rows(), tab.scrollback())
+        });
+        self.tabs.push(Tab::with_size(cols, rows, scrollback));
         self.active = self.tabs.len() - 1;
         self.active
     }
@@ -220,7 +220,12 @@ impl App {
         if self.tabs.is_empty() {
             return true;
         }
-        // Keep the selection on the tab that took the closed slot.
+        // Issue #19: closing an earlier tab shifts the selection left so
+        // it stays on the same tab; closing the active tab keeps the
+        // selection on the tab that took the slot (clamped below).
+        if idx < self.active {
+            self.active -= 1;
+        }
         self.active = self.active.min(self.tabs.len() - 1);
         false
     }

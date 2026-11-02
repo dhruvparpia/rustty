@@ -52,7 +52,8 @@ use windows::Win32::UI::Input::Ime::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, GetKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
-    ReleaseCapture, SetCapture, SetFocus, UnregisterHotKey, VK_CONTROL, VK_MENU, VK_SHIFT,
+    ReleaseCapture, SetCapture, SetFocus, UnregisterHotKey, VK_CONTROL, VK_LCONTROL, VK_LMENU,
+    VK_RMENU, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{SetCurrentProcessExplicitAppUserModelID, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -64,12 +65,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDC_IBEAM, IDYES, IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, LoadCursorW, MB_DEFBUTTON2,
     MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED,
     MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW,
-    PostMessageW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
-    SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
-    ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_CHAR,
-    WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION,
+    PostMessageW, PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_HIDE, SW_MAXIMIZE,
+    SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetMenu, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, SetWindowTextW, ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION,
     WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
@@ -177,9 +178,15 @@ fn wstr(s: &str) -> Vec<u16> {
 /// Ctrl/Alt/Shift state read from `GetKeyState`.
 fn read_mods() -> Modifiers {
     unsafe {
+        // Issue #24: AltGr is a right-Alt that many layouts use to type
+        // characters (|, @, \). Treat right-Alt as plain Alt only when
+        // left-Ctrl is not also down, which is how AltGr is signalled.
+        let lmenu = GetKeyState(VK_LMENU.0 as i32) < 0;
+        let rmenu = GetKeyState(VK_RMENU.0 as i32) < 0;
+        let lctrl = GetKeyState(VK_LCONTROL.0 as i32) < 0;
         Modifiers {
             ctrl: GetKeyState(VK_CONTROL.0 as i32) < 0,
-            alt: GetKeyState(VK_MENU.0 as i32) < 0,
+            alt: lmenu || (rmenu && !lctrl),
             shift: GetKeyState(VK_SHIFT.0 as i32) < 0,
         }
     }
@@ -657,6 +664,9 @@ struct WindowState {
     /// Saved window rect + styles while fullscreen (F11), `None` in
     /// windowed mode.
     fullscreen: Option<(RECT, isize, isize)>,
+    /// Issue #25: high half of a UTF-16 surrogate pair from `WM_CHAR`
+    /// (VK_PACKET/IME deliver non-BMP characters as two messages).
+    pending_surrogate: Option<u16>,
     /// Search overlay state (SEARCH-001..015); `None` when the overlay
     /// is closed. While active, keystrokes edit the query instead of
     /// reaching the shell.
@@ -878,9 +888,14 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_SIZE => {
-            let width = ((lparam.0 & 0xFFFF) as u16) as u32;
-            let height = (((lparam.0 >> 16) & 0xFFFF) as u16) as u32;
-            resize_window(hwnd, width, height);
+            // Minimizing sends a zero client rect; resizing the grid to a
+            // 1x1 render target would truncate retained lines (issue #16),
+            // so the last usable geometry stays in place while minimized.
+            if wparam.0 as u32 != SIZE_MINIMIZED {
+                let width = ((lparam.0 & 0xFFFF) as u16) as u32;
+                let height = (((lparam.0 >> 16) & 0xFFFF) as u16) as u32;
+                resize_window(hwnd, width, height);
+            }
             LRESULT(0)
         }
         WM_PAINT => {
@@ -1351,6 +1366,7 @@ fn create_quick_window() {
         drag_anchor: None,
         last_click: None,
         suppress_char: false,
+        pending_surrogate: None,
         fullscreen: None,
         search: None,
         profile: 0,
@@ -1627,6 +1643,19 @@ fn resize_window(hwnd: HWND, width_px: u32, height_px: u32) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
+/// Issue #9: an inactive tab keeps the geometry from when it was last
+/// shown; the window may have been resized since. Give the newly active
+/// tab the window's current client area.
+fn sync_active_tab_geometry(hwnd: HWND) {
+    let mut rect = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut rect) }.is_err() {
+        return;
+    }
+    let width = (rect.right - rect.left).max(0) as u32;
+    let height = (rect.bottom - rect.top).max(0) as u32;
+    resize_window(hwnd, width, height);
+}
+
 /// Tab-count change follow-up: re-apply the tab-bar visibility rule. The
 /// strip height carves grid area off the top, so when it changes the grid
 /// and the ConPTY must follow (TAB-010, `tab-bar = "auto"/"hidden"`).
@@ -1819,9 +1848,29 @@ fn take_suppressed_char(hwnd: HWND) -> bool {
 
 /// WM_CHAR/WM_SYSCHAR: text, Enter, Escape, Backspace, Ctrl-control.
 fn handle_char(hwnd: HWND, code: u32, sys: bool) {
-    let Some(ch) = char::from_u32(code) else {
-        return;
+    // Issue #25: VK_PACKET/IME deliver non-BMP characters as two WM_CHAR
+    // messages (high then low surrogate); pair them into one character.
+    let ch = match code {
+        0xD800..=0xDBFF => {
+            if let Some(s) = state_mut(hwnd) {
+                s.pending_surrogate = Some(code as u16);
+            }
+            return;
+        }
+        0xDC00..=0xDFFF => {
+            let hi = state_mut(hwnd).and_then(|s| s.pending_surrogate.take());
+            let Some(hi) = hi else { return };
+            let combined = 0x1_0000 + ((u32::from(hi) - 0xD800) << 10) + (code - 0xDC00);
+            char::from_u32(combined)
+        }
+        _ => {
+            if let Some(s) = state_mut(hwnd) {
+                s.pending_surrogate = None;
+            }
+            char::from_u32(code)
+        }
     };
+    let Some(ch) = ch else { return };
     // Renaming: typed text extends the tab title buffer (TAB-013).
     if let Some(s) = state_mut(hwnd)
         && let Some((_, buf)) = &mut s.renaming
@@ -1830,10 +1879,6 @@ fn handle_char(hwnd: HWND, code: u32, sys: bool) {
             buf.push(ch);
         }
         let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
-        return;
-    }
-    // VK_PACKET surrogates arrive as WM_CHAR; ignore unpaired halves.
-    if (0xD800..0xDC00).contains(&code) {
         return;
     }
     let mods = if sys {
@@ -2120,8 +2165,10 @@ fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     if let Some((idx, row, col)) = cell
         && proto != MouseProtocol::Off
     {
+        // Wheel-up (positive delta) is the wheel-up button code (64);
+        // wheel-down is 65. The 16-bit delta must be sign-extended.
         let bytes =
-            mouse_report_bytes(if delta < 0 { 64 } else { 65 }, col, row, false, sgr, urxvt);
+            mouse_report_bytes(if delta > 0 { 64 } else { 65 }, col, row, false, sgr, urxvt);
         if let Some(s) = state_mut(hwnd) {
             let _ = s.app.send_input_pane(idx, &bytes);
         }
@@ -2132,7 +2179,7 @@ fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         && let Some(mut pane) = s.app.active_tab_mut().and_then(|t| t.pane_at_mut(idx))
     {
         let grid = pane.grid_mut();
-        if delta < 0 {
+        if delta > 0 {
             grid.scroll_up(lines);
         } else {
             grid.scroll_down(lines);
@@ -2297,6 +2344,7 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
                 }
                 set_title(hwnd, &s.app);
             }
+            sync_active_tab_geometry(hwnd); // issue #9
             unsafe { SetCapture(hwnd) };
             let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             return;
@@ -2521,22 +2569,30 @@ fn set_cursor_for_position(wparam: WPARAM) {
 
 /// Ctrl+Shift+]/[: move the active tab by `delta` (wrapping).
 fn switch_tab_rel(hwnd: HWND, delta: i32) {
-    let Some(s) = state_mut(hwnd) else { return };
-    let n = s.app.tab_count();
-    if n < 2 {
-        return;
+    {
+        let Some(s) = state_mut(hwnd) else { return };
+        let n = s.app.tab_count();
+        if n < 2 {
+            return;
+        }
+        let idx = ((s.app.active_index() as i32 + delta).rem_euclid(n as i32)) as usize;
+        s.app.select_tab(idx);
     }
-    let idx = ((s.app.active_index() as i32 + delta).rem_euclid(n as i32)) as usize;
-    s.app.select_tab(idx);
-    set_title(hwnd, &s.app);
+    sync_active_tab_geometry(hwnd); // issue #9
+    if let Some(s) = state_ref(hwnd) {
+        set_title(hwnd, &s.app);
+    }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
 /// F11: toggle borderless fullscreen over the nearest monitor,
 /// restoring the saved window rect and styles on the second press.
 fn toggle_fullscreen(hwnd: HWND) {
-    let Some(s) = state_mut(hwnd) else { return };
-    if let Some((rect, style, exstyle)) = s.fullscreen.take() {
+    // GHSA-mw68: SetWindowPos dispatches WM_SIZE/WM_PAINT synchronously,
+    // which re-enters the window state. Take/return the slot around the
+    // calls; never hold the state borrow across them.
+    let saved = state_mut(hwnd).and_then(|s| s.fullscreen.take());
+    if let Some((rect, style, exstyle)) = saved {
         unsafe {
             SetWindowLongPtrW(hwnd, GWL_STYLE, style);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exstyle);
@@ -2554,7 +2610,7 @@ fn toggle_fullscreen(hwnd: HWND) {
         let mut rect = RECT::default();
         let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
         let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
-        unsafe {
+        let entered = unsafe {
             let _ = GetWindowRect(hwnd, &mut rect);
             let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
             let mut mi = MONITORINFO {
@@ -2574,9 +2630,14 @@ fn toggle_fullscreen(hwnd: HWND) {
                     area.bottom - area.top,
                     SWP_NOZORDER | SWP_FRAMECHANGED,
                 );
+                true
+            } else {
+                false
             }
+        };
+        if entered && let Some(s) = state_mut(hwnd) {
+            s.fullscreen = Some((rect, style, exstyle));
         }
-        s.fullscreen = Some((rect, style, exstyle));
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -3100,6 +3161,7 @@ fn close_tab(hwnd: HWND, idx: usize) {
         return;
     }
     sync_tab_bar(hwnd);
+    sync_active_tab_geometry(hwnd); // issue #9: the successor tab may predate a resize
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
@@ -3585,6 +3647,7 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         drag_anchor: None,
         last_click: None,
         suppress_char: false,
+        pending_surrogate: None,
         fullscreen: None,
         search: None,
         // CONFIG-013: `starting-profile` picks the initial shell.

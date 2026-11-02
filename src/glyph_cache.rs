@@ -161,6 +161,9 @@ pub struct GlyphAtlas {
     pending: Vec<Pending>,
     queued: HashSet<GlyphKey>,
     brushes: HashMap<u32, ID2D1SolidColorBrush>,
+    /// Tile cap used for the reserved containers (GHSA-25q6 bounds the
+    /// brush map against it).
+    capacity: usize,
     /// Reused UTF-16 buffer for the tile text (2 units: one scalar value).
     units: Vec<u16>,
     inserts: u64,
@@ -215,6 +218,7 @@ impl GlyphAtlas {
             pending: Vec::with_capacity(capacity),
             queued: HashSet::with_capacity(capacity),
             brushes: HashMap::with_capacity(capacity.saturating_mul(2)),
+            capacity,
             units: Vec::with_capacity(2),
             inserts: 0,
             evictions: 0,
@@ -370,6 +374,9 @@ impl GlyphAtlas {
         self.pending.clear();
         self.queued.clear();
         self.shelves.restart();
+        // GHSA-25q6: brushes follow the tiles they painted; eviction is
+        // the atlas' memory bound, so the brush map goes with it.
+        self.brushes.clear();
         self.evictions += 1;
     }
 
@@ -377,6 +384,11 @@ impl GlyphAtlas {
         let key = color_key(color);
         if let Some(brush) = self.brushes.get(&key) {
             return Some(brush.clone());
+        }
+        // GHSA-25q6: bound the map between evictions; truecolor output
+        // can mint a new brush per job.
+        if self.brushes.len() >= self.capacity.saturating_mul(2) {
+            self.brushes.clear();
         }
         match unsafe { self.rt.CreateSolidColorBrush(&color_f(color), None) } {
             Ok(brush) => {
