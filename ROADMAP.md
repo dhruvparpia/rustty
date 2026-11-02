@@ -121,7 +121,7 @@ integration stays explicit and opt-in, consistent with the existing spec.
 
 | Feature | First deliverables | Tracking |
 |---|---|---|
-| Persistent running sessions | Architecture spike, then detach/reattach and UI crash recovery; explicit close-view versus terminate-session behavior and bounded detached output | [#43](https://github.com/dhruvparpia/rusttyterm/issues/43) |
+| Persistent running sessions / console attach | `rusttyterm --attach <n>` connects from another console to the same live PTY; session discovery, headless creation, detach/reattach, GUI views, read-only watchers, explicit control transfer and bounded recovery | [#43](https://github.com/dhruvparpia/rusttyterm/issues/43), [attach design](docs/design-session-attach.md) |
 | Local automation API / CLI / MCP | Stable window/tab/pane/session IDs, versioned operations, structured lifecycle/completion events and streamed capture; MCP adapter over the same API | [#44](https://github.com/dhruvparpia/rusttyterm/issues/44) |
 
 Persistent sessions retain live processes; current session restore respawns them.
@@ -129,6 +129,25 @@ Resolve lifecycle/backpressure behavior before implementing persistence. Design
 stable IDs early; useful local automation over live windows can ship before a
 persistent-session host. Reuse the capability model in
 [`docs/design-plugins-mcp.md`](docs/design-plugins-mcp.md).
+
+The next major persistent-session milestone has five delivery slices:
+
+1. **Host and identity:** per-user session owner, durable IDs and stable numeric
+   aliases, versioned local IPC and headless session creation.
+2. **Console attach:** list sessions, `--attach <n>` inside the invoking console,
+   interactive input/resize and a local detach escape that restores the caller.
+3. **State continuity:** atomic screen/mode snapshot plus ordered updates; one
+   terminal-query reply owner, bounded history and output draining while detached.
+4. **Shared views:** attach the native GUI to the same session; read-only watchers,
+   explicit controller takeover and one authoritative terminal geometry.
+5. **Recovery:** reconnect/resynchronize, client-crash survival, clear host failure
+   and version-mismatch behavior, saturated-output shutdown and real Windows gates.
+
+The attach target is a managed PTY/pane, not a tab index or an arbitrary process
+ID. Persistent sessions preserve live processes while their host survives; reboot
+and host-process failure do not promise live-process restoration. Detailed CLI
+semantics, ownership rules and acceptance scenarios are in the
+[persistent-session/console-attach design](docs/design-session-attach.md).
 
 ## Performance budgets (all versions)
 
