@@ -51,6 +51,7 @@ pub mod portable;
 /// Terminal search over screen + scrollback (SPEC SEARCH-001..015).
 pub mod search;
 pub mod selection;
+pub mod session;
 pub mod shell;
 /// Pane tree for splits (SPEC SPLIT-001..015): pure Rust tree math.
 pub mod split;

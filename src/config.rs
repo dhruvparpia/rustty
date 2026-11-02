@@ -617,6 +617,10 @@ pub struct Config {
     /// How a BEL is announced: `silent`, `visual`, `audible`, `both`.
     #[serde(default)]
     pub bell: BellMode,
+    /// Save tabs, splits and the window frame on exit and restore them at
+    /// startup (TAB-026, WINDOW-015/016).
+    #[serde(rename = "session-restore", default = "default_true")]
+    pub session_restore: bool,
     /// Profile used for the first tab.
     #[serde(rename = "starting-profile", default)]
     pub starting_profile: String,
@@ -653,6 +657,7 @@ impl Default for Config {
             cursor_blink: true,
             copy_on_select: false,
             bell: BellMode::default(),
+            session_restore: true,
             starting_profile: String::new(),
             window: WindowConfig::default(),
             split: SplitConfig::default(),
@@ -680,6 +685,7 @@ impl PartialEq for Config {
             && self.cursor_shape == other.cursor_shape
             && self.cursor_blink == other.cursor_blink
             && self.copy_on_select == other.copy_on_select
+            && self.session_restore == other.session_restore
             && self.starting_profile == other.starting_profile
             && self.window == other.window
             && self.split == other.split

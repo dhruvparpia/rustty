@@ -99,6 +99,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   list — without restarting any shell. A config that no longer parses is reported
   on stderr and the running one is kept. `scrollback` and `starting-profile`
   only reach the next tab.
+- Session restore (TAB-026, WINDOW-015/016/017): the run's tabs, split
+  layouts, titles, focused panes and each pane's last OSC 7 directory are
+  written to `session.toml` beside `config.toml` on exit, and respawned at
+  startup — shells start in their saved directories (no reattach, per the
+  roadmap). The window position and size are saved too and re-applied when
+  they sit on a live monitor. Opt out with `session-restore = false`. A
+  session file that does not parse is reported and ignored.
+- Documented skip: per-pane Gaussian background blur (the "acrylic" style)
+  is not on the v0.2 roadmap; `opacity` (WINDOW-010) covers translucency.
 
 ### Fixed
 

@@ -17,7 +17,8 @@ use std::rc::Rc;
 use crate::pane::Pane;
 
 /// Split orientation: how the tab's area is cut between the two children.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Dir {
     /// Side-by-side children: the ratio splits the width.
     Vertical,
@@ -70,6 +71,11 @@ pub const MAX_RATIO: f32 = 0.9;
 pub const RATIO_STEP: f32 = 0.05;
 /// Ratio a new split starts at: the tab area is cut in half.
 pub const DEFAULT_RATIO: f32 = 0.5;
+
+/// serde default for a saved split ratio (session files).
+pub fn default_ratio_serde() -> f32 {
+    DEFAULT_RATIO
+}
 
 fn clamp_ratio(r: f32) -> f32 {
     r.clamp(MIN_RATIO, MAX_RATIO)
@@ -337,6 +343,81 @@ impl PaneTree {
             Node::VSplit { first, second, .. } | Node::HSplit { first, second, .. } => {
                 Self::count_node(first) + Self::count_node(second)
             }
+        }
+    }
+
+    /// Serializable shape of this tree with each leaf's OSC 7 cwd
+    /// (session save, TAB-026).
+    #[must_use]
+    pub fn shape(&self) -> crate::session::Shape {
+        fn go(n: &Node) -> crate::session::Shape {
+            match n {
+                Node::Leaf(p) => crate::session::Shape::Leaf {
+                    cwd: p.borrow().cwd().map(str::to_owned),
+                },
+                Node::VSplit {
+                    ratio,
+                    first,
+                    second,
+                } => crate::session::Shape::Split {
+                    dir: Dir::Vertical,
+                    ratio: *ratio,
+                    a: Box::new(go(first)),
+                    b: Box::new(go(second)),
+                },
+                Node::HSplit {
+                    ratio,
+                    first,
+                    second,
+                } => crate::session::Shape::Split {
+                    dir: Dir::Horizontal,
+                    ratio: *ratio,
+                    a: Box::new(go(first)),
+                    b: Box::new(go(second)),
+                },
+            }
+        }
+        go(&self.root)
+    }
+
+    /// Rebuild a tree from a saved shape (TAB-026). `make_leaf` creates
+    /// each leaf pane; nesting deeper than [`crate::session::MAX_DEPTH`]
+    /// collapses to a leaf (the file is hand-editable).
+    #[must_use]
+    pub fn from_shape(
+        shape: &crate::session::Shape,
+        make_leaf: &mut dyn FnMut(Option<&str>) -> Rc<RefCell<Pane>>,
+    ) -> Self {
+        fn go(
+            s: &crate::session::Shape,
+            depth: u32,
+            make_leaf: &mut dyn FnMut(Option<&str>) -> Rc<RefCell<Pane>>,
+        ) -> Node {
+            match s {
+                crate::session::Shape::Leaf { cwd } => Node::Leaf(make_leaf(cwd.as_deref())),
+                crate::session::Shape::Split { dir, ratio, a, b } if depth > 0 => {
+                    let first = Box::new(go(a, depth - 1, make_leaf));
+                    let second = Box::new(go(b, depth - 1, make_leaf));
+                    let ratio = clamp_ratio(*ratio);
+                    match dir {
+                        Dir::Vertical => Node::VSplit {
+                            ratio,
+                            first,
+                            second,
+                        },
+                        Dir::Horizontal => Node::HSplit {
+                            ratio,
+                            first,
+                            second,
+                        },
+                    }
+                }
+                // Over-deep split: keep one leaf from its first branch.
+                crate::session::Shape::Split { .. } => Node::Leaf(make_leaf(s.leaf_cwd())),
+            }
+        }
+        Self {
+            root: go(shape, crate::session::MAX_DEPTH, make_leaf),
         }
     }
 

@@ -406,6 +406,73 @@ impl Tab {
             None => Ok(()),
         }
     }
+
+    /// Rebuild a tab from a saved pane shape (TAB-026 session restore).
+    /// Panes start inactive; the caller spawns shells with
+    /// [`Tab::spawn_panes_at`].
+    #[must_use]
+    pub fn from_shape(
+        shape: &crate::session::Shape,
+        cols: usize,
+        rows: usize,
+        scrollback: usize,
+    ) -> Self {
+        let tree = PaneTree::from_shape(shape, &mut |_| {
+            Rc::new(RefCell::new(Pane::with_size(cols, rows, scrollback)))
+        });
+        let panes = tree.flatten();
+        let layout = tree.layout(cols, rows);
+        Self {
+            active: panes[0].clone(), // from_shape always leaves at least one leaf
+            tree,
+            panes,
+            layout,
+            cols,
+            rows,
+            scrollback,
+            title: String::from("New Tab"),
+            title_fixed: false,
+            profile: String::new(),
+            color: None,
+            confirm_close: true,
+        }
+    }
+
+    /// Serializable shape of this tab's pane tree with each pane's OSC 7
+    /// cwd (TAB-026 session save).
+    #[must_use]
+    pub fn shape(&self) -> crate::session::Shape {
+        self.tree.shape()
+    }
+
+    /// Start a shell in every pane that has none, overriding the working
+    /// directory with `cwds[i]` (flatten order) where present (TAB-026).
+    pub fn spawn_panes_at(
+        &mut self,
+        opts: &SpawnOptions,
+        cwds: &[Option<String>],
+    ) -> Result<(), ShellError> {
+        let mut first_error = None;
+        let mut idx = 0_usize;
+        self.for_each_pane(|pane, rect| {
+            if pane.shell().state() == ShellState::Inactive {
+                let mut opts = opts.clone();
+                opts.cols = rect.cols;
+                opts.rows = rect.rows;
+                if let Some(Some(cwd)) = cwds.get(idx) {
+                    opts.cwd = Some(cwd.clone());
+                }
+                if let Err(e) = pane.spawn_shell(&opts) {
+                    first_error.get_or_insert(e);
+                }
+            }
+            idx += 1;
+        });
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
 }
 
 impl Default for Tab {
@@ -557,5 +624,17 @@ mod tests {
         let mut states = Vec::new();
         tab.for_each_pane_ref(|p, _| states.push(p.shell().state()));
         assert_eq!(states, vec![ShellState::Inactive, ShellState::Inactive]);
+    }
+
+    #[test]
+    fn shape_round_trips_through_a_rebuilt_tab() {
+        let mut tab = Tab::with_size(80, 24, 100);
+        tab.split_active(Dir::Vertical).expect("split");
+        tab.split_active(Dir::Horizontal).expect("split");
+        let shape = tab.shape();
+        let rebuilt = Tab::from_shape(&shape, 80, 24, 100);
+        assert_eq!(rebuilt.pane_count(), 3);
+        assert_eq!(rebuilt.layout(), tab.layout());
+        assert_eq!(rebuilt.shape(), shape);
     }
 }

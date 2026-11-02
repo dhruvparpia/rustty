@@ -149,6 +149,34 @@ impl App {
         self.active
     }
 
+    /// Append a tab rebuilt from a saved pane shape and make it active;
+    /// returns its index (TAB-026 session restore). The caller sets the
+    /// title and spawns shells.
+    pub fn add_tab_shape(
+        &mut self,
+        shape: &crate::session::Shape,
+        cols: usize,
+        rows: usize,
+        scrollback: usize,
+        profile: impl Into<String>,
+        color: Option<Color>,
+    ) -> usize {
+        let mut tab = Tab::from_shape(shape, cols, rows, scrollback);
+        let profile = profile.into();
+        tab.set_profile(profile.clone());
+        tab.set_auto_title(profile);
+        tab.set_color(color);
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.active
+    }
+
+    /// Index of the active tab (0 when there are none) for session save.
+    #[must_use]
+    pub const fn active_tab_index(&self) -> usize {
+        self.active
+    }
+
     /// Move the active tab left/right (TAB-017).
     pub fn move_active_tab(&mut self, delta: isize) -> bool {
         if self.tabs.is_empty() {

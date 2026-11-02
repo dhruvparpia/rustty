@@ -30,8 +30,9 @@ use windows::Data::Xml::Dom::XmlDocument;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow, PAINTSTRUCT, ScreenToClient,
+    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT,
+    ScreenToClient,
 };
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -571,6 +572,9 @@ struct WindowState {
     spawn: SpawnOptions,
     font: FontConfig,
     tab_bar: TabBar,
+    /// TAB-026: session loaded at startup; consumed once the window exists
+    /// (tabs rebuilt, shells respawned), `None` afterwards.
+    restore: Option<crate::session::Session>,
     /// BELL-003/004: tabs whose bell is still flashing.
     bell_tabs: Vec<bool>,
     bell_flash: bool,
@@ -972,6 +976,14 @@ unsafe extern "system" fn wnd_proc(
                 // going away, so take ownership back and drop the app
                 // (which closes every shell).
                 let mut state = unsafe { Box::from_raw(ptr) };
+                // TAB-026/WINDOW-015/016: save while every shell is still
+                // live (fresh OSC 7 cwds); a failed save never blocks quit.
+                if state.cfg.session_restore {
+                    let session = snapshot_session(&state, hwnd);
+                    if let Err(e) = crate::session::save(&session) {
+                        eprintln!("rusttyterm: session save failed: {e}");
+                    }
+                }
                 state.app.close_all_shells();
             }
             unsafe { PostQuitMessage(0) };
@@ -1029,35 +1041,53 @@ fn init_window(hwnd: HWND) {
             None
         }
     };
+    let mut restored = false;
     if let Some(s) = state_mut(hwnd) {
         s.renderer = renderer;
         sync_chrome(s);
-        // The first tab belongs to the starting profile (CONFIG-013). Its
-        // theme and font (SHELL-019) apply before the grid is measured: a
-        // different font means a different grid.
-        let spec = active_profile(s);
-        apply_profile_theme(s, &spec);
-        apply_profile_font(s, &spec);
-        let (cols, rows) = s
-            .renderer
-            .as_ref()
-            .map_or((init_cols, init_rows), |r| r.grid_size());
-        let cols = cols.max(MIN_COLS);
-        let rows = rows.max(MIN_ROWS);
-        if let Some(tab) = s.app.active_tab_mut() {
-            tab.set_profile(spec.name.clone());
-            tab.set_auto_title(spec.name.clone());
-            tab.set_color(spec.color);
+        if s.restore.is_some() {
+            // TAB-026: rebuild saved tabs; shells spawn after the tab bar
+            // has taken its final height.
+            restore_tabs(s);
+            restored = true;
+        } else {
+            // The first tab belongs to the starting profile (CONFIG-013). Its
+            // theme and font (SHELL-019) apply before the grid is measured: a
+            // different font means a different grid.
+            let spec = active_profile(s);
+            apply_profile_theme(s, &spec);
+            apply_profile_font(s, &spec);
+            let (cols, rows) = s
+                .renderer
+                .as_ref()
+                .map_or((init_cols, init_rows), |r| r.grid_size());
+            let cols = cols.max(MIN_COLS);
+            let rows = rows.max(MIN_ROWS);
+            if let Some(tab) = s.app.active_tab_mut() {
+                tab.set_profile(spec.name.clone());
+                tab.set_auto_title(spec.name.clone());
+                tab.set_color(spec.color);
+            }
+            // Spawn first, then resize: a resize must reach a live ConPTY, and
+            // the shell must start at the window's real grid size (NFR-216:
+            // these failures are logged, never fatal).
+            if let Err(e) = s.app.spawn_active(&spec_opts(&spec, cols, rows)) {
+                eprintln!("rusttyterm: shell spawn failed: {e}");
+            }
+            if let Err(e) = s.app.resize_active(cols, rows) {
+                eprintln!("rusttyterm: initial resize failed: {e}");
+            }
         }
-        // Spawn first, then resize: a resize must reach a live ConPTY, and
-        // the shell must start at the window's real grid size (NFR-216:
-        // these failures are logged, never fatal).
-        if let Err(e) = s.app.spawn_active(&spec_opts(&spec, cols, rows)) {
-            eprintln!("rusttyterm: shell spawn failed: {e}");
+    }
+    if restored {
+        // The bar height follows the restored tab count (TAB-010 "auto");
+        // grid and every tab must follow before shells spawn.
+        sync_tab_bar(hwnd);
+        if let Some(s) = state_mut(hwnd) {
+            spawn_restored(s);
         }
-        if let Err(e) = s.app.resize_active(cols, rows) {
-            eprintln!("rusttyterm: initial resize failed: {e}");
-        }
+    }
+    if let Some(s) = state_mut(hwnd) {
         s.timer_id = unsafe { SetTimer(Some(hwnd), POLL_TIMER, POLL_MS, Some(poll_timer)) };
         if s.cfg.cursor_blink {
             // CONFIG-009: blink the focused cursor.
@@ -1084,6 +1114,136 @@ fn apply_opacity(hwnd: HWND) {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED.0 as isize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
+    }
+}
+
+/// The profile a saved tab names, falling back to the starting profile
+/// when the config no longer has it (TAB-026).
+fn profile_spec_named(s: &WindowState, name: &str) -> ProfileSpec {
+    s.profiles
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name))
+        .cloned()
+        .unwrap_or_else(|| active_profile(s))
+}
+
+/// TAB-026: rebuild the saved tabs (panes, titles, focus, profile chrome).
+/// Shells spawn later in [`spawn_restored`], once the tab bar has taken
+/// its final height. The placeholder tab created at startup is dropped.
+fn restore_tabs(s: &mut WindowState) {
+    let Some(session) = s.restore.as_ref() else {
+        return;
+    };
+    let _ = s.app.close_tab(0);
+    for st in &session.tabs {
+        let spec = profile_spec_named(s, &st.profile);
+        let scrollback = spec.scrollback.unwrap_or(s.cfg.scrollback);
+        let (cols, rows) = s
+            .renderer
+            .as_ref()
+            .map_or((s.spawn.cols, s.spawn.rows), |r| r.grid_size());
+        let idx = s.app.add_tab_shape(
+            &st.shape,
+            cols.max(MIN_COLS),
+            rows.max(MIN_ROWS),
+            scrollback,
+            spec.name.clone(),
+            spec.color,
+        );
+        if let Some(tab) = s.app.tab_at_mut(idx) {
+            tab.set_confirm(spec.confirm_close);
+            if !st.title.is_empty() {
+                if st.title_fixed {
+                    tab.set_title(st.title.clone());
+                } else {
+                    tab.set_auto_title(st.title.clone());
+                }
+            }
+            let _ = tab.focus_index(st.focused_pane);
+        }
+    }
+    // One renderer serves the window, so theme and font follow the
+    // focused tab's profile (SHELL-019).
+    let focused = session.focused_tab.min(s.app.tab_count().saturating_sub(1));
+    s.app.select_tab(focused);
+    let name = s
+        .app
+        .active_tab()
+        .map(|t| t.profile().to_owned())
+        .unwrap_or_default();
+    let spec = profile_spec_named(s, &name);
+    s.profile = s
+        .profiles
+        .iter()
+        .position(|p| p.name == spec.name)
+        .unwrap_or(0);
+    apply_profile_theme(s, &spec);
+    apply_profile_font(s, &spec);
+}
+
+/// TAB-026: resize every restored tab to the current grid and respawn
+/// each pane's shell in its saved directory. Consumes the session.
+fn spawn_restored(s: &mut WindowState) {
+    let Some(session) = s.restore.take() else {
+        return;
+    };
+    let (cols, rows) = s
+        .renderer
+        .as_ref()
+        .map_or((s.spawn.cols, s.spawn.rows), |r| r.grid_size());
+    let (cols, rows) = (cols.max(MIN_COLS), rows.max(MIN_ROWS));
+    if let Err(e) = s.app.resize_all_tabs(cols, rows) {
+        eprintln!("rusttyterm: restored tab resize failed: {e}");
+    }
+    for (i, st) in session.tabs.iter().enumerate() {
+        let spec = profile_spec_named(s, &st.profile);
+        let mut cwds = Vec::new();
+        st.shape.leaf_cwds(&mut cwds);
+        let opts = spec_opts(&spec, cols, rows);
+        if let Some(tab) = s.app.tab_at_mut(i)
+            && let Err(e) = tab.spawn_panes_at(&opts, &cwds)
+        {
+            eprintln!("rusttyterm: shell spawn failed: {e}");
+        }
+    }
+}
+
+/// TAB-026/WINDOW-015/016: snapshot the run for `session.toml`. The
+/// window rect is skipped in fullscreen (the fullscreen rect is not a
+/// windowed geometry to come back to).
+fn snapshot_session(s: &WindowState, hwnd: HWND) -> crate::session::Session {
+    let tabs = s
+        .app
+        .tabs()
+        .iter()
+        .map(|t| crate::session::SessionTab {
+            profile: t.profile().to_owned(),
+            title: t.title().to_owned(),
+            title_fixed: t.title_is_fixed(),
+            focused_pane: t.focused_index().unwrap_or(0),
+            shape: t.shape(),
+        })
+        .collect();
+    let mut rc = RECT::default();
+    let window = if s.fullscreen.is_some() {
+        None
+    } else if unsafe { GetWindowRect(hwnd, &mut rc) }.is_ok()
+        && rc.right > rc.left
+        && rc.bottom > rc.top
+    {
+        Some(crate::session::WindowRect {
+            x: rc.left,
+            y: rc.top,
+            w: rc.right - rc.left,
+            h: rc.bottom - rc.top,
+        })
+    } else {
+        None
+    };
+    crate::session::Session {
+        tabs,
+        focused_tab: s.app.active_tab_index(),
+        window,
     }
 }
 
@@ -2689,7 +2849,35 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
     let style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
     unsafe { AdjustWindowRect(&mut rect, style, false) }?;
 
+    // TAB-026/WINDOW-015/016: the saved session restores tabs at
+    // `init_window` and the window frame here. A saved position only
+    // applies when its top-left point is on a live monitor (a
+    // disconnected screen must not park the window off-screen).
+    let session = if cfg.session_restore {
+        crate::session::load()
+    } else {
+        None
+    };
+    let (x, y, width, height) = session
+        .as_ref()
+        .and_then(|se| se.window)
+        .filter(|wr| wr.w >= 200 && wr.h >= 100)
+        .filter(|wr| {
+            !unsafe { MonitorFromPoint(POINT { x: wr.x, y: wr.y }, MONITOR_DEFAULTTONULL) }
+                .is_invalid()
+        })
+        .map_or(
+            (
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+            ),
+            |wr| (wr.x, wr.y, wr.w, wr.h),
+        );
+
     let state = Box::new(WindowState {
+        restore: session,
         app: {
             let mut app = App::with_size(cols, rows, cfg.scrollback);
             // TAB-025: tab titles fall back to the pane's OSC 7 cwd.
@@ -2756,10 +2944,10 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
             style,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
+            x,
+            y,
+            width,
+            height,
             None,
             None,
             Some(hinstance.into()),

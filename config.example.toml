@@ -65,6 +65,11 @@ copy-on-select = true
 # background also raises a Windows toast (BELL-005).
 bell = "audible"
 
+# Reopen the previous run's tabs, splits and window position at startup
+# (TAB-026, WINDOW-015/016). Shells respawn in each pane's last reported
+# directory; the file is `session.toml` beside `config.toml`.
+session-restore = true
+
 # ---------------------------------------------------------------------------
 # Theme (CONFIG-002/003, THEME-009/013/014)
 # ---------------------------------------------------------------------------
