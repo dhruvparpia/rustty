@@ -53,6 +53,8 @@ pub enum Node {
     Grid(usize),
     /// The search overlay strip.
     Search,
+    /// The command palette overlay (issue #39).
+    Palette,
 }
 
 /// Runtime id for `node` (unique per node; UIA appends `UiaAppendRuntimeId`).
@@ -64,6 +66,7 @@ pub fn runtime_id(node: Node) -> Vec<i32> {
         Node::Tab(i) => vec![1, 2, i as i32],
         Node::Grid(i) => vec![1, 3, i as i32],
         Node::Search => vec![1, 4],
+        Node::Palette => vec![1, 5],
     }
 }
 
@@ -137,6 +140,12 @@ pub struct Snapshot {
     pub search_query: Option<String>,
     /// `(current match, match count)` while the overlay is open.
     pub search_matches: Option<(usize, usize)>,
+    /// Command palette overlay bounds, `None` while closed (issue #39).
+    pub palette_bounds: Option<DipRect>,
+    /// Command palette query, `None` while closed.
+    pub palette_query: Option<String>,
+    /// `(selected row, hit count)` while the palette is open.
+    pub palette_matches: Option<(usize, usize)>,
 }
 
 /// UIA children of `node`, in tree order (tab bar, then panes, then
@@ -153,10 +162,13 @@ pub fn children_of(node: Node, s: &Snapshot) -> Vec<Node> {
             if s.search_bounds.is_some() {
                 v.push(Node::Search);
             }
+            if s.palette_bounds.is_some() {
+                v.push(Node::Palette);
+            }
             v
         }
         Node::TabBar => (0..s.tabs.len()).map(Node::Tab).collect(),
-        Node::Tab(_) | Node::Grid(_) | Node::Search => Vec::new(),
+        Node::Tab(_) | Node::Grid(_) | Node::Search | Node::Palette => Vec::new(),
     }
 }
 
@@ -165,7 +177,7 @@ pub fn children_of(node: Node, s: &Snapshot) -> Vec<Node> {
 pub fn parent_of(node: Node) -> Option<Node> {
     match node {
         Node::Root => None,
-        Node::TabBar | Node::Grid(_) | Node::Search => Some(Node::Root),
+        Node::TabBar | Node::Grid(_) | Node::Search | Node::Palette => Some(Node::Root),
         Node::Tab(_) => Some(Node::TabBar),
     }
 }
@@ -246,6 +258,11 @@ pub fn hit_test(s: &Snapshot, origin: (f32, f32), x: f32, y: f32) -> Node {
     {
         return Node::Search;
     }
+    if let Some(rect) = s.palette_bounds
+        && contains_px(rect, origin, s.dpi, x, y)
+    {
+        return Node::Palette;
+    }
     Node::Root
 }
 
@@ -269,6 +286,7 @@ pub fn bounds_px(node: Node, s: &Snapshot, win: DipRect, origin: (f32, f32)) -> 
             .copied()
             .unwrap_or((0.0, 0.0, 0.0, 0.0)),
         Node::Search => s.search_bounds.unwrap_or((0.0, 0.0, 0.0, 0.0)),
+        Node::Palette => s.palette_bounds.unwrap_or((0.0, 0.0, 0.0, 0.0)),
     };
     let sc = s.dpi / 96.0;
     (
@@ -286,6 +304,7 @@ fn control_type(node: Node) -> i32 {
         Node::Tab(_) => UIA_TabItemControlTypeId.0,
         Node::Grid(_) => UIA_DocumentControlTypeId.0,
         Node::Search => UIA_EditControlTypeId.0,
+        Node::Palette => UIA_EditControlTypeId.0,
     }
 }
 
@@ -409,6 +428,24 @@ pub fn props(node: Node, s: &Snapshot) -> Vec<(i32, VARIANT)> {
             add(
                 P_HELP_TEXT,
                 VARIANT::from("Enter to search, F3 next, Shift+F3 previous, Esc close"),
+            );
+        }
+        Node::Palette => {
+            add(P_CONTROL_TYPE, VARIANT::from(control_type(node)));
+            add(P_NAME, VARIANT::from("Command palette"));
+            add(P_IS_CONTROL, VARIANT::from(true));
+            add(P_IS_CONTENT, VARIANT::from(true));
+            add(P_IS_KEYBOARD_FOCUSABLE, VARIANT::from(true));
+            add(P_IS_OFFSCREEN, VARIANT::from(false));
+            let query = s.palette_query.clone().unwrap_or_default();
+            let (cur, total) = s.palette_matches.unwrap_or((0, 0));
+            let shown = if total == 0 { 0 } else { cur + 1 };
+            let value = format!("Palette: {query}  {shown} of {total}");
+            add(P_VALUE, VARIANT::from(value.as_str()));
+            add(P_LEGACY_VALUE, VARIANT::from(value.as_str()));
+            add(
+                P_HELP_TEXT,
+                VARIANT::from("Type to filter, Up/Down to select, Enter to run, Esc close"),
             );
         }
     }
@@ -599,6 +636,9 @@ mod tests {
             search_bounds: Some((0.0, 376.0, 500.0, 400.0)),
             search_query: Some("top".into()),
             search_matches: Some((0, 2)),
+            palette_bounds: None,
+            palette_query: None,
+            palette_matches: None,
         }
     }
 
@@ -836,6 +876,22 @@ mod tests {
         assert_eq!(vstr(get(&p, P_NAME)), "Search");
         assert_eq!(vstr(get(&p, P_VALUE)), "Search: top  1 of 2");
         assert_eq!(vi32(get(&p, P_CONTROL_TYPE)), UIA_EditControlTypeId.0);
+    }
+
+    #[test]
+    fn props_palette() {
+        let mut s = snap();
+        s.palette_bounds = Some((0.0, 340.0, 500.0, 400.0));
+        s.palette_query = Some("pa".into());
+        s.palette_matches = Some((1, 7));
+        let p = props(Node::Palette, &s);
+        assert_eq!(vstr(get(&p, P_NAME)), "Command palette");
+        assert_eq!(vstr(get(&p, P_VALUE)), "Palette: pa  2 of 7");
+        assert_eq!(vi32(get(&p, P_CONTROL_TYPE)), UIA_EditControlTypeId.0);
+        // The open palette joins the root's children after the search strip.
+        assert_eq!(children_of(Node::Root, &s).last(), Some(&Node::Palette));
+        assert_eq!(parent_of(Node::Palette), Some(Node::Root));
+        assert_eq!(runtime_id(Node::Palette), vec![1, 5]);
     }
 
     #[test]

@@ -90,10 +90,12 @@ use crate::config::{
     self, Config, FontConfig, KeyAction, QuickEdge, QuickTerminalConfig, TabBar, TabBarPlacement,
 };
 use crate::keyboard::{self, Modifiers};
+use crate::palette::{Command, PaletteItem, PaletteState, builtin_shortcut, display_shortcut};
 use crate::pane::Pane;
 use crate::parser::{MouseProtocol, bracketed_paste_bytes, mouse_report_bytes};
 use crate::render::{
-    CellMetrics, Renderer, SEARCH_BAR_HEIGHT, dips_to_px, measure_cells, px_to_dips,
+    CellMetrics, Renderer, SEARCH_BAR_HEIGHT, dips_to_px, measure_cells, palette_row_height,
+    px_to_dips,
 };
 use crate::search::SearchState;
 use crate::selection::{Pos, Selection};
@@ -182,6 +184,8 @@ const MENU_PROFILE_BASE: usize = 0xF100;
 const MENU_WS_SAVE_AS: usize = 0xE851;
 const MENU_WS_OVERWRITE: usize = 0xE852;
 const MENU_WS_RENAME: usize = 0xE853;
+/// Command palette (issue #39).
+const MENU_PALETTE: usize = 0xE854;
 /// Workspaces submenu: "Open <name>" items (WORKSPACE-003), one per
 /// template, capped by the store's own 64-template limit.
 const MENU_WS_OPEN_BASE: usize = 0xF200;
@@ -323,6 +327,7 @@ fn build_menu(profiles: &[ProfileSpec], theme_names: &[String]) -> Result<HMENU>
         append_menu_item(view, "Previous Command\tCtrl+Shift+Up", MENU_PREV_COMMAND)?;
         append_menu_item(view, "Next Command\tCtrl+Shift+Down", MENU_NEXT_COMMAND)?;
         append_menu_item(view, "&Copy Last Command Output", MENU_COPY_LAST_CMD)?;
+        append_menu_item(view, "Command &Palette\tCtrl+Shift+P", MENU_PALETTE)?;
         append_menu_separator(view)?;
         append_menu_item(view, "Split &Right\tCtrl+Shift+Enter", MENU_SPLIT_RIGHT)?;
         append_menu_item(view, "Split Be&low\tCtrl+Shift+-", MENU_SPLIT_DOWN)?;
@@ -595,6 +600,7 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         MENU_SPLIT_RIGHT => split_pane(hwnd, Dir::Vertical),
         MENU_SPLIT_DOWN => split_pane(hwnd, Dir::Horizontal),
         MENU_SEARCH => toggle_search(hwnd),
+        MENU_PALETTE => toggle_palette(hwnd),
         MENU_PREV_COMMAND => command_jump(hwnd, -1),
         MENU_NEXT_COMMAND => command_jump(hwnd, 1),
         MENU_COPY_LAST_CMD => copy_last_command(hwnd),
@@ -1109,6 +1115,10 @@ struct WindowState {
     /// is closed. While active, keystrokes edit the query instead of
     /// reaching the shell.
     search: Option<SearchState>,
+    /// PALETTE-001 (issue #39): open command palette, `None` while closed.
+    palette: Option<crate::palette::PaletteState>,
+    /// PALETTE-005: recently run palette labels, newest first, capped.
+    recent: Vec<String>,
     /// Index of the selected built-in profile (MENU-008). New tabs and
     /// split panes spawn it.
     profile: usize,
@@ -1406,7 +1416,13 @@ unsafe extern "system" fn wnd_proc(
                     &s.bell_tabs,
                     s.bell_tabs.get(active).copied().unwrap_or(false),
                 );
-                r.paint(&s.app, &s.theme, s.search.as_ref(), prompt.as_deref());
+                r.paint(
+                    &s.app,
+                    &s.theme,
+                    s.search.as_ref(),
+                    s.palette.as_ref(),
+                    prompt.as_deref(),
+                );
             }
             let _ = unsafe { EndPaint(hwnd, &ps) };
             LRESULT(0)
@@ -1881,6 +1897,8 @@ fn create_quick_window() {
         pending_surrogate: None,
         fullscreen: None,
         search: None,
+        palette: None,
+        recent: Vec::new(),
         profile: 0,
     });
     let state_param = Box::into_raw(state) as *const c_void;
@@ -2224,6 +2242,20 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
     if state_ref(hwnd).is_some_and(|s| s.renaming.is_some()) && handle_rename_keydown(hwnd, vk) {
         return;
     }
+    // PALETTE-001 (issue #39): Ctrl+Shift+P opens or closes the palette,
+    // checked before the overlay's key swallow so the chord toggles. A user
+    // binding for the same chord won above (the keymap is checked first).
+    if mods.ctrl && mods.shift && !mods.alt && vk == 0x50 {
+        toggle_palette(hwnd);
+        return;
+    }
+    // While the palette is open, every keydown is swallowed: the handled
+    // keys drive the palette, and printables reach WM_CHAR, which edits
+    // the query instead of the PTY. Nothing reaches the shell.
+    if state_ref(hwnd).is_some_and(|s| s.palette.is_some()) {
+        handle_palette_keydown(hwnd, vk);
+        return;
+    }
     // Ctrl+F opens or closes the search overlay (SEARCH-002).
     if mods.ctrl && !mods.shift && !mods.alt && vk == 0x46 {
         toggle_search(hwnd);
@@ -2432,6 +2464,16 @@ fn handle_char(hwnd: HWND, code: u32, sys: bool) {
         read_mods()
     };
     let Some(s) = state_mut(hwnd) else { return };
+    // PALETTE-001: while the palette is open, typed text edits the query.
+    if let Some(palette) = &mut s.palette {
+        if ch.is_control() {
+            return;
+        }
+        palette.push_char(ch);
+        palette.refresh();
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+        return;
+    }
     // While search is active, typed text edits the query, not the shell.
     if let Some(search) = &mut s.search {
         if ch.is_control() {
@@ -2527,6 +2569,14 @@ fn commit_text(hwnd: HWND, chars: &[char]) {
             let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             return;
         }
+        if let Some(palette) = &mut s.palette {
+            palette
+                .query
+                .extend(chars.iter().copied().filter(|c| !c.is_control()));
+            palette.refresh();
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            return;
+        }
         for &ch in chars {
             let bytes = keyboard::encode_char(ch, Modifiers::default());
             let _ = s.app.send_input_active(&bytes);
@@ -2553,7 +2603,251 @@ fn toggle_search(hwnd: HWND) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
-/// Search-mode key handling (SEARCH-005/006/007/008/009). Returns `true`
+/// PALETTE-001 (issue #39): open the command palette, or close it when
+/// already open. The palette takes the overlay strip from search (one
+/// overlay per window) and receives every keystroke.
+fn toggle_palette(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.palette.is_some() {
+        s.palette = None;
+    } else {
+        s.search = None;
+        let items = build_palette_items(s);
+        let recent = s.recent.clone();
+        s.palette = Some(PaletteState::new(items, &recent));
+    }
+    s.suppress_char = true;
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Build the command registry (issue #39: one registry drives palette,
+/// menus and keybindings). Every [`KeyAction`] is listed, plus "New Tab:
+/// <profile>" per profile and "Switch to Tab N" per tab. Disabled rows
+/// carry the reason the palette shows for them.
+fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
+    let mut items: Vec<PaletteItem> = Vec::new();
+    let pane_count = s.app.active_tab().map_or(0, |tab| tab.pane_count());
+    let has_commands = s
+        .app
+        .active_tab()
+        .is_some_and(|tab| !tab.pane().commands().is_empty());
+    let last_finished = s
+        .app
+        .active_tab()
+        .is_some_and(|tab| tab.pane().commands().last_finished().is_some());
+    // Per-tab and per-profile rows are built before the `push` closure
+    // borrows `items` mutably.
+    for (idx, tab) in s.app.tabs().iter().enumerate() {
+        let title: String = tab.title().chars().take(48).collect();
+        items.push(PaletteItem {
+            label: format!("Switch to Tab {}: {title}", idx + 1),
+            group: "Tabs",
+            shortcut: Some(format!("Ctrl+Alt+{}", idx + 1)),
+            disabled_reason: (idx == s.app.active_index())
+                .then(|| "This tab is already active".to_string()),
+            command: Command::SwitchTab(idx),
+        });
+    }
+    for (idx, profile) in s.profiles.iter().enumerate() {
+        items.push(PaletteItem {
+            label: format!("New Tab: {}", profile.name),
+            group: "Profiles",
+            shortcut: None,
+            disabled_reason: None,
+            command: Command::NewTabProfile(idx),
+        });
+    }
+    let mut push = |label: &str, group: &'static str, action: KeyAction, disabled: Option<&str>| {
+        items.push(PaletteItem {
+            label: label.to_string(),
+            group,
+            shortcut: shortcut_for(s, action),
+            disabled_reason: disabled.map(str::to_owned),
+            command: Command::Action(action),
+        });
+    };
+    push("New Tab", "Shell", KeyAction::NewTab, None);
+    push("Close Pane/Tab", "Shell", KeyAction::CloseTab, None);
+    push("Copy", "Shell", KeyAction::Copy, None);
+    push("Paste", "Shell", KeyAction::Paste, None);
+    push("Search", "Shell", KeyAction::Search, None);
+    push("Clear Screen", "Shell", KeyAction::ClearScreen, None);
+    push(
+        "Copy Last Command Output",
+        "Shell",
+        KeyAction::CopyLastCommand,
+        (!last_finished).then_some("No finished command in this pane yet"),
+    );
+    push(
+        "Previous Command",
+        "Shell",
+        KeyAction::PrevCommand,
+        (!has_commands).then_some("No command boundaries in this pane yet"),
+    );
+    push(
+        "Next Command",
+        "Shell",
+        KeyAction::NextCommand,
+        (!has_commands).then_some("No command boundaries in this pane yet"),
+    );
+    push("Split Right", "Splits", KeyAction::SplitRight, None);
+    push("Split Below", "Splits", KeyAction::SplitDown, None);
+    let no_split = (pane_count < 2).then_some("This tab has one pane");
+    push("Focus Pane Up", "Splits", KeyAction::FocusUp, no_split);
+    push("Focus Pane Down", "Splits", KeyAction::FocusDown, no_split);
+    push("Focus Pane Left", "Splits", KeyAction::FocusLeft, no_split);
+    push(
+        "Focus Pane Right",
+        "Splits",
+        KeyAction::FocusRight,
+        no_split,
+    );
+    push("Resize Pane Up", "Splits", KeyAction::ResizeUp, no_split);
+    push(
+        "Resize Pane Down",
+        "Splits",
+        KeyAction::ResizeDown,
+        no_split,
+    );
+    push(
+        "Resize Pane Left",
+        "Splits",
+        KeyAction::ResizeLeft,
+        no_split,
+    );
+    push(
+        "Resize Pane Right",
+        "Splits",
+        KeyAction::ResizeRight,
+        no_split,
+    );
+    push("Rename Tab", "Tabs", KeyAction::RenameTab, None);
+    push("Next Tab", "Tabs", KeyAction::NextTab, None);
+    push("Previous Tab", "Tabs", KeyAction::PrevTab, None);
+    push("Move Tab Left", "Tabs", KeyAction::MoveTabLeft, None);
+    push("Move Tab Right", "Tabs", KeyAction::MoveTabRight, None);
+    push("Next Profile", "Profiles", KeyAction::NextProfile, None);
+    push("Previous Profile", "Profiles", KeyAction::PrevProfile, None);
+    push("Next Theme", "Theme", KeyAction::NextTheme, None);
+    push("Previous Theme", "Theme", KeyAction::PrevTheme, None);
+    push(
+        "Increase Font Size",
+        "View",
+        KeyAction::IncreaseFontSize,
+        None,
+    );
+    push(
+        "Decrease Font Size",
+        "View",
+        KeyAction::DecreaseFontSize,
+        None,
+    );
+    push("Reset Font Size", "View", KeyAction::ResetFontSize, None);
+    push("Toggle Fullscreen", "Window", KeyAction::Fullscreen, None);
+    push(
+        "Hide Quick Terminal",
+        "Window",
+        KeyAction::CloseQuick,
+        (!s.quick).then_some("This is not the quick terminal"),
+    );
+    push("Reload Config", "Config", KeyAction::ReloadConfig, None);
+    push("Quit", "Window", KeyAction::Quit, None);
+    items
+}
+
+/// The shortcut to display for `action`: a user binding wins, then the
+/// built-in default (issue #39: the table drives the display).
+fn shortcut_for(s: &WindowState, action: KeyAction) -> Option<String> {
+    let spec = s
+        .cfg
+        .keymap()
+        .into_iter()
+        .find(|(_, a)| *a == action)
+        .map(|(k, _)| k)
+        .or_else(|| builtin_shortcut(action).map(str::to_owned))?;
+    Some(display_shortcut(&spec))
+}
+
+/// Palette-mode key handling. Returns `true` when the key was consumed;
+/// printable keys are left to `WM_CHAR`, which edits the query.
+fn handle_palette_keydown(hwnd: HWND, vk: u16) -> bool {
+    let consumed = match vk {
+        0x1B => {
+            if let Some(s) = state_mut(hwnd) {
+                s.palette = None;
+            }
+            true
+        }
+        0x26 => step_palette(hwnd, -1),
+        0x28 => step_palette(hwnd, 1),
+        0x0D | 0x0A => {
+            execute_palette_current(hwnd);
+            true
+        }
+        0x08 => {
+            if let Some(s) = state_mut(hwnd)
+                && let Some(palette) = &mut s.palette
+            {
+                palette.backspace();
+                palette.refresh();
+            }
+            true
+        }
+        _ => false,
+    };
+    if consumed {
+        if let Some(s) = state_mut(hwnd) {
+            s.suppress_char = true;
+        }
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    }
+    consumed
+}
+
+fn step_palette(hwnd: HWND, delta: i32) -> bool {
+    if let Some(s) = state_mut(hwnd)
+        && let Some(palette) = &mut s.palette
+    {
+        palette.step(delta);
+        true
+    } else {
+        false
+    }
+}
+
+/// Run the selected command: close the palette, record the recents entry,
+/// then dispatch (the action may destroy the window, so take everything
+/// before it runs).
+fn execute_palette_current(hwnd: HWND) {
+    let (command, label) = {
+        let Some(s) = state_mut(hwnd) else { return };
+        let Some(item) = s.palette.as_ref().and_then(PaletteState::selected) else {
+            return;
+        };
+        if item.disabled_reason.is_some() {
+            return;
+        }
+        (item.command, item.label.clone())
+    };
+    if let Some(s) = state_mut(hwnd) {
+        s.palette = None;
+        PaletteState::record_recent(&mut s.recent, &label);
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    match command {
+        Command::Action(action) => run_key_action(hwnd, action),
+        Command::NewTabProfile(idx) => open_profile_tab(hwnd, idx),
+        Command::SwitchTab(idx) => {
+            if state_mut(hwnd).is_some_and(|s| s.app.select_tab(idx)) {
+                sync_active_tab_geometry(hwnd);
+                if let Some(s) = state_ref(hwnd) {
+                    set_title(hwnd, &s.app);
+                }
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            }
+        }
+    }
+}
 /// when the key was consumed; printable keys are left to `WM_CHAR`, which
 /// edits the query instead of sending bytes to the PTY.
 fn handle_search_keydown(hwnd: HWND, vk: u16, mods: Modifiers) -> bool {
@@ -3396,7 +3690,13 @@ fn drain_and_cleanup(hwnd: HWND) {
                     &s.bell_tabs,
                     s.bell_tabs.get(active).copied().unwrap_or(false),
                 );
-                r.paint_damage(&s.app, &s.theme, s.search.as_ref(), prompt.as_deref());
+                r.paint_damage(
+                    &s.app,
+                    &s.theme,
+                    s.search.as_ref(),
+                    s.palette.as_ref(),
+                    prompt.as_deref(),
+                );
                 s.app.clear_grid_damage();
             } else {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -3675,6 +3975,9 @@ fn reload_config(s: &mut WindowState, hwnd: HWND) {
     let font_changed = font != s.font;
     s.theme = new_theme;
     s.cfg = cfg;
+    // PALETTE-001: shortcuts and profiles changed; rebuild the registry on
+    // the next open.
+    s.palette = None;
     s.tab_bar = s.cfg.tab_bar.visible;
     s.app.set_show_cwd(s.cfg.tab_bar.show_cwd);
     s.profiles = merge_profiles(&s.cfg);
@@ -3991,6 +4294,7 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
         KeyAction::PrevCommand => command_jump(hwnd, -1),
         KeyAction::NextCommand => command_jump(hwnd, 1),
         KeyAction::CopyLastCommand => copy_last_command(hwnd),
+        KeyAction::CommandPalette => toggle_palette(hwnd),
     }
 }
 
@@ -4160,7 +4464,17 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
     let (client_w, client_h) = renderer.client_dips();
     let m = renderer.metrics();
     let bar = state.bar_height();
-    let strip = if state.search.is_some() || state.renaming.is_some() {
+    // PALETTE-001: the palette overlay takes the strip from search, and is
+    // as tall as its rows. Only one overlay is open at a time (window
+    // layer keeps them exclusive).
+    let palette_rows = state
+        .palette
+        .as_ref()
+        .map_or(0, |p| p.hits().len().min(crate::palette::VISIBLE_ROWS));
+    let strip = if state.palette.is_some() {
+        let row_h = palette_row_height(m.cell_height);
+        (row_h * (1 + palette_rows) as f32).min(client_h.max(0.0))
+    } else if state.search.is_some() || state.renaming.is_some() {
         SEARCH_BAR_HEIGHT.min(client_h.max(0.0))
     } else {
         0.0
@@ -4187,6 +4501,9 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
         search_bounds: None,
         search_query: None,
         search_matches: None,
+        palette_bounds: None,
+        palette_query: None,
+        palette_matches: None,
     };
     let mut caption = [0u16; 512];
     let n = usize::try_from(unsafe { GetWindowTextW(hwnd, &mut caption) }).unwrap_or(0);
@@ -4258,6 +4575,11 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
         snap.search_bounds = Some((0.0, (client_h - strip).max(0.0), client_w, client_h));
         snap.search_query = Some(s.query.clone());
         snap.search_matches = Some((s.current, s.matches.len()));
+    }
+    if let Some(p) = &state.palette {
+        snap.palette_bounds = Some((0.0, (client_h - strip).max(0.0), client_w, client_h));
+        snap.palette_query = Some(p.query.clone());
+        snap.palette_matches = Some((p.current, p.hits().len()));
     }
     Some(snap)
 }
@@ -4434,6 +4756,8 @@ pub fn run(
         pending_surrogate: None,
         fullscreen: None,
         search: None,
+        palette: None,
+        recent: Vec::new(),
         // CONFIG-013: `starting-profile` picks the initial shell.
         profile: {
             let merged = merge_profiles(cfg);

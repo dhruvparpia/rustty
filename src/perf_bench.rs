@@ -184,12 +184,12 @@ fn lines(from: usize, count: usize) -> String {
 fn present_floor(app: &mut App, renderer: &mut Renderer, theme: &Theme) -> Duration {
     app.clear_grid_damage();
     // Prime: the first frame of a fresh renderer is a full repaint.
-    renderer.paint_damage(app, theme, None, None);
+    renderer.paint_damage(app, theme, None, None, None);
     app.clear_grid_damage();
     let mut sum = Duration::ZERO;
     for _ in 0..20 {
         let start = Instant::now();
-        renderer.paint_damage(app, theme, None, None);
+        renderer.paint_damage(app, theme, None, None, None);
         sum += start.elapsed();
     }
     let floor = sum / 20;
@@ -211,7 +211,7 @@ fn prime_bench(app: &mut App, renderer: &mut Renderer, theme: &Theme) {
     app.feed_active(lines(0, LINES_PER_FRAME).as_bytes());
     let _ = app.take_dirty();
     for _ in 0..3 {
-        renderer.paint_damage(app, theme, None, None);
+        renderer.paint_damage(app, theme, None, None, None);
         app.clear_grid_damage();
     }
 }
@@ -249,7 +249,7 @@ fn paint_burst(
         // renderer's.
         ALLOCS.store(0, Ordering::Relaxed);
         let start = Instant::now();
-        renderer.paint_damage(app, theme, None, None);
+        renderer.paint_damage(app, theme, None, None, None);
         let elapsed = start.elapsed();
         allocations += ALLOCS.swap(0, Ordering::Relaxed);
         app.clear_grid_damage();
@@ -435,7 +435,7 @@ fn damage_frames_cover_only_the_dirty_rows() {
     // First frame is a full repaint: every row is in the mask.
     app.feed_active(lines(0, rows).as_bytes());
     let _ = app.take_dirty();
-    renderer.paint_damage(&app, &theme, None, None);
+    renderer.paint_damage(&app, &theme, None, None, None);
     assert_eq!(
         renderer.last_mask_rows(),
         rows,
@@ -447,7 +447,7 @@ fn damage_frames_cover_only_the_dirty_rows() {
     // cursor block moved between may be repainted.
     app.feed_active("\x1b[1;1Hone line\r\n".as_bytes());
     let _ = app.take_dirty();
-    renderer.paint_damage(&app, &theme, None, None);
+    renderer.paint_damage(&app, &theme, None, None, None);
     let damaged = renderer.last_mask_rows();
     app.clear_grid_damage();
     let atlas = renderer.atlas_stats();
@@ -479,7 +479,7 @@ fn device_loss_recovery_repaints() {
     let theme = Theme::predawn();
     app.feed_active(lines(0, rows).as_bytes());
     let _ = app.take_dirty();
-    renderer.paint_damage(&app, &theme, None, None);
+    renderer.paint_damage(&app, &theme, None, None, None);
     let warm = renderer.atlas_stats();
     assert!(
         warm.tiles > 0,
@@ -496,7 +496,7 @@ fn device_loss_recovery_repaints() {
     app.feed_active("after recovery\r\n".as_bytes());
     let _ = app.take_dirty();
     let before = renderer.glyph_draw_counts();
-    renderer.paint_damage(&app, &theme, None, None);
+    renderer.paint_damage(&app, &theme, None, None, None);
     // Recovery schedules a full repaint (a fresh swap chain shows nothing)
     // and the new target paints through a rebuilt atlas.
     assert_eq!(
@@ -619,7 +619,7 @@ fn damage_repaint_matches_full_paint() {
     // The first frame of a fresh renderer is the full-paint reference.
     app.feed_active(lines(0, rows).as_bytes());
     let _ = app.take_dirty();
-    renderer.paint_damage(&app, &theme, None, None);
+    renderer.paint_damage(&app, &theme, None, None, None);
     app.clear_grid_damage();
     let reference = capture_presented(hwnd, None);
     assert!(
@@ -630,7 +630,7 @@ fn damage_repaint_matches_full_paint() {
     // One line changes; a damage repaint covers it.
     app.feed_active("\x1b[5;1Hdamage repaint\r\n".as_bytes());
     let _ = app.take_dirty();
-    renderer.paint_damage(&app, &theme, None, None);
+    renderer.paint_damage(&app, &theme, None, None, None);
     app.clear_grid_damage();
     let damaged = capture_presented(hwnd, Some(&reference));
     assert!(
@@ -641,7 +641,7 @@ fn damage_repaint_matches_full_paint() {
     // The same content through a guaranteed full repaint (recreation
     // schedules one), then a pixel-for-pixel comparison.
     renderer.recreate_target();
-    renderer.paint_damage(&app, &theme, None, None);
+    renderer.paint_damage(&app, &theme, None, None, None);
     let full = capture_window(hwnd);
     let diff = damaged.iter().zip(&full).position(|(a, b)| a != b);
     assert!(

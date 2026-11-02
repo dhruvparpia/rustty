@@ -60,6 +60,13 @@ use crate::theme::Theme;
 /// or the ConPTY.
 pub const SEARCH_BAR_HEIGHT: f32 = 24.0;
 
+/// Height of one command palette row (issue #39): at least a search strip,
+/// and never smaller than the cell the text sits in.
+#[must_use]
+pub fn palette_row_height(cell_height: f32) -> f32 {
+    cell_height.max(22.0)
+}
+
 /// Font families used as the fallback chain (WIN-003/FONT-018): Cascadia
 /// first, Consolas last. The configured family (FONT-002) is tried before
 /// this chain.
@@ -1042,9 +1049,10 @@ impl Renderer {
         app: &App,
         theme: &Theme,
         search: Option<&SearchState>,
+        palette: Option<&crate::palette::PaletteState>,
         prompt: Option<&str>,
     ) {
-        self.paint_frame(app, theme, search, prompt, true);
+        self.paint_frame(app, theme, search, palette, prompt, true);
     }
 
     /// Paint only what changed since the last frame (NFR-113 damage-only
@@ -1061,9 +1069,10 @@ impl Renderer {
         app: &App,
         theme: &Theme,
         search: Option<&SearchState>,
+        palette: Option<&crate::palette::PaletteState>,
         prompt: Option<&str>,
     ) {
-        self.paint_frame(app, theme, search, prompt, false);
+        self.paint_frame(app, theme, search, palette, prompt, false);
     }
 
     /// The tab-bar geometry the last frame painted, for hit testing.
@@ -1231,6 +1240,7 @@ impl Renderer {
         app: &App,
         theme: &Theme,
         search: Option<&SearchState>,
+        palette: Option<&crate::palette::PaletteState>,
         prompt: Option<&str>,
         force_full: bool,
     ) {
@@ -1403,9 +1413,14 @@ impl Renderer {
             self.paint_tab_bar(app, theme, width, height);
         }
         // TAB-013: the rename prompt takes the overlay strip from search.
+        // PALETTE-001 (issue #39): the palette takes it from search too, and
+        // sits above the rename prompt (only one is open at a time in
+        // practice; the window layer keeps them exclusive).
         if let Some(prompt) = prompt {
             self.prompt_label = prompt.to_string();
             self.paint_prompt_bar(theme, width, height);
+        } else if let Some(palette) = palette {
+            self.paint_palette(palette, theme, width, height);
         } else if let Some(search) = search {
             self.paint_search_bar(search, theme, width, height);
         }
@@ -1722,6 +1737,98 @@ impl Renderer {
             self.utf16 = units;
         }
         self.label = raw;
+    }
+
+    /// Paint the command palette overlay (issue #39): a header row with the
+    /// query and hit position, then scored hits with shortcuts, the current
+    /// row highlighted, and disabled rows dimmed with their reason.
+    fn paint_palette(
+        &mut self,
+        palette: &crate::palette::PaletteState,
+        theme: &Theme,
+        width: f32,
+        height: f32,
+    ) {
+        let row_h = palette_row_height(self.metrics.cell_height);
+        let hits = palette.hits();
+        let shown = hits.len().min(crate::palette::VISIBLE_ROWS);
+        let bar_h = (row_h * (1 + shown) as f32).min(height.max(0.0));
+        if bar_h <= 0.0 {
+            return;
+        }
+        let tab_bottom = self.tab_bar_height.min(height.max(0.0));
+        let bottom = height - tab_bottom;
+        let top = (bottom - bar_h).max(0.0);
+        self.fill_rect(0.0, top, width, bottom, theme.tab_bar);
+        let mut label = std::mem::take(&mut self.label);
+        let mut units = std::mem::take(&mut self.utf16);
+        let mut draw_row = |r: &mut Self, text: &str, row_top: f32, color: Color| {
+            tabbar::fit_title_into(
+                text,
+                (width - 16.0).max(0.0),
+                r.metrics.cell_width,
+                &mut r.search_label,
+            );
+            if r.search_label.is_empty() {
+                return;
+            }
+            units.clear();
+            units.extend(r.search_label.encode_utf16());
+            let text_top = row_top + (row_h - r.metrics.text_height) / 2.0;
+            let rect = D2D_RECT_F {
+                left: 8.0,
+                top: text_top,
+                right: width - 8.0,
+                bottom: text_top + r.metrics.text_height,
+            };
+            if let Some(brush) = r.brush(color) {
+                let format = &r.formats[0];
+                r.draw_units(&units, format, rect, &brush);
+            }
+        };
+        label.clear();
+        label.push_str("Palette: ");
+        label.push_str(&palette.query);
+        label.push_str("  ");
+        label.push_str(&(palette.current + 1).to_string());
+        label.push('/');
+        label.push_str(&hits.len().to_string());
+        draw_row(self, &label, top, theme.foreground);
+        let start = palette.window_start(shown);
+        for (slot, &hit) in hits[start..start + shown].iter().enumerate() {
+            let Some(item) = palette.item(hit) else {
+                continue;
+            };
+            let row_top = top + row_h * (slot as f32 + 1.0);
+            if start + slot == palette.current {
+                self.fill_rect(0.0, row_top, width, row_top + row_h, theme.tab_active);
+            }
+            label.clear();
+            label.push_str(&item.label);
+            if let Some(shortcut) = &item.shortcut {
+                label.push_str("  ");
+                label.push_str(shortcut);
+            }
+            if let Some(reason) = &item.disabled_reason {
+                label.push_str("  — ");
+                label.push_str(reason);
+            }
+            let color = if item.disabled_reason.is_some() {
+                // No alpha in the theme model: blend toward the strip colour.
+                let fg = theme.foreground;
+                let bg = theme.tab_bar;
+                Color {
+                    r: ((u16::from(fg.r) + u16::from(bg.r)) / 2) as u8,
+                    g: ((u16::from(fg.g) + u16::from(bg.g)) / 2) as u8,
+                    b: ((u16::from(fg.b) + u16::from(bg.b)) / 2) as u8,
+                }
+            } else {
+                theme.foreground
+            };
+            draw_row(self, &label, row_top, color);
+        }
+        self.label = label;
+        self.utf16 = units;
     }
 
     /// Paint the tab bar strip: bar background, per-tab titles (active

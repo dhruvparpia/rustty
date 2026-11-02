@@ -52,6 +52,7 @@ pub mod jumplist;
 /// Keyboard encoding is pure Rust (no FFI): Win32 key events in, VT bytes
 /// out (spec WIN-005).
 pub mod keyboard;
+pub mod palette;
 pub mod pane;
 pub mod parser;
 // Render hot-path benchmark (NFR-113/NFR-114): tests only, ignored by

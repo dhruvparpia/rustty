@@ -557,6 +557,8 @@ pub enum KeyAction {
     NextCommand,
     /// Copy the output of the last finished command (SHELLINT-023).
     CopyLastCommand,
+    /// Open the command palette (issue #39).
+    CommandPalette,
 }
 
 impl KeyAction {
@@ -599,6 +601,7 @@ impl KeyAction {
             "prev-command" | "previous-command" => Self::PrevCommand,
             "next-command" => Self::NextCommand,
             "copy-last-command" | "copy-command-output" => Self::CopyLastCommand,
+            "command-palette" | "palette" => Self::CommandPalette,
             _ => return None,
         })
     }
