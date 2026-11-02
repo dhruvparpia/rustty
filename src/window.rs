@@ -3079,7 +3079,13 @@ fn new_tab_with_profile(hwnd: HWND, spec: ProfileSpec) {
         .renderer
         .as_ref()
         .map_or((s.spawn.cols, s.spawn.rows), |r| r.grid_size());
-    let opts = spec_opts(&spec, cols.max(MIN_COLS), rows.max(MIN_ROWS));
+    let (cols, rows) = (cols.max(MIN_COLS), rows.max(MIN_ROWS));
+    // The bar sync above can change the grid the window fits; keep the new
+    // tab's grid and its ConPTY on the same size (issue #8).
+    if let Some(tab) = s.app.active_tab_mut() {
+        let _ = tab.resize(cols, rows);
+    }
+    let opts = spec_opts(&spec, cols, rows);
     if let Err(e) = s.app.spawn_active(&opts) {
         eprintln!("rusttyterm: shell spawn failed: {e}");
     }
