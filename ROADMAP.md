@@ -100,7 +100,7 @@ chunk boundaries. Security remediation remains in the private advisory workflow.
 |---|---|---|
 | Native command palette | Fuzzy action/profile/tab search, shortcut discovery and conflict diagnostics; shared action registry (shipped in #39), then pane/theme/settings/workspace providers | [#39](https://github.com/dhruvparpia/rusttyterm/issues/39) |
 | Named project workspaces | Save/open reusable tab and pane layouts with profiles, directories and focus; templates independent of last-session restore; explicit startup tasks and Jump List/CLI entry points; schema in [design-workspaces.md](docs/design-workspaces.md) | [#37](https://github.com/dhruvparpia/rusttyterm/issues/37) |
-| Links and editor navigation | OSC 8, diagnostic file:line:column links, configured editor launch and keyboard hints; correct Unicode, quoting and cwd resolution | [#41](https://github.com/dhruvparpia/rusttyterm/issues/41) |
+| Links and editor navigation | OSC 8 hyperlinks with pointer open/copy shipped in #41; remaining: diagnostic file:line:column links, configured editor launch and keyboard hints; correct Unicode, quoting and cwd resolution (child issues) | [#41](https://github.com/dhruvparpia/rusttyterm/issues/41) |
 | Windows development workflows | WSL/PowerShell/Visual Studio shell discovery, Open terminal here, shell-aware file drag/drop and clear Windows/WSL/remote session identity (shipped in #40) | [#40](https://github.com/dhruvparpia/rusttyterm/issues/40) |
 
 The initial palette can ship while workspace storage is designed. Fix cwd and

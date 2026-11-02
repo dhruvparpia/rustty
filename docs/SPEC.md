@@ -1209,6 +1209,20 @@ PowerShell, and Visual Studio developer shells (`vswhere`).
 | DRAG-003 | The drop shall use the target tab's profile (quoting rules and cloned cwd), not a hard-coded shell. | P1 |
 | IDENT-001 | A session whose OSC 7 host is not this machine shall be labelled (tab title suffix " @host" and UIA tab HelpText " · host:"); local and unknown sessions shall show nothing, and the app shall never guess identity from prompt text. | P1 |
 
+## 9.30 Hyperlink requirements
+
+OSC 8 support (#41, roadmap Stage 1, slice 1). Diagnostic
+`file:line:column` recognition, editor launch and keyboard hint mode are
+the remaining #41 scope and will be specified with their child issues.
+
+| ID | Requirement | Priority |
+|---|---|---|
+| LINK-001 | OSC 8 shall open a link pen (params ignored, empty URI closes, SGR RST closes); printed cells carry the link id, so the target survives wrap, scrollback eviction, selection and resize (PARSER-028). | P1 |
+| LINK-002 | The URI table is bounded (1024 entries, deduplicated); past the cap new links render as links with no openable target, keeping memory flat against hostile output. | P1 |
+| LINK-003 | OSC 8 cells render in the theme `link` colour (config key `link`) with an underline, and only for real OSC 8 state (SEC-022); auto-detected text must stay visually distinct. | P1 |
+| LINK-004 | Opening a link shall require explicit user interaction: Ctrl+click, or context menu "Open Link" (SEC-003). Only `http`/`https` targets open; every other scheme is copy-only (SEC-004). | P1 |
+| LINK-005 | A plain click (no drag) on a link cell, and context menu "Copy Link", copy the URI to the clipboard. | P1 |
+
 ---
 
 # 10. Non-Functional Requirements
