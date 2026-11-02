@@ -6,13 +6,39 @@
 //! inert stub so `cargo test` stays cross-platform.
 
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::fmt;
 use std::io;
+#[cfg(windows)]
+use std::sync::Arc;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(windows)]
 use std::sync::mpsc::{self, Receiver, Sender};
 
 #[cfg(windows)]
 use crate::conpty;
+
+/// GHSA-v5c6-5f42-9xqj: bytes of shell output a single pane may have in
+/// flight (channel + UI backlog). The reader thread parks at the cap,
+/// which back-pressures ConPTY and the shell producer; the terminal
+/// stream stays ordered and lossless.
+#[cfg(windows)]
+const MAX_QUEUED_BYTES: usize = 4 << 20;
+
+/// GHSA-v5c6-5f42-9xqj: byte budget one [`Shell::poll_events`] call
+/// delivers, so one flooding tab bounds its own work per UI tick.
+#[cfg(windows)]
+const DRAIN_BUDGET_BYTES: usize = 1 << 20;
+
+/// Bytes of terminal output carried by an event (exit notices carry none).
+#[must_use]
+pub const fn event_bytes(event: &ShellEvent) -> usize {
+    match event {
+        ShellEvent::Chunks(chunk) => chunk.len(),
+        ShellEvent::Exited(_) => 0,
+    }
+}
 
 /// Lifecycle state of a shell process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,16 +122,6 @@ impl fmt::Display for ShellError {
 
 impl std::error::Error for ShellError {}
 
-/// Count `CSI 6n` (cursor position query) sequences in an output chunk.
-///
-/// A shell that sends this query blocks until the terminal answers with a
-/// CPR report; the reader thread answers each occurrence (TTY-004 path).
-/// Pure byte-scan, so it is unit-tested on every platform.
-#[must_use]
-pub fn count_cursor_position_queries(chunk: &[u8]) -> usize {
-    chunk.windows(4).filter(|w| *w == b"\x1b[6n").count()
-}
-
 #[cfg(windows)]
 struct Inner {
     conpty: conpty::ConPty,
@@ -127,6 +143,18 @@ pub struct Shell {
     rx: Option<Receiver<ShellEvent>>,
     #[cfg(windows)]
     reader: Option<std::thread::JoinHandle<()>>,
+    /// Bytes produced by the reader thread and not yet delivered to the
+    /// UI (channel + backlog); the reader parks at [`MAX_QUEUED_BYTES`].
+    #[cfg(windows)]
+    queued: Arc<AtomicUsize>,
+    /// Set on close so a parked reader thread drains and discards, never
+    /// blocking the ConPTY shutdown path (GHSA-v5c6 acceptance).
+    #[cfg(windows)]
+    stopping: Arc<AtomicBool>,
+    /// Events received beyond the per-tick drain budget, delivered first
+    /// on the next poll so ordering is preserved (GHSA-v5c6).
+    #[cfg(windows)]
+    backlog: VecDeque<ShellEvent>,
 }
 
 impl fmt::Debug for Shell {
@@ -142,7 +170,7 @@ impl fmt::Debug for Shell {
 impl Shell {
     /// Create an inactive shell (nothing spawned yet).
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             state: ShellState::Inactive,
             #[cfg(windows)]
@@ -151,6 +179,12 @@ impl Shell {
             rx: None,
             #[cfg(windows)]
             reader: None,
+            #[cfg(windows)]
+            queued: Arc::new(AtomicUsize::new(0)),
+            #[cfg(windows)]
+            stopping: Arc::new(AtomicBool::new(false)),
+            #[cfg(windows)]
+            backlog: VecDeque::new(),
         }
     }
 
@@ -176,6 +210,10 @@ impl Shell {
         if self.is_running() {
             return Err(ShellError::NotRunning);
         }
+        // Re-spawn after close: fresh queue accounting (GHSA-v5c6).
+        self.queued.store(0, Ordering::Relaxed);
+        self.stopping.store(false, Ordering::Relaxed);
+        self.backlog.clear();
         self.state = ShellState::Spawning;
         match self.attach_console(opts) {
             Ok(()) => {
@@ -217,21 +255,33 @@ impl Shell {
 
         let (tx, rx) = mpsc::channel::<ShellEvent>();
         let pump_tx = tx.clone();
-        // The shell answers terminal queries (CSI 6n) inline: cmd.exe and
-        // bash query the cursor position at startup and block until the
-        // terminal replies with a CPR report.
-        let reply_tx = conpty.input_writer().map_err(spawn_err)?;
+        let pump_queued = Arc::clone(&self.queued);
+        let pump_stopping = Arc::clone(&self.stopping);
+        // Terminal queries (CSI 6n, CSI c) are answered by the pane: the
+        // parser emits ParserEvent::Respond with the real cursor position
+        // (issue #21: replying here too produced duplicate, conflicting
+        // CPR reports, and the chunk-local counter missed split queries).
+        // Shells block at startup until a CPR arrives; the pane's reply is
+        // what unblocks them (window-milestone liveness requirement).
         let reader = std::thread::spawn(move || {
             // Pump output until EOF/broken pipe; a hard failure is treated
             // like EOF so the pane always converges to Exited (TTY-026:
             // ConPTY failure must not crash the UI).
             let _ = conpty::read_output_loop(&reader_handle, |chunk| {
-                let n = count_cursor_position_queries(chunk);
-                for _ in 0..n {
-                    // Answer "you are at row 1, col 1"; shells use this
-                    // only as a "is a terminal there" probe.
-                    let _ = reply_tx.write(b"\x1b[1;1R");
+                // GHSA-v5c6-5f42-9xqj: park at the byte cap so ConPTY
+                // back-pressures the producer; the stream stays ordered
+                // and lossless. While stopping, drain the pipe and
+                // discard, so ConPTY shutdown is never blocked by a full
+                // queue.
+                while !pump_stopping.load(Ordering::Relaxed)
+                    && pump_queued.load(Ordering::Relaxed) + chunk.len() > MAX_QUEUED_BYTES
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
+                if pump_stopping.load(Ordering::Relaxed) {
+                    return;
+                }
+                pump_queued.fetch_add(chunk.len(), Ordering::Relaxed);
                 let _ = pump_tx.send(ShellEvent::Chunks(chunk.to_vec()));
             });
             let code = conpty::wait_exit_code(&process);
@@ -287,17 +337,41 @@ impl Shell {
     /// Drain every pending reader-thread event, in order.
     ///
     /// An `Exited` event moves the state to [`ShellState::Exited`].
+    /// Drain shell events, honoring the per-tick byte budget
+    /// ([`DRAIN_BUDGET_BYTES`]); the remainder waits in an ordered
+    /// backlog (GHSA-v5c6: one flooding tab bounds its own UI work).
     #[cfg(windows)]
     pub fn poll_events(&mut self) -> Vec<ShellEvent> {
         let mut events = Vec::new();
-        if let Some(rx) = &self.rx {
-            while let Ok(event) = rx.try_recv() {
-                if let ShellEvent::Exited(code) = event {
-                    self.state = ShellState::Exited(code);
+        let mut delivered = 0usize;
+        let mut budget_open = true;
+        let mut backlog = std::mem::take(&mut self.backlog);
+        let Some(rx) = &self.rx else {
+            self.backlog = backlog;
+            return events;
+        };
+        loop {
+            let event = match backlog.pop_front() {
+                Some(ev) => ev,
+                None => match rx.try_recv() {
+                    Ok(ev) => ev,
+                    Err(_) => break,
+                },
+            };
+            let n = event_bytes(&event);
+            self.queued.fetch_sub(n, Ordering::Relaxed);
+            if budget_open && delivered + n <= DRAIN_BUDGET_BYTES {
+                delivered += n;
+                if let ShellEvent::Exited(code) = &event {
+                    self.state = ShellState::Exited(*code);
                 }
                 events.push(event);
+            } else {
+                budget_open = false;
+                backlog.push_back(event);
             }
         }
+        self.backlog = backlog;
         events
     }
 
@@ -312,6 +386,9 @@ impl Shell {
     /// The exit code arrives later through [`Shell::poll_events`].
     #[cfg(windows)]
     pub fn close(&mut self) {
+        // GHSA-v5c6: a reader parked at the byte cap must wake and drain
+        // so the ConPTY shutdown path is never blocked by a full queue.
+        self.stopping.store(true, Ordering::Relaxed);
         if let Some(inner) = &mut self.inner {
             inner.conpty.close();
         }
@@ -355,16 +432,11 @@ mod tests {
     }
 
     #[test]
-    fn cursor_position_queries_are_counted() {
-        assert_eq!(count_cursor_position_queries(b""), 0);
-        assert_eq!(count_cursor_position_queries(b"plain text"), 0);
-        assert_eq!(count_cursor_position_queries(b"\x1b[6n"), 1);
-        assert_eq!(
-            count_cursor_position_queries(b"\x1b[?1h\x1b[6ntext\x1b[6n"),
-            2
-        );
-        // Similar-looking sequences must not count.
-        assert_eq!(count_cursor_position_queries(b"\x1b[6;1R\x1b[5n"), 0);
+    fn event_bytes_counts_only_output_chunks() {
+        // GHSA-v5c6: the queue cap and the drain budget are byte-based.
+        assert_eq!(event_bytes(&ShellEvent::Chunks(b"hello".to_vec())), 5);
+        assert_eq!(event_bytes(&ShellEvent::Chunks(Vec::new())), 0);
+        assert_eq!(event_bytes(&ShellEvent::Exited(Some(0))), 0);
     }
 
     #[test]

@@ -1549,6 +1549,7 @@ impl Renderer {
             &self.titles,
             width,
             self.metrics.cell_width,
+            app.active_index(),
             &mut self.layout,
         );
         let active = app.active_index();
