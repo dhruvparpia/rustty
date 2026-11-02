@@ -219,6 +219,23 @@ impl Grid {
         self.total.saturating_sub(self.rows + self.scroll_offset)
     }
 
+    /// Top virtual index of the *live* (unscrolled) viewport. Parser
+    /// writes and scroll operations resolve against this (issue #2): with
+    /// the user scrolled back, output lands on the live screen, never in
+    /// the scrollback the viewport happens to be showing.
+    fn live_top(&self) -> usize {
+        self.total.saturating_sub(self.rows)
+    }
+
+    /// Live-screen row (not the scrolled viewport row).
+    fn live_row(&self, row: usize) -> Option<&Line> {
+        let vi = self.live_top() + row;
+        if vi >= self.total {
+            return None;
+        }
+        Some(&self.lines[self.slot(vi)])
+    }
+
     /// Physical slot for a virtual line index
     fn slot(&self, virtual_index: usize) -> usize {
         (self.head + virtual_index) % self.capacity()
@@ -250,7 +267,7 @@ impl Grid {
     /// buffer pad with blank lines; the viewport never moves on a write.
     pub fn write_line(&mut self, row: usize, line: Line) {
         let row = row.min(self.rows.saturating_sub(1));
-        let virtual_index = self.top() + row;
+        let virtual_index = self.live_top() + row;
         while self.total <= virtual_index {
             self.append_line(Line::blank(self.cols));
         }
@@ -272,7 +289,7 @@ impl Grid {
     /// Write a cell to a viewport position
     pub fn write_cell(&mut self, row: usize, col: usize, cell: Cell) {
         let row = row.min(self.rows.saturating_sub(1));
-        let virtual_index = self.top() + row;
+        let virtual_index = self.live_top() + row;
         while self.total <= virtual_index {
             self.append_line(Line::blank(self.cols));
         }
@@ -543,6 +560,21 @@ impl Grid {
         }
     }
 
+    /// Drop every scrollback line, keeping the live viewport's content
+    /// (issue #7: ED 3 / "clear history" must never clear the visible
+    /// screen; only a scrollback-reading TUI's history is lost).
+    pub fn clear_scrollback(&mut self) {
+        let live: Vec<Line> = (0..self.rows)
+            .filter_map(|r| self.live_row(r).cloned())
+            .collect();
+        let (cols, rows, sb) = (self.cols, self.rows, self.scrollback);
+        *self = Grid::with_size(cols, rows, sb);
+        for (i, line) in live.into_iter().enumerate() {
+            self.write_line(i, line);
+        }
+        self.mark_all_dirty();
+    }
+
     /// Shift viewport rows `top..=bottom` up by one line; the region's bottom
     /// row becomes blank. Used by DL, ESC M and SU on partial scroll regions.
     ///
@@ -559,7 +591,7 @@ impl Grid {
         }
         for row in top..bottom {
             let next = self
-                .row(row + 1)
+                .live_row(row + 1)
                 .cloned()
                 .unwrap_or_else(|| Line::blank(self.cols));
             self.write_line(row, next);
@@ -578,7 +610,7 @@ impl Grid {
         }
         for row in (top + 1..=bottom).rev() {
             let prev = self
-                .row(row - 1)
+                .live_row(row - 1)
                 .cloned()
                 .unwrap_or_else(|| Line::blank(self.cols));
             self.write_line(row, prev);
@@ -807,7 +839,10 @@ mod tests {
         append_lines(&mut grid, 50);
         grid.scroll_up(10);
         grid.write_line(23, make_line("typed", grid.cols));
+        // Issue #2: the write lands on the live screen, not the history
+        // row the viewport is showing, and the viewport stays put.
         assert_eq!(grid.scroll_offset(), 10);
+        grid.scroll_down(10);
         assert_eq!(row_text(&grid, 23), "typed");
         assert_eq!(grid.total_lines(), 74);
     }

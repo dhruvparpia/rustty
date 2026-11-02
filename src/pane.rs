@@ -458,64 +458,79 @@ impl Pane {
     /// the parser asks for (title, alt-screen swap, scrollback clear,
     /// DSR/DA replies) and snap the viewport back to the live edge when the
     /// bytes printed (`printed` in [`crate::parser::AdvanceOutcome`]).
+    ///
+    /// Issue #1/#7: the parser stops after any event that changes which
+    /// grid is drawn (alt-screen swap, scrollback clear); the loop applies
+    /// the events and resumes parsing on the swapped grid, so one chunk
+    /// containing `1049h` + text places the text on the screen the mode
+    /// switch selects.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.dirty = true;
-        let outcome = self.parser.advance(&mut self.grid, bytes);
-        let cols = self.grid.cols;
-        let rows = self.grid.rows;
-        let scrollback = self.grid.scrollback();
+        let mut printed = false;
+        let mut pos = 0usize;
+        while pos < bytes.len() {
+            let outcome = self.parser.advance(&mut self.grid, &bytes[pos..]);
+            let step = outcome.consumed.min(bytes.len() - pos).max(1);
+            pos += step;
+            printed |= outcome.printed;
 
-        for event in outcome.events {
-            match event {
-                ParserEvent::Title(title) => self.title = Some(title),
-                ParserEvent::Cwd(url) => self.record_cwd(&url),
-                ParserEvent::Bell => self.bell = true,
-                ParserEvent::PromptStart => {
-                    self.at_prompt = true;
-                    self.command_running = false;
-                }
-                ParserEvent::CommandStart | ParserEvent::CommandOutput => {
-                    self.command_running = true;
-                    self.at_prompt = false;
-                }
-                ParserEvent::PromptEnd(code) => {
-                    self.at_prompt = true;
-                    self.command_running = false;
-                    self.last_exit = code;
-                }
-                ParserEvent::EnterAltScreen => {
-                    if !self.in_alt {
-                        let fresh = Grid::with_size(cols, rows, 0);
-                        self.main_grid = Some(std::mem::replace(&mut self.grid, fresh));
-                        self.in_alt = true;
-                        self.graphics.clear_all();
+            for event in outcome.events {
+                match event {
+                    ParserEvent::Title(title) => self.title = Some(title),
+                    ParserEvent::Cwd(url) => self.record_cwd(&url),
+                    ParserEvent::Bell => self.bell = true,
+                    ParserEvent::PromptStart => {
+                        self.at_prompt = true;
+                        self.command_running = false;
                     }
-                }
-                ParserEvent::ExitAltScreen => {
-                    if self.in_alt {
-                        if let Some(main) = self.main_grid.take() {
-                            self.grid = main;
-                            self.grid.resize(cols, rows);
+                    ParserEvent::CommandStart | ParserEvent::CommandOutput => {
+                        self.command_running = true;
+                        self.at_prompt = false;
+                    }
+                    ParserEvent::PromptEnd(code) => {
+                        self.at_prompt = true;
+                        self.command_running = false;
+                        self.last_exit = code;
+                    }
+                    ParserEvent::EnterAltScreen => {
+                        if !self.in_alt {
+                            let cols = self.grid.cols;
+                            let rows = self.grid.rows;
+                            let fresh = Grid::with_size(cols, rows, 0);
+                            self.main_grid = Some(std::mem::replace(&mut self.grid, fresh));
+                            self.in_alt = true;
+                            self.graphics.clear_all();
                         }
-                        self.in_alt = false;
+                    }
+                    ParserEvent::ExitAltScreen => {
+                        if self.in_alt {
+                            if let Some(main) = self.main_grid.take() {
+                                self.grid = main;
+                                let (cols, rows) = (self.grid.cols, self.grid.rows);
+                                self.grid.resize(cols, rows);
+                            }
+                            self.in_alt = false;
+                            self.graphics.clear_all();
+                        }
+                    }
+                    // The parser owns the flag; the renderer reads it via
+                    // `Pane::cursor_visible`, so there is nothing to apply.
+                    ParserEvent::CursorVisibility(_) => {}
+                    ParserEvent::ClearScrollback => {
+                        // Issue #7: ED 3 / "clear history" removes the
+                        // scrollback, never the visible screen.
+                        self.grid.clear_scrollback();
                         self.graphics.clear_all();
                     }
-                }
-                // The parser owns the flag; the renderer reads it via
-                // `Pane::cursor_visible`, so there is nothing to apply.
-                ParserEvent::CursorVisibility(_) => {}
-                ParserEvent::ClearScrollback => {
-                    self.grid = Grid::with_size(cols, rows, scrollback);
-                    self.graphics.clear_all();
-                }
-                // DSR/DA replies go straight back to the shell.
-                ParserEvent::Respond(reply) => {
-                    let _ = self.shell.write_input(&reply);
-                }
-                ParserEvent::Graphics(action) => {
-                    let (row, col) = (self.parser.cursor_row, self.parser.cursor_col);
-                    if let Some(reply) = self.graphics.apply(action, row, col, &self.grid) {
+                    // DSR/DA replies go straight back to the shell.
+                    ParserEvent::Respond(reply) => {
                         let _ = self.shell.write_input(&reply);
+                    }
+                    ParserEvent::Graphics(action) => {
+                        let (row, col) = (self.parser.cursor_row, self.parser.cursor_col);
+                        if let Some(reply) = self.graphics.apply(action, row, col, &self.grid) {
+                            let _ = self.shell.write_input(&reply);
+                        }
                     }
                 }
             }
@@ -523,7 +538,7 @@ impl Pane {
 
         self.graphics.prune_transient(&self.grid);
 
-        if outcome.printed {
+        if printed {
             let above = self.grid.scroll_offset();
             if above > 0 {
                 self.grid.scroll_down(above);

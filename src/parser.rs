@@ -54,6 +54,9 @@ pub struct AdvanceOutcome {
     pub events: Vec<ParserEvent>,
     /// True when the bytes produced visible output (drives scroll snap).
     pub printed: bool,
+    /// Bytes consumed from the input; stops early after a grid-changing
+    /// event (issue #1, #7).
+    pub consumed: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +130,13 @@ pub struct Parser {
     scroll_top: usize,
     /// `usize::MAX` until the first grid contact; [`Parser::fit`] clamps it.
     scroll_bottom: usize,
+    /// Issue #3: no `DECSTBM` has run, so the scroll region's bottom edge
+    /// follows the screen bottom across resize (grow restores full-height
+    /// scrolling).
+    region_follows_bottom: bool,
+    /// #22: bytes of a UTF-8 sequence still expected inside a string state
+    /// (OSC / DCS), where a 0x9C continuation byte is data, not ST.
+    string_utf8: u8,
     saved: Option<SavedCursor>,
     pen_fg: Option<Color>,
     pen_bg: Option<Color>,
@@ -157,6 +167,8 @@ impl Parser {
             mouse_urxvt_coordinates: false,
             scroll_top: 0,
             scroll_bottom: usize::MAX,
+            region_follows_bottom: true,
+            string_utf8: 0,
             saved: None,
             pen_fg: None,
             pen_bg: None,
@@ -166,11 +178,18 @@ impl Parser {
     }
 
     /// Feed raw shell output bytes, writing through `grid`.
+    ///
+    /// The outcome reports how many bytes were consumed. When an event
+    /// changes which grid the pane draws into (alt-screen enter/exit,
+    /// scrollback clear), `advance` stops after that event so the pane can
+    /// swap grids before the next byte is interpreted (issue #1, #7):
+    /// "everything a chunk prints is placed on the same screen the
+    /// mode-switch event describes."
     pub fn advance(&mut self, grid: &mut Grid, bytes: &[u8]) -> AdvanceOutcome {
         self.fit(grid);
         let mut events = Vec::new();
         let mut printed = false;
-        for &b in bytes {
+        for (i, &b) in bytes.iter().enumerate() {
             // Mid-multibyte-UTF-8, continuation bytes 0x80..=0xBF are
             // *not* C1 controls (0x9F is a legal continuation byte, e.g.
             // U+1F600), so they bypass the state machine entirely.
@@ -186,16 +205,17 @@ impl Parser {
                         printed = true;
                         self.utf8_byte(grid, b, &mut printed);
                     }
-                    // Control, printable ASCII, DEL, 0xF8..=0xFF: not a
-                    // continuation byte. Flush the partial sequence as one
-                    // U+FFFD, then let `b` go through the state machine.
+                    // Issue #23: the truncated sequence flushes as one
+                    // U+FFFD, and the byte that broke it is then
+                    // interpreted normally: printable characters print,
+                    // ESC starts its sequence, CAN/SUB cancel.
                     _ => {
                         self.utf8_pending.clear();
                         self.print_char(grid, '\u{FFFD}');
                         printed = true;
                     }
                 }
-                if b != 0x1B && !matches!(b, 0x00..=0x1F | 0x7F) {
+                if matches!(b, 0x80..=0xF7) {
                     continue;
                 }
             }
@@ -206,6 +226,7 @@ impl Parser {
                     0x5B => self.begin_csi(),
                     0x5D => {
                         self.osc.clear();
+                        self.string_utf8 = 0;
                         self.state = State::Osc;
                     }
                     0x50 | 0x5F => self.state = State::KittyDetect,
@@ -225,24 +246,74 @@ impl Parser {
                         self.dispatch_csi(grid, b, &mut events, &mut printed);
                         self.state = State::Ground;
                     }
-                    0x30..=0x3B => self.params.push(b),
-                    0x3C..=0x3F if self.params.is_empty() && self.intermediates.is_empty() => {
+                    // GHSA-845w-h489-83vg: the sequence buffers are capped;
+                    // overflow bytes are consumed and dropped, and the
+                    // sequence dispatches with truncated parameters.
+                    0x30..=0x3B => {
+                        if self.params.len() < 64 {
+                            self.params.push(b);
+                        }
+                    }
+                    0x3C..=0x3F
+                        if self.params.is_empty()
+                            && self.intermediates.is_empty()
+                            && self.private.len() < 8 =>
+                    {
                         self.private.push(b);
                     }
-                    0x20..=0x2F => self.intermediates.push(b),
+                    0x20..=0x2F => {
+                        if self.intermediates.len() < 4 {
+                            self.intermediates.push(b);
+                        }
+                    }
                     0x1B => self.state = State::Escape,
                     _ => {}
                 },
-                State::Osc => match b {
-                    0x07 | 0x9C => {
-                        self.finish_osc(&mut events);
-                        self.state = State::Ground;
+                State::Osc => {
+                    // #22: a 0x9C byte that is a UTF-8 continuation byte
+                    // (mid-sequence) is OSC data, not the ST terminator;
+                    // 0x07 always terminates.
+                    if self.string_utf8 > 0 {
+                        if (0x80..=0xBF).contains(&b) {
+                            self.string_utf8 -= 1;
+                            self.osc.push(b);
+                            continue;
+                        }
+                        self.string_utf8 = 0;
                     }
-                    0x1B => self.state = State::OscEscape,
-                    _ => self.osc.push(b),
-                },
+                    match b {
+                        0x07 | 0x9C => {
+                            self.string_utf8 = 0;
+                            self.finish_osc(&mut events);
+                            self.state = State::Ground;
+                        }
+                        0x1B => self.state = State::OscEscape,
+                        0xC2..=0xDF => {
+                            self.string_utf8 = 1;
+                            self.osc.push(b);
+                        }
+                        0xE0..=0xEF => {
+                            self.string_utf8 = 2;
+                            self.osc.push(b);
+                        }
+                        0xF0..=0xF7 => {
+                            self.string_utf8 = 3;
+                            self.osc.push(b);
+                        }
+                        _ => self.osc.push(b),
+                    }
+                    // GHSA-845w-h489-83vg: a never-terminated OSC consumes
+                    // unbounded RAM; past the cap the payload is dropped
+                    // and the string is skipped to its terminator.
+                    if self.osc.len() >= 65_536 {
+                        self.osc.clear();
+                        self.string_utf8 = 0;
+                        self.state = State::Ignore;
+                    }
+                }
                 State::OscEscape => match b {
                     0x5C => {
+                        self.string_utf8 = 0;
                         self.finish_osc(&mut events);
                         self.state = State::Ground;
                     }
@@ -256,22 +327,53 @@ impl Parser {
                 State::KittyDetect => match b {
                     b'G' => {
                         self.osc.clear();
+                        self.string_utf8 = 0;
                         self.state = State::Kitty;
                     }
                     0x1B => self.state = State::Escape,
                     0x07 | 0x9C => self.state = State::Ground,
                     _ => self.state = State::Ignore,
                 },
-                State::Kitty => match b {
-                    0x1B => self.state = State::KittyEscape,
-                    0x07 | 0x9C => {
-                        self.finish_kitty(&mut events);
-                        self.state = State::Ground;
+                State::Kitty => {
+                    // #22 applies to the DCS string state as well.
+                    if self.string_utf8 > 0 {
+                        if (0x80..=0xBF).contains(&b) {
+                            self.string_utf8 -= 1;
+                            self.osc.push(b);
+                            continue;
+                        }
+                        self.string_utf8 = 0;
                     }
-                    _ => self.osc.push(b),
-                },
+                    match b {
+                        0x1B => self.state = State::KittyEscape,
+                        0x07 | 0x9C => {
+                            self.string_utf8 = 0;
+                            self.finish_kitty(&mut events);
+                            self.state = State::Ground;
+                        }
+                        0xC2..=0xDF => {
+                            self.string_utf8 = 1;
+                            self.osc.push(b);
+                        }
+                        0xE0..=0xEF => {
+                            self.string_utf8 = 2;
+                            self.osc.push(b);
+                        }
+                        0xF0..=0xF7 => {
+                            self.string_utf8 = 3;
+                            self.osc.push(b);
+                        }
+                        _ => self.osc.push(b),
+                    }
+                    if self.osc.len() >= 65_536 {
+                        self.osc.clear();
+                        self.string_utf8 = 0;
+                        self.state = State::Ignore;
+                    }
+                }
                 State::KittyEscape => match b {
                     0x5C => {
+                        self.string_utf8 = 0;
                         self.finish_kitty(&mut events);
                         self.state = State::Ground;
                     }
@@ -293,9 +395,28 @@ impl Parser {
                     _ => self.state = State::Escape,
                 },
             }
+            if matches!(
+                events.last(),
+                Some(
+                    ParserEvent::EnterAltScreen
+                        | ParserEvent::ExitAltScreen
+                        | ParserEvent::ClearScrollback
+                )
+            ) {
+                self.fit(grid);
+                return AdvanceOutcome {
+                    events,
+                    printed,
+                    consumed: i + 1,
+                };
+            }
         }
         self.fit(grid);
-        AdvanceOutcome { events, printed }
+        AdvanceOutcome {
+            events,
+            printed,
+            consumed: bytes.len(),
+        }
     }
 
     /// Clamp cursor, scroll region and pen to the grid's current size.
@@ -303,6 +424,13 @@ impl Parser {
     pub fn fit(&mut self, grid: &Grid) {
         let rows = grid.rows;
         let cols = grid.cols;
+        // Issue #3: until a DECSTBM sets a custom region, the region's
+        // bottom follows the screen bottom, so a shrink/grow cycle
+        // restores full-height scrolling instead of staying pinned at the
+        // shrunk height.
+        if self.region_follows_bottom {
+            self.scroll_bottom = rows - 1;
+        }
         self.scroll_bottom = self.scroll_bottom.min(rows - 1);
         self.scroll_top = self.scroll_top.min(self.scroll_bottom);
         self.cursor_row = self.cursor_row.min(rows - 1);
@@ -437,6 +565,7 @@ impl Parser {
         self.cursor_col = 0;
         self.scroll_top = 0;
         self.scroll_bottom = usize::MAX;
+        self.region_follows_bottom = true;
         self.wrap_pending = false;
     }
 
@@ -476,6 +605,13 @@ impl Parser {
     }
 
     fn param_list(&self) -> Vec<u32> {
+        self.param_slots().into_iter().map(|(v, _)| v).collect()
+    }
+
+    /// Parameters with separator identity: each value plus whether the
+    /// separator that ended it was a colon (issue #4: SGR `38:2::r:g:b`
+    /// must be told apart from `38;2;r;g;b`).
+    fn param_slots(&self) -> Vec<(u32, bool)> {
         let mut out = Vec::new();
         let mut cur: u32 = 0;
         let mut digit = false;
@@ -485,14 +621,19 @@ impl Parser {
                     cur = cur.saturating_mul(10).saturating_add(u32::from(b - b'0'));
                     digit = true;
                 }
+                b':' => {
+                    out.push((if digit { cur } else { 0 }, true));
+                    cur = 0;
+                    digit = false;
+                }
                 _ => {
-                    out.push(if digit { cur } else { 0 });
+                    out.push((if digit { cur } else { 0 }, false));
                     cur = 0;
                     digit = false;
                 }
             }
         }
-        out.push(if digit { cur } else { 0 });
+        out.push((if digit { cur } else { 0 }, false));
         out
     }
 
@@ -523,11 +664,22 @@ impl Parser {
                 self.line_feed(grid, printed);
             }
             b'M' => {
-                grid.scroll_region_up(self.scroll_top, self.cursor_row);
+                // #6: RI moves the cursor up; only at the region top does
+                // it scroll the region down. It never scrolls the page up
+                // and never grows the scrollback offset.
+                if self.cursor_row > self.scroll_top {
+                    self.cursor_row -= 1;
+                } else {
+                    grid.scroll_region_down(self.scroll_top, self.scroll_bottom);
+                }
                 *printed = true;
             }
             b'c' => {
                 self.reset();
+                // Full reset clears the screen as well as the history
+                // (ClearScrollback alone keeps the viewport).
+                let rows = grid.rows;
+                grid.erase_rows(0, rows - 1);
                 events.push(ParserEvent::ClearScrollback);
                 events.push(ParserEvent::CursorVisibility(true));
             }
@@ -560,9 +712,11 @@ impl Parser {
                 self.wrap_pending = false;
             }
             b'B' => {
-                for _ in 0..n.min(rows) {
-                    self.line_feed(grid, printed);
-                }
+                // #5: CUD moves the cursor down; at the region bottom it
+                // stops. Only a line feed scrolls (xterm/WSLg semantics:
+                // "Cursor Down at the bottom of the scroll region must
+                // scroll, Cursor Down in the middle must not").
+                self.cursor_row = (self.cursor_row + n).min(self.scroll_bottom);
                 self.wrap_pending = false;
             }
             b'C' => {
@@ -687,7 +841,10 @@ impl Parser {
                 }
                 *printed = true;
             }
-            b'm' => self.apply_sgr(&params),
+            b'm' => {
+                let slots = self.param_slots();
+                self.apply_sgr(&slots);
+            }
             b'r' if self.private.is_empty() => {
                 let top = usize::try_from(p0.saturating_sub(1)).unwrap_or(0);
                 let p1 = params.get(1).copied().unwrap_or(0);
@@ -703,6 +860,7 @@ impl Parser {
                     self.scroll_top = 0;
                     self.scroll_bottom = rows - 1;
                 }
+                self.region_follows_bottom = false;
                 self.cursor_row = 0;
                 self.cursor_col = 0;
                 self.wrap_pending = false;
@@ -792,28 +950,26 @@ impl Parser {
         }
     }
 
-    fn apply_sgr(&mut self, params: &[u32]) {
+    fn apply_sgr(&mut self, params: &[(u32, bool)]) {
         let mut i = 0;
         while i < params.len() {
-            let p = params[i];
+            let (p, colon) = params[i];
             if p == 38 || p == 48 {
-                let (color, extra) = match params.get(i + 1).copied() {
-                    Some(5) => (
+                let (color, extra) = match params.get(i + 1) {
+                    Some((5, _)) => (
                         params
                             .get(i + 2)
-                            .copied()
-                            .map(|idx| ansi256(u8::try_from(idx).unwrap_or(0))),
+                            .map(|&(idx, _)| ansi256(u8::try_from(idx).unwrap_or(0))),
                         3,
                     ),
-                    Some(2) => {
-                        // xterm's colon form carries a color-id slot (`38:2::r:g:b`)
-                        let j = if params.get(i + 2).copied() == Some(0) {
-                            i + 3
-                        } else {
-                            i + 2
-                        };
+                    Some((2, _)) => {
+                        // Issue #4: only the colon form (`38:2::r:g:b`)
+                        // carries a colour-id slot between the 2 and the
+                        // red component; `38;2;0;255;0` is plain RGB and
+                        // its leading zero must not be swallowed.
+                        let j = if colon { i + 3 } else { i + 2 };
                         let rgb = match (params.get(j), params.get(j + 1), params.get(j + 2)) {
-                            (Some(&r), Some(&g), Some(&b)) => Some(Color::rgb(
+                            (Some(&(r, _)), Some(&(g, _)), Some(&(b, _))) => Some(Color::rgb(
                                 u8::try_from(r).unwrap_or(0),
                                 u8::try_from(g).unwrap_or(0),
                                 u8::try_from(b).unwrap_or(0),
@@ -971,12 +1127,21 @@ pub fn mouse_report_bytes(
 }
 
 /// Wrap paste text for the shell, honoring bracketed-paste mode.
+///
+/// GHSA-mjq7-4ghj-vr28: clipboard text can carry escape sequences. Embedded
+/// ESC and C0 control bytes are stripped (newlines, CR and tab are kept),
+/// so a paste can never inject cursor addressing, title changes, mouse
+/// mode toggles or a PTY write back into the terminal.
 #[must_use]
 pub fn bracketed_paste_bytes(text: &str, enabled: bool) -> Vec<u8> {
+    let safe: String = text
+        .chars()
+        .filter(|c| !c.is_ascii_control() || matches!(c, '\n' | '\r' | '\t'))
+        .collect();
     if enabled {
-        format!("\x1b[200~{text}\x1b[201~").into_bytes()
+        format!("\x1b[200~{safe}\x1b[201~").into_bytes()
     } else {
-        text.as_bytes().to_vec()
+        safe.as_bytes().to_vec()
     }
 }
 

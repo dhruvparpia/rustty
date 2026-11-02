@@ -76,13 +76,14 @@ mod tests {
     }
 
     #[test]
-    fn cud_at_bottom_scrolls_region() {
+    fn cud_at_bottom_does_not_scroll() {
+        // Issue #5: CUD stops at the region bottom; only LF scrolls.
         let mut p = Parser::new();
         let mut g = grid();
         feed(&mut p, &mut g, "\x1b[5;1HX\x1b[1B");
         assert_eq!(p.cursor_row, 4);
-        assert_eq!(rows(&g)[3], "X");
-        assert_eq!(rows(&g)[4], "");
+        assert_eq!(rows(&g)[4], "X");
+        assert_eq!(rows(&g)[3], "");
     }
 
     #[test]
@@ -185,13 +186,18 @@ mod tests {
     }
 
     #[test]
-    fn esc_m_reverse_index_blanks_cursor_row() {
+    fn esc_m_reverse_index_scrolls_at_top() {
+        // Issue #6: RI moves the cursor up; only at the region top does it
+        // scroll the region down.
         let mut p = Parser::new();
         let mut g = grid();
         feed(&mut p, &mut g, "top\r\nbody");
-        feed(&mut p, &mut g, "\x1b[1;1H\x1bM");
-        assert_eq!(rows(&g)[0], "");
-        assert_eq!(rows(&g)[1], "body");
+        assert_eq!(p.cursor_row, 1);
+        feed(&mut p, &mut g, "\x1bM");
+        assert_eq!(p.cursor_row, 0);
+        assert_eq!(rows(&g), ["top", "body", "", "", ""]);
+        feed(&mut p, &mut g, "\x1bM");
+        assert_eq!(rows(&g), ["", "top", "body", "", ""]);
         assert_eq!(p.cursor_row, 0);
     }
 
