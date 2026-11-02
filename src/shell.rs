@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 #[cfg(windows)]
+use crate::config::Config;
+#[cfg(windows)]
 use crate::conpty;
 
 /// GHSA-v5c6-5f42-9xqj: bytes of shell output a single pane may have in
@@ -270,6 +272,50 @@ struct Inner {
     _tx: Sender<ShellEvent>,
 }
 
+/// Fallback shell probe (window milestone): Git Bash, then PowerShell 7,
+/// then Windows PowerShell. Shared by the GUI's first tab and the session
+/// host's default profile (issue #46). MSYS shells get `enable_pcon` in
+/// the per-spawn environment; they only attach to a ConPTY with it.
+#[cfg(windows)]
+#[must_use]
+pub fn probe_shell(cfg: &Config) -> SpawnOptions {
+    let sys = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let (program, args) = if std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe").exists() {
+        (
+            String::from(r"C:\Program Files\Git\bin\bash.exe"),
+            vec![String::from("-l")],
+        )
+    } else if std::path::Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe").exists() {
+        (
+            String::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            Vec::new(),
+        )
+    } else {
+        let powershell = std::path::Path::new(&sys)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        (powershell.to_string_lossy().into_owned(), Vec::new())
+    };
+    let mut opts = SpawnOptions {
+        program,
+        args,
+        cols: cfg.window.cols,
+        rows: cfg.window.rows,
+        cwd: None,
+        env: std::collections::BTreeMap::new(),
+    };
+    if opts.program.contains("\\Git\\") {
+        opts.env.insert("MSYS".into(), "enable_pcon".into());
+        opts.env.insert("MSYS2".into(), "enable_pcon".into());
+    }
+    if cfg.shell_integration {
+        opts.apply_shell_integration();
+    }
+    opts
+}
+
 /// A shell process behind the pane.
 ///
 /// The UI side owns the receiver; the reader thread owns a sender clone
@@ -385,6 +431,7 @@ impl Shell {
             opts.rows,
             opts.cwd.as_deref(),
             &opts.env,
+            None,
         )
         .map_err(spawn_err)?;
         // The primary thread handle is not needed after spawn (WIN-001:

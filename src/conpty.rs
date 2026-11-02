@@ -31,13 +31,14 @@ use windows::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, PSEUDOCONSOLE_INHERIT_CURSOR,
     ResizePseudoConsole,
 };
+use windows::Win32::System::JobObjects::AssignProcessToJobObject;
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, INFINITE,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-    UpdateProcThreadAttribute, WaitForSingleObject,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 use windows::core::{HRESULT, Owned, PCWSTR, PWSTR};
 
@@ -45,6 +46,20 @@ use windows::core::{HRESULT, Owned, PCWSTR, PWSTR};
 ///
 /// Dropping it closes the handle via the windows crate's `Free` impl for HANDLE.
 pub struct SendHandle(Owned<HANDLE>);
+
+impl SendHandle {
+    /// The raw handle value, valid while this `SendHandle` is alive.
+    #[must_use]
+    pub fn raw(&self) -> HANDLE {
+        *self.0
+    }
+
+    /// Wrap an owned handle (e.g. a job object) for cross-thread ownership.
+    #[must_use]
+    pub fn from_owned(owned: Owned<HANDLE>) -> Self {
+        Self(owned)
+    }
+}
 
 // Safety: the payload is a single owned kernel handle. Handles are not tied to a
 // process thread, and this type is the sole owner, so moving it between threads is
@@ -55,6 +70,13 @@ unsafe impl Send for SendHandle {}
 ///
 /// Created by [`ConPty::input_writer`]; writes keyboard/query-reply bytes
 /// into the shell's input (same path as [`ConPty::write_input`]).
+// ConPty handles are kernel handles (not thread-affine); the session host
+// moves a whole ConPty to its reader thread (HOST-004).
+// Safety: HANDLE/HPCON values are valid in any thread.
+unsafe impl Send for ConPty {}
+
+/// A cloneable writer for the pseudo-console input pipe (used by panes
+/// that write from the UI thread).
 pub struct ConPtyWriter(SendHandle);
 
 impl ConPtyWriter {
@@ -79,6 +101,11 @@ impl ConPty {
     /// The second returned handle is the primary thread handle (close it
     /// right away); the first is the process handle (the reader thread
     /// waits on it). `cols`/`rows` must be 1..=i16::MAX.
+    ///
+    /// HOST-004: when `job` is `Some`, the child is created suspended,
+    /// assigned to that job object, and resumed, so no grandchild can be
+    /// spawned before it is inside the job (the session host uses one
+    /// kill-on-close job per session).
     pub fn spawn(
         program: &str,
         args: &[String],
@@ -86,6 +113,7 @@ impl ConPty {
         rows: usize,
         cwd: Option<&str>,
         env: &BTreeMap<String, String>,
+        job: Option<HANDLE>,
     ) -> Result<(Self, SendHandle, SendHandle), io::Error> {
         if cols == 0 || rows == 0 || cols > i16::MAX as usize || rows > i16::MAX as usize {
             return Err(io::Error::new(
@@ -205,13 +233,20 @@ impl ConPty {
             startup.lpAttributeList = attr;
 
             let mut process = PROCESS_INFORMATION::default();
+            let flags = EXTENDED_STARTUPINFO_PRESENT
+                | CREATE_UNICODE_ENVIRONMENT
+                | if job.is_some() {
+                    CREATE_SUSPENDED
+                } else {
+                    Default::default()
+                };
             let spawned = CreateProcessW(
                 PWSTR::null(),
                 Some(PWSTR(cmdline.as_mut_ptr())),
                 None,
                 None,
                 false,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                flags,
                 Some(env_block.as_ptr() as *const core::ffi::c_void),
                 PCWSTR::from_raw(cwd_ptr),
                 core::ptr::from_ref(&startup.StartupInfo),
@@ -225,6 +260,22 @@ impl ConPty {
                 CloseHandle(parent_input_write).ok();
                 CloseHandle(parent_output_read).ok();
                 return Err(io_error(&e));
+            }
+
+            if let Some(job) = job {
+                // HOST-004: the child is suspended; it joins the job
+                // before any code of its own runs. An assignment failure
+                // kills the suspended child (no orphan) and unwinds.
+                if let Err(e) = AssignProcessToJobObject(job, process.hProcess) {
+                    TerminateProcess(process.hProcess, 1).ok();
+                    CloseHandle(process.hThread).ok();
+                    CloseHandle(process.hProcess).ok();
+                    ClosePseudoConsole(pcon);
+                    CloseHandle(parent_input_write).ok();
+                    CloseHandle(parent_output_read).ok();
+                    return Err(io_error(&e));
+                }
+                ResumeThread(process.hThread);
             }
 
             Ok((
@@ -246,6 +297,19 @@ impl ConPty {
     }
 
     /// Resize the pseudo-console (TTY-003: "resize must be delivered").
+    /// HOST-006: close the input pipe write end so the shell sees stdin
+    /// EOF (the graceful-termination attempt). Idempotent: the handle is
+    /// replaced with a null one `Drop` tolerates.
+    pub fn close_input(&mut self) {
+        // Safety: closing our own write handle; CloseHandle(NULL) just
+        // fails harmlessly on repeat calls.
+        unsafe {
+            CloseHandle(*self.input_write).ok();
+            *self.input_write = HANDLE(std::ptr::null_mut());
+        }
+    }
+
+    /// Resize the pseudo-console to `cols` x `rows`.
     pub fn resize(&self, cols: usize, rows: usize) -> Result<(), io::Error> {
         let size = COORD {
             X: cols.min(i16::MAX as usize) as i16,

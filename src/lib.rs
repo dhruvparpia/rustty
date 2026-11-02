@@ -23,7 +23,14 @@ pub mod discovery;
 /// Kitty graphics protocol: header parsing and base64 (pure, spec graphics
 /// protocols, roadmap v0.5).
 pub mod graphics;
+// Persistent session host (issue #46, docs/design-session-host.md). The
+// server/client submodules are the raw Win32 pipe/token/job FFI boundary.
 pub mod grid;
+#[allow(
+    unsafe_code,
+    reason = "HOST-001: the session host's server and client are raw Win32 FFI boundaries"
+)]
+pub mod host;
 // Glyph atlas FFI boundary (spec §20 "custom glyph cache / custom font
 // atlas", §21): Direct2D calls on the atlas' bitmap render target.
 #[cfg(windows)]

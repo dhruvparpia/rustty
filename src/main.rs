@@ -5,72 +5,25 @@
 // must not allocate a console window next to the terminal.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-#[cfg(windows)]
-use std::path::Path;
 use std::process::ExitCode;
 
 use rusttyterm::config::Config;
-#[cfg(windows)]
-use rusttyterm::shell::SpawnOptions;
 use rusttyterm::theme;
-
-#[cfg(windows)]
-fn probe_shell(cfg: &Config) -> SpawnOptions {
-    let sys = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-    let (program, args) = if Path::new(r"C:\Program Files\Git\bin\bash.exe").exists() {
-        (
-            String::from(r"C:\Program Files\Git\bin\bash.exe"),
-            vec![String::from("-l")],
-        )
-    } else if Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe").exists() {
-        (
-            String::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
-            Vec::new(),
-        )
-    } else {
-        let powershell = Path::new(&sys)
-            .join("System32")
-            .join("WindowsPowerShell")
-            .join("v1.0")
-            .join("powershell.exe");
-        (powershell.to_string_lossy().into_owned(), Vec::new())
-    };
-    if program.contains("\\Git\\") {
-        // MSYS shells (Git Bash, MSYS2) only attach to a ConPTY when told
-        // to use the pseudo-console; without these vars their output never
-        // reaches the ConPTY pipes. Set once here in the parent; every
-        // ConPTY child inherits the environment (main is single-threaded
-        // at this point, so set_var is sound).
-        unsafe {
-            std::env::set_var("MSYS", "enable_pcon");
-            std::env::set_var("MSYS2", "enable_pcon");
-        }
-    }
-    let mut opts = SpawnOptions {
-        program,
-        args,
-        cols: cfg.window.cols,
-        rows: cfg.window.rows,
-        cwd: None,
-        env: std::collections::BTreeMap::new(),
-    };
-    if cfg.shell_integration {
-        opts.apply_shell_integration();
-    }
-    opts
-}
 
 #[cfg(windows)]
 fn main() -> ExitCode {
     let cli = rusttyterm::cli::parse(std::env::args_os().skip(1));
-    if cli.help || cli.version || cli.workspaces {
+    let is_session_verb = cli.list_sessions
+        || cli.new_session
+        || cli.session_info.is_some()
+        || cli.terminate_session.is_some()
+        || cli.attach.is_some();
+    if cli.help || cli.version || cli.workspaces || is_session_verb {
         // The binary is a GUI-subsystem exe, so no console is attached at
         // startup; attach to the calling console so --help/--version/
-        // --workspaces print where they were typed (fails harmlessly when
-        // there is none).
-        // SAFETY: FFI boundary (NFR-401).
-        use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
-        let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+        // --workspaces/verbs print where they were typed, keeping any
+        // redirection intact.
+        rusttyterm::cli::attach_parent_console();
     }
     for unknown in &cli.unknown {
         eprintln!("rusttyterm: ignoring unknown argument {unknown:?}");
@@ -99,8 +52,13 @@ fn main() -> ExitCode {
     };
     // CONFIG-013: `--profile` beats the config's `starting-profile`
     // (the Jump List's per-profile tasks launch with this flag).
-    if let Some(profile) = cli.profile {
-        cfg.starting_profile = profile;
+    if let Some(profile) = &cli.profile {
+        cfg.starting_profile = profile.clone();
+    }
+    // Issue #46: session host verbs. They print and exit; a failing
+    // verb must never fall through to opening a GUI window.
+    if is_session_verb {
+        return session_verb(&cli);
     }
     // THEME-009/013/014: preset name, then themes/<name>.toml next to the
     // config, then the [theme] colour overrides. Problems are reported and
@@ -118,7 +76,7 @@ fn main() -> ExitCode {
     for problem in &problems {
         eprintln!("rusttyterm: {problem}");
     }
-    let mut spawn = probe_shell(&cfg);
+    let mut spawn = rusttyterm::shell::probe_shell(&cfg);
     // Issue #40: a positional directory ("Open terminal here" from
     // Explorer, or a plain `rusttyterm C:\dir`) sets the first tab's
     // working directory. Not a directory: report and open as usual.
@@ -136,6 +94,201 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Session host verbs (issue #46): talk to the per-user `rusttyhost`
+/// and print its answer. Stable exit codes per the attach contract:
+/// 2 usage, 3 not found, 5 host unavailable, 6 protocol incompatible;
+/// a failing verb never opens a window.
+#[cfg(windows)]
+fn session_verb(cli: &rusttyterm::cli::Cli) -> ExitCode {
+    use std::process::ExitCode;
+
+    use rusttyterm::host::{EXIT_NOT_FOUND, EXIT_PROTOCOL, EXIT_USAGE, client};
+    use serde_json::json;
+
+    if cli.new_session && cli.session_name.as_deref().is_some_and(|s| s.is_empty()) {
+        eprintln!("rusttyterm: --name needs a value");
+        return ExitCode::from(EXIT_USAGE);
+    }
+    // Attach and console attach are the #47 entry point. This build
+    // accepts the grammar so `--attach` can never fall through to
+    // opening a GUI window (docs/design-session-attach.md: a malformed
+    // verb fails visibly, never launching a shell). Attaching with
+    // --profile is an error: attach never replaces the original
+    // profile. A valid alias is reported as not-yet-implemented.
+    if cli.attach.is_some() && cli.profile.is_some() {
+        eprintln!("rusttyterm: --attach does not accept --profile");
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let want_alias = cli.attach.or(cli.session_info).or(cli.terminate_session);
+    if want_alias.is_some() && want_alias == Some(0) {
+        // A malformed alias (not a positive number) is a usage error.
+        eprintln!("rusttyterm: session alias must be a positive number");
+        return ExitCode::from(EXIT_USAGE);
+    }
+    if cli.attach.is_some() {
+        eprintln!(
+            "rusttyterm: console attach (--attach) is not in this build; session {} left untouched",
+            cli.attach.unwrap_or(0)
+        );
+        return ExitCode::from(EXIT_USAGE);
+    }
+
+    let mut c = match client::Client::connect() {
+        Ok(c) => c,
+        Err(e) => {
+            if cli.list_sessions && e.raw_os_error() == Some(2) {
+                // No host and none spawnable: nothing is running, which
+                // is the honest empty answer (exit 0, per the contract).
+                // Any other connect error is a real failure, not "empty".
+                if cli.json {
+                    println!("{{\"schema\":\"host-session/v1\",\"sessions\":[]}}");
+                } else {
+                    println!("no sessions");
+                }
+                return ExitCode::SUCCESS;
+            }
+            let code = if e.kind() == std::io::ErrorKind::ConnectionRefused {
+                EXIT_PROTOCOL
+            } else {
+                rusttyterm::host::EXIT_HOST_UNAVAILABLE
+            };
+            eprintln!("rusttyterm: {e}");
+            return ExitCode::from(code);
+        }
+    };
+
+    let (method, params) = if cli.new_session {
+        (
+            "session.create",
+            json!({
+                "profile": cli.profile,
+                "name": cli.session_name,
+                "cwd": cli.directory,
+                "cols": cli.session_cols,
+                "rows": cli.session_rows,
+                "persistent": !cli.ephemeral,
+            }),
+        )
+    } else if let Some(alias) = cli.session_info {
+        ("session.info", json!({"alias": alias}))
+    } else if let Some(alias) = cli.terminate_session {
+        (
+            "session.terminate",
+            json!({"alias": alias, "force": cli.force}),
+        )
+    } else {
+        ("session.list", json!({}))
+    };
+
+    let resp = match c.call(method, params) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("rusttyterm: {e}");
+            return ExitCode::from(rusttyterm::host::EXIT_HOST_UNAVAILABLE);
+        }
+    };
+    if let Some(err) = resp.get("error") {
+        let code = err
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("internal");
+        let message = err
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        eprintln!("rusttyterm: {code}: {message}");
+        return ExitCode::from(if code == "target-stale" {
+            EXIT_NOT_FOUND
+        } else {
+            1
+        });
+    }
+    let result = resp
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    if cli.json {
+        println!("{result}");
+        return ExitCode::SUCCESS;
+    }
+    match method {
+        "session.list" => {
+            let sessions = result.get("sessions").and_then(serde_json::Value::as_array);
+            let Some(sessions) = sessions else {
+                println!("no sessions");
+                return ExitCode::SUCCESS;
+            };
+            if sessions.is_empty() {
+                println!("no sessions");
+                return ExitCode::SUCCESS;
+            }
+            println!("#  NAME          PROFILE  STATE   PID       CWD");
+            for s in sessions {
+                let g = |k: &str| {
+                    s.get(k)
+                        .map(serde_json::Value::to_string)
+                        .unwrap_or_default()
+                        .trim_matches('"')
+                        .to_owned()
+                };
+                println!(
+                    "{:<3} {:<13} {:<8} {:<5} {:<9} {}",
+                    g("alias"),
+                    g("name"),
+                    g("profile"),
+                    g("state"),
+                    g("pid"),
+                    g("cwd"),
+                );
+            }
+        }
+        "session.info" => {
+            let Some(s) = result.get("session") else {
+                println!("no session");
+                return ExitCode::SUCCESS;
+            };
+            for k in [
+                "alias",
+                "id",
+                "name",
+                "profile",
+                "program",
+                "cwd",
+                "cols",
+                "rows",
+                "pid",
+                "persistent",
+                "state",
+                "exitCode",
+            ] {
+                if let Some(v) = s.get(k) {
+                    println!(
+                        "{k}: {}",
+                        v.as_str().map(str::to_owned).unwrap_or(v.to_string())
+                    );
+                }
+            }
+        }
+        "session.create" => {
+            let alias = result
+                .get("session")
+                .and_then(|s| s.get("alias"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            println!("created session {alias}");
+        }
+        _ => {
+            let alias = result
+                .get("session")
+                .and_then(|s| s.get("alias"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            println!("session {alias} terminated");
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 #[cfg(not(windows))]

@@ -23,6 +23,32 @@ pub struct Cli {
     pub help: bool,
     /// `--version` was given.
     pub version: bool,
+    /// `--list-sessions`: ask the session host for its sessions (#46).
+    pub list_sessions: bool,
+    /// `--new-session`: ask the session host to create one (#46).
+    pub new_session: bool,
+    /// `--session-info <n>`: inspect one host session (#46).
+    pub session_info: Option<u32>,
+    /// `--terminate-session <n>`: terminate one host session (#46).
+    pub terminate_session: Option<u32>,
+    /// `--attach <n>`: console attach, the #47 entry point. Parsed here
+    /// so it can never fall through to opening a GUI window.
+    pub attach: Option<u32>,
+    /// `--force`: with `--terminate-session`, skip the graceful attempt.
+    pub force: bool,
+    /// `--detach`: with `--new-session`, create without a view (#46).
+    pub detach: bool,
+    /// `--ephemeral`: with `--new-session`, end the session when its
+    /// last client detaches (ADR §3 lifecycle).
+    pub ephemeral: bool,
+    /// `--name <name>`: display name for `--new-session` (label only).
+    pub session_name: Option<String>,
+    /// `--cols <n>` / `--rows <n>`: geometry for `--new-session`.
+    pub session_cols: Option<u32>,
+    /// `--rows <n>`: geometry for `--new-session`.
+    pub session_rows: Option<u32>,
+    /// `--json`: structured output for the session verbs (#46).
+    pub json: bool,
     /// Arguments this version does not know.
     pub unknown: Vec<String>,
 }
@@ -42,6 +68,19 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Cli {
                 cli.workspace = args.next().map(|v| v.to_string_lossy().into_owned());
             }
             "--workspaces" => cli.workspaces = true,
+            "--list-sessions" => cli.list_sessions = true,
+            "--new-session" => cli.new_session = true,
+            "--session-info" => cli.session_info = alias(&mut args),
+            "--terminate-session" => cli.terminate_session = alias(&mut args),
+            "--attach" => cli.attach = alias(&mut args),
+            "--force" => cli.force = true,
+            "--detach" => cli.detach = true,
+            "--ephemeral" => cli.ephemeral = true,
+            "--cwd" => cli.directory = args.next().map(|v| v.to_string_lossy().into_owned()),
+            "--name" => cli.session_name = args.next().map(|v| v.to_string_lossy().into_owned()),
+            "--cols" => cli.session_cols = numeric(&args.next()),
+            "--rows" => cli.session_rows = numeric(&args.next()),
+            "--json" => cli.json = true,
             "-h" | "--help" => cli.help = true,
             "--version" => cli.version = true,
             // First positional is the working directory (Open terminal
@@ -55,10 +94,65 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Cli {
     cli
 }
 
+/// A positive integer argument; a missing or malformed value reads as
+/// absent (the session verbs then answer "usage").
+fn numeric(v: &Option<OsString>) -> Option<u32> {
+    v.as_ref()
+        .and_then(|v| v.to_string_lossy().parse::<u32>().ok())
+}
+
+/// Alias for a session verb: the flag is present, so this is always
+/// `Some`. A missing, non-positive, or malformed value reads as 0, the
+/// verbs' "usage" sentinel — the contract is that a malformed verb
+/// fails visibly and never falls through to opening a GUI window
+/// (docs/design-session-attach.md).
+fn alias<I: Iterator<Item = OsString>>(args: &mut I) -> Option<u32> {
+    let value = args.next();
+    let parsed = value
+        .as_ref()
+        .and_then(|v| v.to_string_lossy().parse::<u32>().ok())
+        .filter(|n| *n > 0);
+    Some(parsed.unwrap_or(0))
+}
+
 /// One-line usage for `--help`.
 #[must_use]
 pub const fn usage() -> &'static str {
-    "usage: rusttyterm [directory] [--profile <name>] [--theme <name>] [--workspace <name> | --workspaces] [--version] [-h|--help]"
+    "usage: rusttyterm [directory] [--profile <name>] [--theme <name>] [--workspace <name> | --workspaces] [--version] [-h|--help]\n\
+       session host: rusttyterm --list-sessions [--json] | --new-session [--profile <name>] [--name <label>] [--cwd <dir>] [--cols <n>] [--rows <n>] [--detach] [--ephemeral] | --session-info <n> [--json] | --terminate-session <n> [--force] | --attach <n> (not in this build)"
+}
+
+/// Attach to the calling console so a GUI-subsystem exe can print to
+/// where it was launched (a plain `AttachConsole` replaces redirected
+/// standard handles with the console handle, which loses `> file` and
+/// piped output; the redirected handles are restored after the attach).
+#[cfg(windows)]
+#[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
+pub fn attach_parent_console() {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+
+    // Safety: FFI boundary (NFR-401); all calls act on this process's
+    // own standard handles.
+    let out = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }.unwrap_or(HANDLE::default());
+    let err = unsafe { GetStdHandle(STD_ERROR_HANDLE) }.unwrap_or(HANDLE::default());
+    // A redirected handle (file/pipe) is not a console: it fails
+    // GetConsoleMode. Those must survive the attach.
+    let out_redir =
+        !out.is_invalid() && unsafe { GetConsoleMode(out, std::ptr::null_mut()) }.is_err();
+    let err_redir =
+        !err.is_invalid() && unsafe { GetConsoleMode(err, std::ptr::null_mut()) }.is_err();
+    if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_ok() {
+        if out_redir {
+            unsafe { SetStdHandle(STD_OUTPUT_HANDLE, out) }.ok();
+        }
+        if err_redir {
+            unsafe { SetStdHandle(STD_ERROR_HANDLE, err) }.ok();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -118,5 +212,36 @@ mod tests {
         assert!(parse(os(&["-h"])).help);
         assert!(parse(os(&["--help"])).help);
         assert!(parse(os(&["--version"])).version);
+    }
+
+    #[test]
+    fn session_verbs() {
+        let cli = parse(os(&[
+            "--new-session",
+            "--profile",
+            "PowerShell",
+            "--name",
+            "build",
+            "--cols",
+            "120",
+            "--detach",
+            "--json",
+        ]));
+        assert!(cli.new_session);
+        assert_eq!(cli.profile.as_deref(), Some("PowerShell"));
+        assert_eq!(cli.session_name.as_deref(), Some("build"));
+        assert_eq!(cli.session_cols, Some(120));
+        assert!(cli.detach);
+        assert!(cli.json);
+        assert_eq!(parse(os(&["--session-info", "3"])).session_info, Some(3));
+        let cli = parse(os(&["--terminate-session", "3", "--force"]));
+        assert_eq!(cli.terminate_session, Some(3));
+        assert!(cli.force);
+        // A malformed alias is the 0 sentinel, so the verb answers "usage"
+        // and never falls through to opening a window.
+        assert_eq!(parse(os(&["--session-info", "x"])).session_info, Some(0));
+        assert_eq!(parse(os(&["--session-info"])).session_info, Some(0));
+        assert_eq!(parse(os(&["--attach", "4"])).attach, Some(4));
+        assert_eq!(parse(os(&["--attach"])).attach, Some(0));
     }
 }

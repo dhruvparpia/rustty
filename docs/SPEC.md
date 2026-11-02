@@ -1241,6 +1241,25 @@ will be specified with their child issues.
 | SEARCH-021 | A rescan (e.g. a case toggle) that finds the same match restores the user's selection to it. | P2 |
 | SEARCH-022 | Scrolling away from the live edge pauses the follow-the-output snap; the reading position survives a burst of shell output. Returning to the live edge (wheel to the bottom, search jump, command jump) resumes it. | P1 |
 
+## 9.32 Session host requirements
+
+Issue #46 (roadmap "Session host"; ADR `docs/design-session-host.md`,
+contract `docs/design-session-attach.md`). The per-user `rusttyhost`
+owns managed PTYs independently of any client. Console attach
+(#47), streaming (#48/#58), lifecycle UI (#49) and automation
+(#56–#59) build on these and will be specified with their issues.
+
+| ID | Requirement | Priority |
+|---|---|---|
+| HOST-001 | A per-user session host binary (`rusttyhost`) serves a per-user named pipe; the pipe's DACL grants access to the current user only, and remote clients are rejected. The host is a GUI-subsystem process: it never flashes a console. | P1 |
+| HOST-002 | Single instance: the first process to create the pipe owns it; a second instance probes the pipe, finds the live host, and exits 0. The host exits by itself after an idle budget (10 min) with no clients and no live sessions. Host death is visible to clients as a host-unavailable exit, never as a silent success. | P1 |
+| HOST-003 | Sessions get durable u64 ids and stable numeric aliases, persisted atomically under the config dir. A closed alias keeps answering "stale" for the host's process lifetime and across restarts; a stale number is never bound to an unrelated live session. | P1 |
+| HOST-004 | The host owns every managed PTY in its own kill-on-close job object: a client process dying (crash included) never kills a host-owned shell, and explicit termination cleans up the whole process tree and its handles. | P1 |
+| HOST-005 | Headless management verbs: `--list-sessions`, `--new-session` (with `--name`, `--profile`, `--cwd`), `--session-info <n>`, `--terminate-session <n>`, and versioned JSON via `--json` (schema `host-session/v1`). Records carry name, profile, cwd, geometry, live/exited state, pid and exit code. A failing verb never opens a window and uses stable exit codes: 2 usage, 3 not found, 5 host unavailable, 6 protocol incompatible. | P1 |
+| HOST-006 | Graceful termination closes the shell's input (stdin EOF) and waits a bounded grace period (5 s) before terminating the job, so shells get a chance to exit on their own. | P1 |
+| HOST-007 | Lifecycle is explicit at creation: persistent sessions survive client detach (the shell keeps running after `--new-session --detach` and after any client exits); ephemeral sessions terminate when the last client detaches. The host never adopts a process it did not spawn. | P1 |
+| HOST-008 | Protocol version negotiation: client and host agree on `min(client, host)` at `initialize`; an incompatible host exits 6 with a clear message. A client never replaces, kills, or reconfigures a live host to force a version. | P1 |
+
 ---
 
 # 10. Non-Functional Requirements
