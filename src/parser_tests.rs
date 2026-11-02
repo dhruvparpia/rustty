@@ -472,4 +472,92 @@ mod tests {
         );
         assert_eq!(rows(&g)[0], "X");
     }
+
+    /// Feed all bytes the way `Pane::feed` does: resume parsing after the
+    /// parser stops early on a grid-changing event (issue #1/#7).
+    fn advance_all(p: &mut Parser, g: &mut Grid, bytes: &[u8]) -> Vec<ParserEvent> {
+        let mut events = Vec::new();
+        let mut pos = 0usize;
+        while pos < bytes.len() {
+            let outcome = p.advance(g, &bytes[pos..]);
+            pos += outcome.consumed.min(bytes.len() - pos).max(1);
+            events.extend(outcome.events);
+        }
+        events
+    }
+
+    /// Issue #36: portable protocol fixtures — fed whole, fed in every
+    /// chunk size, and split at every byte offset — must land in the same
+    /// grid, cursor and event stream. The corpus covers the wire shapes
+    /// the supported apps emit: CSI, OSC with BEL/ST terminators, DCS,
+    /// kitty APC/DCS, UTF-8, CJK and emoji.
+    #[test]
+    fn protocol_fixtures_survive_every_chunk_boundary() {
+        const FIXTURES: &[&[u8]] = &[
+            b"plain text\r\nwrapped lines\x1b[0m",
+            b"\x1b[3;5Hpos\x1b[99;99Hclamped",
+            b"\x1b[1;3rregion\x1b[H\x1b[2Jafter clear",
+            b"\x1b[1mbold\x1b[31mred\x1b[0mplain",
+            b"\x1b7\x1b[2;2Hsaved\x1b8rest",
+            b"\x1b]0;title BEL\x07after",
+            b"\x1b]2;title ST\x1b\\after",
+            b"\x1b]7;file://host/path\x07cwd",
+            b"\x1b]133;A\x07\x1b]133;D;0\x07prompt",
+            b"\x1b[5n\x1b[c",
+            b"\x1b[?1049halt\x1b[?1049lmain",
+            b"\x1b[?25lhiding\x1b[?25hshown",
+            b"caf\xc3\xa9 \xe4\xb8\xad\xe6\x96\x87 \xf0\x9f\x98\x80 \x07bell",
+            b"\x1b_Ga=t,i=7,f=100;YWJj\x1b\\after kitty",
+            b"\x1b_Ga=d\x07kitty bel",
+            b"\x1bPGa=I\x1b\\dcs kitty",
+            b"\x1bPq=sx;re\x1b\\\x1b_abc\x1b\\\x1b}zz\x1b\\X",
+            b"del\x7eback\x08space\ttab\r\nwrap overflow",
+            b"\x1b[?1000h\x1b[?1006hmouse\x1b[?1000l",
+        ];
+        for fixture in FIXTURES {
+            let mut p = Parser::new();
+            let mut g = grid();
+            let whole = advance_all(&mut p, &mut g, fixture);
+            let whole_rows = rows(&g);
+            let whole_cursor = (p.cursor_row, p.cursor_col);
+
+            for chunk in 1..=fixture.len() {
+                let mut p = Parser::new();
+                let mut g = grid();
+                let mut events = Vec::new();
+                for piece in fixture.chunks(chunk) {
+                    events.extend(advance_all(&mut p, &mut g, piece));
+                }
+                assert_eq!(
+                    events, whole,
+                    "fixture {fixture:?} fed in {chunk}-byte chunks: events differ"
+                );
+                assert_eq!(
+                    (p.cursor_row, p.cursor_col),
+                    whole_cursor,
+                    "fixture {fixture:?} fed in {chunk}-byte chunks: cursor differs"
+                );
+                assert_eq!(
+                    rows(&g),
+                    whole_rows,
+                    "fixture {fixture:?} fed in {chunk}-byte chunks: grid differs"
+                );
+            }
+            for split in 1..fixture.len() {
+                let mut p = Parser::new();
+                let mut g = grid();
+                let mut events = advance_all(&mut p, &mut g, &fixture[..split]);
+                events.extend(advance_all(&mut p, &mut g, &fixture[split..]));
+                assert_eq!(
+                    events, whole,
+                    "fixture {fixture:?} split at byte {split}: events differ"
+                );
+                assert_eq!(
+                    rows(&g),
+                    whole_rows,
+                    "fixture {fixture:?} split at byte {split}: grid differs"
+                );
+            }
+        }
+    }
 }

@@ -18,12 +18,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, Once};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::HBRUSH;
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HBRUSH, HGDIOBJ, ReleaseDC,
+    SelectObject,
+};
+use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, HICON, RegisterClassW,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, HICON,
+    PW_RENDERFULLCONTENT, RegisterClassW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
     WINDOW_EX_STYLE, WNDCLASSW, WS_CLIPCHILDREN, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
@@ -467,7 +473,7 @@ fn damage_frames_cover_only_the_dirty_rows() {
 #[ignore = "needs a desktop session: cargo test --release -- --ignored"]
 fn device_loss_recovery_repaints() {
     let _guard = bench_lock();
-    let (hwnd, mut renderer) = bench_target(80, 24);
+    let (_hwnd, mut renderer) = bench_target(80, 24);
     let (cols, rows) = renderer.grid_size();
     let mut app = App::with_size(cols, rows, 1_000);
     let theme = Theme::predawn();
@@ -509,5 +515,141 @@ fn device_loss_recovery_repaints() {
         renderer.atlas_stats().tiles > 0,
         "bench: the atlas was not rebuilt after recreation"
     );
-    let _ = unsafe { DestroyWindow(hwnd) };
+    // No DestroyWindow: destroying the window right after target
+    // recreation AVs on this machine (the compositor races the swap-chain
+    // teardown); process exit owns the window.
+}
+
+/// Pixels of the bench window as the compositor sees them: `PrintWindow`
+/// with `PW_RENDERFULLCONTENT` grabs the DWM-redirected frame, which is
+/// what a Direct2D swap chain shows the user.
+fn capture_window(hwnd: HWND) -> Vec<u8> {
+    let mut rect = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut rect) }.expect("bench: client rect");
+    let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+    assert!(w > 0 && h > 0, "bench: the window has no client area");
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    unsafe {
+        let dc = GetDC(Some(hwnd));
+        let mem = CreateCompatibleDC(Some(dc));
+        let bmp = CreateCompatibleBitmap(dc, w, h);
+        let old = SelectObject(mem, HGDIOBJ::from(bmp));
+        let ok = PrintWindow(hwnd, mem, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT));
+        assert!(ok.as_bool(), "bench: PrintWindow failed");
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let got = GetDIBits(
+            mem,
+            bmp,
+            0,
+            h as u32,
+            Some(buf.as_mut_ptr().cast()),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+        assert_eq!(got, h, "bench: GetDIBits read {got} of {h} scanlines");
+        SelectObject(mem, old);
+        let _ = DeleteDC(mem);
+        let _ = DeleteObject(HGDIOBJ::from(bmp));
+        ReleaseDC(Some(hwnd), dc);
+    }
+    buf
+}
+
+/// True when every pixel equals the first: a flat capture means the
+/// compositor returned nothing (the reference comparison proves nothing
+/// on a flat frame).
+fn is_flat(buf: &[u8]) -> bool {
+    let (chunks, _) = buf.as_chunks::<4>();
+    chunks.iter().all(|px| px == &buf[..4])
+}
+
+/// DWM composes a presented frame on its own clock, so a capture taken
+/// right after a paint can still show the previous (or an empty) frame.
+/// Poll until the capture is not flat and, when `previous` is given,
+/// differs from it; return the last capture when the deadline passes.
+fn capture_presented(hwnd: HWND, previous: Option<&[u8]>) -> Vec<u8> {
+    let deadline = Instant::now() + Duration::from_millis(1_000);
+    loop {
+        let buf = capture_window(hwnd);
+        let fresh = !is_flat(&buf) && previous.is_none_or(|prev| buf != *prev);
+        if fresh || Instant::now() >= deadline {
+            return buf;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Issue #36: a damage repaint must show the user the same screen as a
+/// full repaint of the same content. Both frames are captured from the
+/// presented window and compared pixel-for-pixel.
+#[test]
+#[ignore = "needs a desktop session: cargo test --release -- --ignored"]
+fn damage_repaint_matches_full_paint() {
+    let _guard = bench_lock();
+    let (hwnd, mut renderer) = bench_target(80, 24);
+    // DWM only composes windows that are on a monitor; an off-monitor
+    // window has no composed frame to capture.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+    .expect("bench: moving the bench window on-screen failed");
+    let (cols, rows) = renderer.grid_size();
+    let mut app = App::with_size(cols, rows, 1_000);
+    let theme = Theme::predawn();
+
+    // The first frame of a fresh renderer is the full-paint reference.
+    app.feed_active(lines(0, rows).as_bytes());
+    let _ = app.take_dirty();
+    renderer.paint_damage(&app, &theme, None, None);
+    app.clear_grid_damage();
+    let reference = capture_presented(hwnd, None);
+    assert!(
+        !is_flat(&reference),
+        "bench: the capture is one flat colour; DWM capture is not working on this machine"
+    );
+
+    // One line changes; a damage repaint covers it.
+    app.feed_active("\x1b[5;1Hdamage repaint\r\n".as_bytes());
+    let _ = app.take_dirty();
+    renderer.paint_damage(&app, &theme, None, None);
+    app.clear_grid_damage();
+    let damaged = capture_presented(hwnd, Some(&reference));
+    assert!(
+        damaged.iter().zip(&reference).any(|(a, b)| a != b),
+        "bench: the damage frame shows no change; the capture is frozen",
+    );
+
+    // The same content through a guaranteed full repaint (recreation
+    // schedules one), then a pixel-for-pixel comparison.
+    renderer.recreate_target();
+    renderer.paint_damage(&app, &theme, None, None);
+    let full = capture_window(hwnd);
+    let diff = damaged.iter().zip(&full).position(|(a, b)| a != b);
+    assert!(
+        diff.is_none(),
+        "bench: damage repaint differs from the full-paint reference at byte {diff:?} of {}",
+        full.len(),
+    );
+    // No DestroyWindow: tearing down a DWM-composed swap-chain window from
+    // the test races the compositor thread (AV on process exit is already
+    // a known bench-suite issue on this machine); process exit owns this.
 }

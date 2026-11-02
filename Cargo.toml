@@ -58,6 +58,12 @@ windows-numerics = "0.3.1"
 # crate pulls in.
 windows-core = "0.62.2"
 
+# The render bench captures presented frames with `PrintWindow`, which
+# windows 0.62 classifies under Win32_Storage_Xps. Tests only: the shipped
+# binary never references it.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62", features = ["Win32_Storage_Xps"] }
+
 [lints.rust]
 missing_docs = "warn"
 
