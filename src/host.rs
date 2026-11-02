@@ -41,6 +41,11 @@ const MAX_EXITED_RECORDS: usize = 32;
 /// scripts can pin the shape ("versioned JSON", #46 acceptance).
 pub const SCHEMA: &str = "host-session/v1";
 
+/// Attach-snapshot schema tag (issue #48, docs/design-session-attach.md):
+/// the canonical terminal model rendered as grid spans, never raw
+/// historic PTY bytes.
+pub const SNAPSHOT_SCHEMA: &str = "host-snapshot/v1";
+
 /// Operations this host serves (clients discover, never hardcode).
 pub const OPS: &[&str] = &[
     "initialize",
@@ -357,12 +362,240 @@ pub mod server {
     use crate::config::Config;
     use crate::conpty::{self, ConPty, SendHandle};
     use crate::discovery;
+    use crate::grid::Grid;
+    use crate::parser::{Parser, ParserEvent};
     use crate::shell::{SpawnOptions, probe_shell};
 
     use super::{
         GRACEFUL_WAIT_MS, IdsState, MAX_EXITED_RECORDS, OPS, PROTOCOL_VERSION, SCHEMA,
-        SessionRecord, error, host_state_dir, response,
+        SNAPSHOT_SCHEMA, SessionRecord, error, host_state_dir, response,
     };
+
+    /// Bytes of raw PTY output the host keeps for a resuming client
+    /// (issue #48). Hex doubles in a frame, so a resume stays under the
+    /// 1 MiB page cap.
+    const MAX_HISTORY_BYTES: usize = 128 * 1024;
+
+    /// Lowercase hex, pure-ASCII JSON frames.
+    fn hex_encode(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            s.push(HEX[usize::from(b >> 4)] as char);
+            s.push(HEX[usize::from(b & 0xf)] as char);
+        }
+        s
+    }
+
+    /// The host's canonical terminal model per attached session (issue
+    /// #48, docs/design-session-attach.md §"State synchronization"): the
+    /// same parser + grid a pane runs, fed from the PTY reader even with
+    /// no client attached. It answers terminal queries itself (exactly
+    /// one reply per query) and is the source of attach snapshots, so
+    /// the host never replays raw historic bytes as an attach.
+    pub struct Model {
+        parser: Parser,
+        grid: Grid,
+        /// The main-screen grid while an alt-screen app runs.
+        main_grid: Option<Grid>,
+        in_alt: bool,
+        title: Option<String>,
+        cwd: Option<String>,
+        /// Bumped once per PTY read chunk and per resize; a client
+        /// resumes from a revision with retained deltas or an installed
+        /// snapshot, never both for the same interval.
+        revision: u64,
+        /// Raw PTY chunks keyed to the revision that produced them
+        /// (a resume window, not the scrollback: history is
+        /// negotiated separately).
+        history: VecDeque<(u64, Vec<u8>)>,
+        history_bytes: usize,
+    }
+
+    impl Model {
+        fn new(cols: usize, rows: usize) -> Self {
+            Self {
+                parser: Parser::new(),
+                grid: Grid::with_size(cols, rows, 0),
+                main_grid: None,
+                in_alt: false,
+                title: None,
+                cwd: None,
+                revision: 0,
+                history: VecDeque::new(),
+                history_bytes: 0,
+            }
+        }
+
+        /// Feed one PTY chunk; mirrors `Pane::feed` (pane.rs) minus the
+        /// shell-integration bookkeeping. Returns the DSR/DA replies the
+        /// shell expects, so detached sessions answer queries alone.
+        fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+            let mut replies = Vec::new();
+            let mut pos = 0usize;
+            while pos < bytes.len() {
+                let outcome = self.parser.advance(&mut self.grid, &bytes[pos..]);
+                let step = outcome.consumed.min(bytes.len() - pos).max(1);
+                pos += step;
+                for event in outcome.events {
+                    match event {
+                        ParserEvent::Title(t) => self.title = Some(t),
+                        ParserEvent::Cwd(url) => self.cwd = Some(url),
+                        ParserEvent::EnterAltScreen => {
+                            if !self.in_alt {
+                                let (cols, rows) = (self.grid.cols, self.grid.rows);
+                                let fresh = Grid::with_size(cols, rows, 0);
+                                self.main_grid = Some(std::mem::replace(&mut self.grid, fresh));
+                                self.in_alt = true;
+                            }
+                        }
+                        ParserEvent::ExitAltScreen => {
+                            if self.in_alt {
+                                if let Some(main) = self.main_grid.take() {
+                                    self.grid = main;
+                                    let (cols, rows) = (self.grid.cols, self.grid.rows);
+                                    self.grid.resize(cols, rows);
+                                }
+                                self.in_alt = false;
+                            }
+                        }
+                        ParserEvent::ClearScrollback => self.grid.clear_scrollback(),
+                        ParserEvent::Respond(reply) => replies.extend_from_slice(&reply),
+                        // Watchers need no host-side bookkeeping for these.
+                        ParserEvent::Hyperlink(_)
+                        | ParserEvent::Bell
+                        | ParserEvent::PromptStart
+                        | ParserEvent::CommandStart
+                        | ParserEvent::CommandOutput
+                        | ParserEvent::PromptEnd(_)
+                        | ParserEvent::CursorVisibility(_)
+                        | ParserEvent::Graphics(_) => {}
+                    }
+                }
+            }
+            self.parser.fit(&self.grid);
+            replies
+        }
+
+        /// Record a delivered chunk under the revision that follows it,
+        /// evicting from the front to stay inside the byte budget.
+        fn push_history(&mut self, after_rev: u64, chunk: &[u8]) {
+            if chunk.is_empty() {
+                return;
+            }
+            self.history_bytes += chunk.len();
+            self.history.push_back((after_rev, chunk.to_vec()));
+            while self.history_bytes > MAX_HISTORY_BYTES
+                && let Some((_, chunk)) = self.history.pop_front()
+            {
+                self.history_bytes -= chunk.len();
+            }
+        }
+
+        /// True when a client at revision `from` resumes exactly: every
+        /// revision in `from + 1..=revision` is retained, so `deltas`
+        /// sends each one once and skips nothing.
+        fn covers(&self, from: u64) -> bool {
+            from <= self.revision
+                && (from == self.revision
+                    || self
+                        .history
+                        .front()
+                        .is_some_and(|(rev, _)| *rev <= from + 1))
+        }
+
+        /// Deltas that carry a client at `from` up to `revision`.
+        fn deltas(&self, from: u64) -> Vec<Value> {
+            self.history
+                .iter()
+                .filter(|(rev, _)| *rev > from)
+                .map(|(rev, bytes)| json!([rev, hex_encode(bytes)]))
+                .collect()
+        }
+
+        /// The grid + state at the current revision, as SGR-restoring
+        /// spans (`host-snapshot/v1`). A fresh grid is a repaint of the
+        /// same shape, so snapshot bytes and live bytes converge.
+        fn snapshot(&self) -> Value {
+            let lines: Vec<Value> = (0..self.grid.rows)
+                .map(|r| {
+                    self.grid
+                        .row(r)
+                        .map_or_else(|| json!([]), |line| json!(spans(line)))
+                })
+                .collect();
+            let mouse = match self.parser.mouse_protocol {
+                crate::parser::MouseProtocol::Off => "off",
+                crate::parser::MouseProtocol::Click => "click",
+                crate::parser::MouseProtocol::Drag => "drag",
+                crate::parser::MouseProtocol::Any => "any",
+            };
+            json!({
+                "schema": SNAPSHOT_SCHEMA,
+                "revision": self.revision,
+                "cols": self.grid.cols,
+                "rows": self.grid.rows,
+                "inAlt": self.in_alt,
+                "cursor": {
+                    "row": self.parser.cursor_row,
+                    "col": self.parser.cursor_col,
+                    "visible": self.parser.cursor_visible,
+                },
+                "modes": {
+                    "autoWrap": self.parser.auto_wrap,
+                    "bracketedPaste": self.parser.bracketed_paste,
+                    "appCursorKeys": self.parser.application_cursor_keys,
+                    "mouse": mouse,
+                    "mouseSgr": self.parser.mouse_sgr_coordinates,
+                    "mouseUrxvt": self.parser.mouse_urxvt_coordinates,
+                },
+                "title": self.title,
+                "cwd": self.cwd,
+                "lines": lines,
+            })
+        }
+
+        /// Keep the model's geometry in step with a PTY resize: the
+        /// revision bump tells clients the repaint bytes are in the
+        /// stream.
+        fn resize(&mut self, cols: usize, rows: usize) {
+            self.grid.resize(cols, rows);
+            self.parser.fit(&self.grid);
+            self.revision += 1;
+            // Keep the delta stream contiguous: this revision carries
+            // no PTY bytes, so record an empty chunk for it.
+            self.history.push_back((self.revision, Vec::new()));
+        }
+    }
+
+    /// One grid row as run-length `[text, fg, bg, attrs]` spans, split
+    /// only at style changes. Blanks between words stay inside the run
+    /// so a client painting the spans in order reproduces the row
+    /// exactly, and the blank tail (default style) overwrites any
+    /// stale content past the text.
+    fn spans(line: &crate::grid::Line) -> Vec<Value> {
+        let mut out: Vec<Value> = Vec::new();
+        let mut cur = String::new();
+        let mut style: Option<(Option<String>, Option<String>, u8)> = None;
+        for cell in &line.cells {
+            let st = (
+                cell.fg.map(|c| c.to_string()),
+                cell.bg.map(|c| c.to_string()),
+                cell.attributes.flags(),
+            );
+            if style != Some(st.clone()) {
+                if !cur.is_empty() {
+                    let (fg, bg, attrs) = style.take().unwrap_or_default();
+                    out.push(json!([std::mem::take(&mut cur), fg, bg, attrs]));
+                }
+                style = Some(st);
+            }
+            cur.push(cell.char);
+        }
+        let (fg, bg, attrs) = style.unwrap_or_default();
+        out.push(json!([cur, fg, bg, attrs]));
+        out
+    }
 
     /// One host-owned session: metadata + every kernel handle the shell
     /// needs (conpty, process, kill-on-close job, reader thread).
@@ -381,6 +614,8 @@ pub mod server {
         subs: Vec<(u64, std::sync::mpsc::SyncSender<Value>)>,
         /// Token of the client with input rights; `None` = uncontrolled.
         controller: Option<u64>,
+        /// Canonical terminal model + revision history (issue #48).
+        model: Model,
     }
 
     /// Shared host state. One `Mutex` guards it; requests are short.
@@ -642,6 +877,42 @@ pub mod server {
                 .map_err(|e| Fail::Code("internal", e.to_string()))?;
             let app_for_reader = Arc::clone(app);
             let exit = exit_notifier(app, alias, id);
+            // The conhost server keeps the output pipe's write end open
+            // after the client app exits (measured: shell dead, no output
+            // EOF), so EOF alone can hang exit forever. Watch the process
+            // handle directly; the first caller (watcher or EOF) reports,
+            // the second is a no-op (issue #48, acceptance 7).
+            // Safety: duplicate our own process handle for the watcher.
+            let watch = unsafe {
+                let mut h = HANDLE::default();
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    managed_process.raw(),
+                    GetCurrentProcess(),
+                    &mut h,
+                    0,
+                    false,
+                    DUPLICATE_SAME_ACCESS,
+                )
+                .map_err(|e| Fail::Code("internal", e.to_string()))?;
+                SendHandle::from_owned(Owned::new(h))
+            };
+            let exit_for_watch = Arc::clone(&exit);
+            std::thread::spawn(move || {
+                // Safety: infinite wait + exit-code query on our own handle.
+                // GetExitCodeProcess can report STILL_ACTIVE for a few ms
+                // after the process signals, so retry briefly (300ms cap)
+                // before accepting `None`.
+                let mut code = None;
+                for _ in 0..15 {
+                    code = conpty::wait_exit_code(&watch);
+                    if code.is_some() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                exit_for_watch(code.map(|c| c.cast_unsigned()));
+            });
             let managed = Managed {
                 record: record.clone(),
                 conpty,
@@ -649,28 +920,27 @@ pub mod server {
                 job,
                 subs: Vec::new(),
                 controller: None,
+                model: Model::new(record.cols, record.rows),
                 _reader: std::thread::spawn(move || {
                     let on_chunk = |chunk: &[u8]| {
-                        // Answer the cursor-position query so the shell's
-                        // input loop unblocks. shortcut: fixed 1;1 report
-                        // (readline only needs a valid one); emulate
-                        // queries against the attached console with #48.
-                        if chunk.windows(4).any(|w| w == b"\x1b[6n") {
-                            let _ = query_writer.write(b"\x1b[1;1R");
-                        }
-                        // Hex keeps JSON frames pure ASCII; the client
-                        // decodes and writes the bytes to its console.
-                        const HEX: &[u8; 16] = b"0123456789abcdef";
-                        let mut hex = String::with_capacity(chunk.len() * 2);
-                        for b in chunk {
-                            hex.push(HEX[usize::from(b >> 4)] as char);
-                            hex.push(HEX[usize::from(b & 0xf)] as char);
-                        }
-                        if let Ok(mut app) = app_for_reader.lock()
-                            && let Some(m) = app.live.get_mut(&alias)
+                        let hex = hex_encode(chunk);
+                        let mut replies = Vec::new();
+                        if let Ok(mut guard) = app_for_reader.lock()
+                            && let Some(m) = guard.live.get_mut(&alias)
                             && m.record.id == id
                         {
+                            // The host model is the terminal: it parses
+                            // every chunk and answers terminal queries
+                            // itself (exactly one reply, even detached).
+                            replies = m.model.feed(chunk);
+                            m.model.revision += 1;
+                            let rev = m.model.revision;
+                            m.model.push_history(rev, chunk);
                             let (cols, rows) = (m.record.cols, m.record.rows);
+                            // A saturated watcher is asked to resync
+                            // (best effort: its queue is what is full)
+                            // and then dropped; its pump closes that
+                            // connection, so no client stalls the rest.
                             let note = json!({
                                 "jsonrpc": "2.0",
                                 "method": "session.output",
@@ -680,14 +950,33 @@ pub mod server {
                                     "data": hex,
                                     "cols": cols,
                                     "rows": rows,
+                                    "revision": rev,
                                     "schema": SCHEMA,
                                 },
                             });
-                            m.subs.retain(|(_, tx)| tx.try_send(note.clone()).is_ok());
+                            let resync = json!({
+                                "jsonrpc": "2.0",
+                                "method": "session.resync",
+                                "params": { "alias": alias, "id": id, "schema": SCHEMA },
+                            });
+                            // A saturated subscriber keeps its
+                            // subscription: the frame it cannot keep up
+                            // with is dropped, and the revision gap in
+                            // the stream tells it to resync from a fresh
+                            // snapshot (session.resync is a best-effort
+                            // nudge through the same full queue). A
+                            // client that is gone closes its own
+                            // connection when its pump write fails.
+                            for (_, tx) in &m.subs {
+                                if tx.try_send(note.clone()).is_err() {
+                                    let _ = tx.try_send(resync.clone());
+                                }
+                            }
                         }
-                        // try_send fails only when a client is full or
-                        // gone; the slow client is dropped (its pump
-                        // closes the connection).
+                        // Replies go to the PTY input outside the lock.
+                        for reply in replies.chunks(64 * 1024) {
+                            let _ = query_writer.write(reply);
+                        }
                     };
                     let _ = conpty::read_output_loop(&reader, on_chunk);
                     let code = conpty::wait_exit_code(&process);
@@ -801,16 +1090,20 @@ pub mod server {
         }
     }
 
-    /// Report a session exit (reader thread -> App). Only the reader of
-    /// the session's *current* incarnation marks it; a terminated one
-    /// was already recorded.
+    /// Report a session exit (process watcher and reader thread -> App).
+    /// Both callers share one `Arc`; the live-and-matching-id check makes
+    /// the second call a no-op. The `Managed` drop (which closes the
+    /// ConPTY) runs with the state lock released: `ClosePseudoConsole`
+    /// blocks until the conhost server exits, and that exit needs the
+    /// reader thread to finish (issue #48, acceptance 7).
     fn exit_notifier(
         app: &Arc<Mutex<App>>,
         alias: u32,
         id: u64,
-    ) -> Box<dyn Fn(Option<u32>) + Send + 'static> {
+    ) -> Arc<dyn Fn(Option<u32>) + Send + Sync + 'static> {
         let app = Arc::clone(app);
-        Box::new(move |code| {
+        Arc::new(move |code| {
+            let mut dead = None;
             if let Ok(mut app) = app.lock() {
                 let live = app.live.get(&alias).is_some_and(|m| m.record.id == id);
                 if live && let Some(mut m) = app.live.remove(&alias) {
@@ -830,10 +1123,10 @@ pub mod server {
                         let _ = tx.try_send(exit_note.clone());
                     }
                     app.push_exited(m.record.clone());
+                    dead = Some(m);
                 }
-                // Dropping Managed closes conpty + job: the tree goes
-                // with it (the shell exited on its own by now).
             }
+            drop(dead);
         })
     }
 
@@ -918,8 +1211,12 @@ pub mod server {
     /// Attach: subscribe to a live session's stream; with `readOnly`
     /// false, take controller rights (busy → `session-busy`; `takeControl`
     /// demotes the current controller to a watcher, per the ADR).
-    /// The attach snapshot is the output from now on — scrollback replay
-    /// is #48. shortcut: no replay, add it with the delta model.
+    /// With `fromRevision` the client resumes from retained output when
+    /// the window covers it; otherwise the result carries the model's
+    /// snapshot — the host never replays raw historic bytes as an attach
+    /// (issue #48). Subscribing is idempotent per connection token, so
+    /// a mid-stream resync over the same connection never doubles the
+    /// stream.
     fn session_attach(
         app: &Arc<Mutex<App>>,
         params: &Value,
@@ -934,6 +1231,7 @@ pub mod server {
             .get("takeControl")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let from = params.get("fromRevision").and_then(Value::as_u64);
         let mut g = app
             .lock()
             .map_err(|_| Fail::Code("internal", "state lock poisoned".to_string()))?;
@@ -949,7 +1247,9 @@ pub mod server {
                 format!("session {alias} is controlled by another client (use --take-control)"),
             ));
         }
-        m.subs.push((conn.token, conn.tx.clone()));
+        if !m.subs.iter().any(|(t, _)| *t == conn.token) {
+            m.subs.push((conn.token, conn.tx.clone()));
+        }
         let granted = if readonly {
             false
         } else {
@@ -957,7 +1257,7 @@ pub mod server {
             m.controller = Some(conn.token);
             true
         };
-        Ok(json!({
+        let mut result = json!({
             "alias": alias,
             "id": m.record.id,
             "pid": m.record.pid,
@@ -966,7 +1266,20 @@ pub mod server {
             "state": "live",
             "controlGranted": granted,
             "schema": SCHEMA,
-        }))
+        });
+        match from {
+            Some(rf) if m.model.covers(rf) => {
+                result["resumed"] = json!(true);
+                result["revision"] = json!(m.model.revision);
+                result["deltas"] = json!(m.model.deltas(rf));
+            }
+            _ => {
+                result["resumed"] = json!(false);
+                result["revision"] = json!(m.model.revision);
+                result["snapshot"] = m.model.snapshot();
+            }
+        }
+        Ok(result)
     }
 
     /// Input bytes (hex) to the PTY. Controller only.
@@ -1033,13 +1346,21 @@ pub mod server {
             .map_err(|e| Fail::Code("internal", e.to_string()))?;
         m.record.cols = usize::from(cols);
         m.record.rows = usize::from(rows);
+        // The model repaints at the new geometry in the same revision
+        // stream, so watchers see the resize bytes between revisions.
+        m.model.resize(usize::from(cols), usize::from(rows));
+        let rev = m.model.revision;
         let note = json!({
             "jsonrpc": "2.0",
             "method": "session.resize",
-            "params": { "alias": alias, "id": m.record.id, "cols": cols, "rows": rows, "schema": SCHEMA },
+            "params": { "alias": alias, "id": m.record.id, "cols": cols, "rows": rows, "revision": rev, "schema": SCHEMA },
         });
-        m.subs.retain(|(_, tx)| tx.try_send(note.clone()).is_ok());
-        Ok(json!({ "cols": cols, "rows": rows }))
+        // A saturated subscriber drops this frame; its resync (the
+        // attach result) carries the new geometry.
+        for (_, tx) in &m.subs {
+            let _ = tx.try_send(note.clone());
+        }
+        Ok(json!({ "cols": cols, "rows": rows, "revision": rev }))
     }
 
     /// Release a connection's attach everywhere: unregister its stream
@@ -1098,6 +1419,7 @@ pub mod server {
                         "host": "rusttyhost",
                         "version": env!("CARGO_PKG_VERSION"),
                         "ops": OPS,
+                        "snapshotSchema": SNAPSHOT_SCHEMA,
                     }))
                 }
             }
@@ -1340,6 +1662,123 @@ pub mod server {
         }
         Ok(out)
     }
+
+    #[cfg(test)]
+    mod model_tests {
+        use super::*;
+
+        #[test]
+        fn model_answers_dsr_from_the_real_cursor() {
+            let mut m = Model::new(80, 24);
+            // The reply event arrives in the feed that consumes the
+            // query (parser.rs dsr_and_da_respond).
+            assert_eq!(m.feed(b"\x1b[5;1H\x1b[6n"), b"\x1b[5;1R");
+            assert_eq!(m.feed(b"\x1b[c"), b"\x1b[?6c");
+        }
+
+        #[test]
+        fn model_swaps_the_alt_screen_and_back() {
+            let mut m = Model::new(80, 24);
+            m.feed(b"main line");
+            m.feed(b"\x1b[?1049halt screen");
+            assert!(m.in_alt);
+            assert!(m.main_grid.is_some());
+            // Spans cover the whole row (blank tail included), so trim.
+            let row_text = |s: &Value| -> String {
+                s["lines"][0]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|sp| sp[0].as_str().unwrap_or(""))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            };
+            assert_eq!(row_text(&m.snapshot()), "alt screen");
+            m.feed(b"\x1b[?1049l");
+            assert!(!m.in_alt);
+            assert_eq!(row_text(&m.snapshot()), "main line");
+        }
+
+        #[test]
+        fn history_stays_inside_the_byte_budget() {
+            let mut m = Model::new(80, 24);
+            let chunk = vec![b'x'; 4096];
+            for i in 1..=64u64 {
+                m.push_history(i, &chunk);
+                m.revision = i;
+            }
+            assert!(m.history_bytes <= MAX_HISTORY_BYTES);
+            assert!(!m.covers(0));
+            assert!(m.covers(64));
+        }
+
+        #[test]
+        fn resize_keeps_the_delta_stream_contiguous() {
+            let mut m = Model::new(80, 24);
+            // Simulate the reader loop: rev bump + history push per chunk.
+            m.revision = 1;
+            m.push_history(1, b"aa");
+            m.resize(120, 35);
+            m.revision = 3;
+            m.push_history(3, b"bb");
+            // The resize revision carries no PTY bytes; a client at the
+            // pre-resize revision must still receive every revision
+            // once, in order (an empty chunk stands in for the resize).
+            assert!(m.covers(1));
+            let d = m.deltas(1);
+            let revs: Vec<u64> = d.iter().map(|e| e[0].as_u64().unwrap()).collect();
+            assert_eq!(revs, vec![2, 3]);
+            assert_eq!(d[0][1].as_str().unwrap(), "");
+            assert_eq!(d[1][1].as_str().unwrap(), "6262");
+        }
+
+        #[test]
+        fn resume_window_is_exact() {
+            let mut m = Model::new(80, 24);
+            m.push_history(1, b"aaa");
+            m.push_history(2, b"bbb");
+            m.revision = 2;
+            // 0 -> history starts at 1: resumes exactly; 1 -> starts
+            // at 2: exact; 2 -> nothing to send; 3 -> future: refuse.
+            assert!(m.covers(0) && m.covers(1) && m.covers(2));
+            assert!(!m.covers(3));
+            assert_eq!(m.deltas(1).len(), 1);
+            assert_eq!(m.deltas(1)[0][0].as_u64().unwrap(), 2);
+            assert_eq!(m.deltas(1)[0][1].as_str().unwrap(), "626262");
+        }
+
+        #[test]
+        fn snapshot_carries_the_canvas_and_the_live_state() {
+            let mut m = Model::new(80, 24);
+            m.feed(b"\x1b[1;1H\x1b[31mred\x1b[0m tail");
+            m.feed(b"\x1b]0;a title\x07");
+            let s = m.snapshot();
+            assert_eq!(s["schema"], SNAPSHOT_SCHEMA);
+            assert_eq!(s["cols"], 80);
+            assert_eq!(s["rows"], 24);
+            assert_eq!(s["title"], "a title");
+            // The red run is its own span; ANSI-16 red is this
+            // project's palette entry (color.rs ansi_palette), spelled
+            // uppercase by Color's Display.
+            assert_eq!(s["lines"][0][0][0].as_str().unwrap(), "red");
+            assert_eq!(s["lines"][0][0][1].as_str().unwrap(), "#D7005F");
+            assert_eq!(s["lines"][0][1][1], Value::Null);
+            assert_eq!(s["cursor"]["row"], 0);
+            assert_eq!(s["cursor"]["col"], 8);
+            assert_eq!(s["modes"]["autoWrap"], true);
+        }
+
+        #[test]
+        fn resize_bumps_the_revision() {
+            let mut m = Model::new(80, 24);
+            m.resize(120, 35);
+            assert_eq!(m.revision, 1);
+            let s = m.snapshot();
+            assert_eq!(s["cols"], 120);
+            assert_eq!(s["rows"], 35);
+        }
+    }
 }
 
 /// The client side: connect to the live host, spawning one on demand
@@ -1564,6 +2003,37 @@ pub mod client {
                 handle: std::sync::Arc::new(DupHandle(dup)),
             })
         }
+
+        /// A write handle for the connection, so a reader thread can
+        /// send (a resync request) while this thread keeps writing.
+        ///
+        /// # Errors
+        ///
+        /// Handle duplication failure.
+        #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
+        pub fn writer(&self) -> io::Result<DupWriter> {
+            use windows::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE};
+            use windows::Win32::System::Threading::GetCurrentProcess;
+
+            // Safety: duplicate our own pipe handle with the same access.
+            let dup = unsafe {
+                let mut h = HANDLE::default();
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    self.pipe.0,
+                    GetCurrentProcess(),
+                    &mut h,
+                    0,
+                    false,
+                    DUPLICATE_SAME_ACCESS,
+                )
+                .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
+                h
+            };
+            Ok(DupWriter {
+                handle: std::sync::Arc::new(DupHandle(dup)),
+            })
+        }
     }
 
     /// Sendable owner of a duplicated pipe handle.
@@ -1664,6 +2134,23 @@ pub mod client {
     impl io::Read for DupReader {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             overlapped_read(self.handle.0, buf)
+        }
+    }
+
+    /// The connection's write side (blocking, overlapped).
+    #[cfg(windows)]
+    pub struct DupWriter {
+        handle: std::sync::Arc<DupHandle>,
+    }
+
+    #[cfg(windows)]
+    impl io::Write for DupWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            super::overlapped_write(self.handle.0, buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 }
