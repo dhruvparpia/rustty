@@ -243,7 +243,10 @@ fn cwd_from_url(url: &str) -> String {
         Some(i) => &rest[i..],
         None => return String::new(),
     };
-    let mut out = String::with_capacity(path.len());
+    // Issue #33: decode percent escapes to BYTES first, then decode
+    // UTF-8. Decoding byte-per-char corrupted non-ASCII paths (`%C3%A9`
+    // became "Ã©").
+    let mut bytes = Vec::with_capacity(path.len());
     let mut chars = path.chars();
     while let Some(c) = chars.next() {
         if c == '%' {
@@ -251,12 +254,13 @@ fn cwd_from_url(url: &str) -> String {
             if hex.len() == 2
                 && let Ok(byte) = u8::from_str_radix(&hex, 16)
             {
-                out.push(char::from(byte));
+                bytes.push(byte);
                 continue;
             }
         }
-        out.push(c);
+        bytes.extend_from_slice(c.encode_utf8(&mut [0u8; 4]).as_bytes());
     }
+    let out = String::from_utf8_lossy(&bytes).into_owned();
     // `/c/Users/x` and `/C:/Users/x` are both used; keep the drive form.
     let bytes: Vec<char> = out.chars().collect();
     if bytes.len() >= 3 && bytes[0] == '/' && bytes[2] == ':' && bytes[1].is_ascii_alphabetic() {
@@ -630,6 +634,9 @@ mod tests {
         assert_eq!(pane.cwd(), Some("C:/src/rust"));
         pane.feed(b"\x1b]7;file://HOST/home/dhruv/one%20two\x07");
         assert_eq!(pane.cwd(), Some("/home/dhruv/one two"));
+        // Issue #33: percent-escapes are UTF-8 bytes, not Latin-1 chars.
+        pane.feed(b"\x1b]7;file://HOST/home/dhruv/caf%C3%A9\x07");
+        assert_eq!(pane.cwd(), Some("/home/dhruv/café"));
         assert!(!pane.prompt_ready());
         pane.feed(b"\x1b]133;A\x07");
         assert!(pane.prompt_ready());

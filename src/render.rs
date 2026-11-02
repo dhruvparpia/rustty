@@ -299,6 +299,54 @@ fn make_format(
     Ok(format)
 }
 
+/// Icon-only text face for the tab bar: the system icon font carrying the
+/// shell glyph (U+E756 CommandPrompt). `None` when no icon font is present.
+fn make_icon_format(dwrite: &IDWriteFactory, size: f32) -> Option<IDWriteTextFormat> {
+    let mut collection: Option<IDWriteFontCollection> = None;
+    unsafe { dwrite.GetSystemFontCollection(&raw mut collection, false) }.ok()?;
+    let collection = collection?;
+    for family in ["Segoe Fluent Icons", "Segoe MDL2 Assets"] {
+        let name = wstr(family);
+        let mut index = 0u32;
+        let mut exists = windows::core::BOOL(0);
+        let found = unsafe {
+            collection.FindFamilyName(PCWSTR::from_raw(name.as_ptr()), &mut index, &mut exists)
+        };
+        if found.is_ok() && exists.0 != 0 {
+            return make_format(
+                dwrite,
+                family,
+                size,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+            )
+            .ok();
+        }
+    }
+    None
+}
+
+/// Tab-bar shell icon: the CommandPrompt glyph tinted per shell family.
+fn shell_icon(profile: &str) -> Option<(char, Color)> {
+    let p = profile.to_ascii_lowercase();
+    let rgb = if p.contains("powershell") || p.contains("pwsh") {
+        (74, 143, 217) // PowerShell blue
+    } else if p.contains("cmd") || p.contains("command") {
+        (204, 204, 204)
+    } else if p.contains("bash") || p.contains("git") {
+        (92, 184, 92)
+    } else if p.contains("wsl") {
+        (242, 166, 51)
+    } else if p.contains("nushell") {
+        (153, 102, 204)
+    } else if p.contains("rust") {
+        (200, 100, 50) // rust orange
+    } else {
+        return None;
+    };
+    Some(('\u{e756}', Color::rgb(rgb.0, rgb.1, rgb.2)))
+}
+
 /// Measure the cell box for `format`: width = advance of `M` (rounded up),
 /// height = glyph box scaled by `line_height` (SPEC `line-height`).
 fn measure_cells_with(
@@ -335,6 +383,9 @@ pub struct Renderer {
     dwrite: IDWriteFactory,
     typography: Option<IDWriteTypography>,
     formats: [IDWriteTextFormat; 4],
+    /// Tab-bar shell icon face ("Segoe Fluent Icons" / "Segoe MDL2 Assets");
+    /// `None` when neither is installed, which disables tab icons.
+    icon_format: Option<IDWriteTextFormat>,
     metrics: CellMetrics,
     dpi: f32,
     /// Tab-bar strip height in DIPs; 0.0 when the bar is hidden
@@ -353,6 +404,10 @@ pub struct Renderer {
     bell_flash: bool,
     bell_tabs: Vec<bool>,
     bell_focused_pane: bool,
+    /// Signboard marquee: tab hovered whose title is cut off, and how far
+    /// the full title has scrolled through it.
+    marquee_tab: Option<usize>,
+    marquee_x: f32,
     /// `[window.padding]` in DIPs: the grid is inset by this much, the tab
     /// bar strip is not (WINDOW-011).
     pad_x: f32,
@@ -573,6 +628,7 @@ impl Renderer {
         let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
         // Family name is diagnostics-only; the formats carry the chosen face.
         let (_family, formats, metrics) = build_font_resources(&dwrite, dpi, font)?;
+        let icon_format = make_icon_format(&dwrite, metrics.text_height);
         let typography = build_typography(&dwrite, font)?;
         let width = dips_to_px(cols.max(1) as f32 * metrics.cell_width, dpi).max(1);
         let height = dips_to_px(
@@ -608,6 +664,7 @@ impl Renderer {
             dwrite,
             typography,
             formats,
+            icon_format,
             metrics,
             dpi,
             tab_bar_height,
@@ -622,6 +679,8 @@ impl Renderer {
             bell_flash: false,
             bell_tabs: Vec::new(),
             bell_focused_pane: false,
+            marquee_tab: None,
+            marquee_x: 0.0,
             pad_x: 0.0,
             pad_y: 0.0,
             brushes: HashMap::new(),
@@ -694,6 +753,7 @@ impl Renderer {
         let (_family, formats, metrics) = build_font_resources(&self.dwrite, self.dpi, font)?;
         self.typography = build_typography(&self.dwrite, font)?;
         self.formats = formats;
+        self.icon_format = make_icon_format(&self.dwrite, metrics.text_height);
         self.metrics = metrics;
         self.ligatures = font.ligatures;
         self.atlas = None;
@@ -713,6 +773,56 @@ impl Renderer {
         self.bell_tabs.clear();
         self.bell_tabs.extend_from_slice(tabs);
         self.bell_focused_pane = focused_pane;
+    }
+
+    /// The tab whose title is scrolling (signboard marquee), if any.
+    #[must_use]
+    pub fn marquee_tab(&self) -> Option<usize> {
+        self.marquee_tab
+    }
+
+    /// Point the marquee at a tab (None stops it); restarts the scroll.
+    pub fn set_marquee(&mut self, tab: Option<usize>) {
+        self.marquee_tab = tab;
+        self.marquee_x = 0.0;
+    }
+
+    /// True when tab `idx`'s painted title needs more room than its tab has.
+    #[must_use]
+    pub fn title_overflows(&self, idx: usize) -> bool {
+        let (Some(&(lo, hi)), Some(title)) = (self.layout.tabs.get(idx), self.titles.get(idx))
+        else {
+            return false;
+        };
+        let cw = self.metrics.cell_width;
+        // The stored label carries the icon prefix and close-box suffix that
+        // the title draw strips; discount both sides the same way.
+        let close_chars = if self.tab_close_button { 2 } else { 0 };
+        let close_w = if self.tab_close_button { 1.5 * cw } else { 0.0 };
+        let full = title.chars().count().saturating_sub(2 + close_chars) as f32 * cw;
+        full > (hi - lo) - TAB_CHROME - 1.6 * cw - close_w
+    }
+
+    /// Advance the ticker scroll. False when nothing is running.
+    pub fn advance_marquee(&mut self) -> bool {
+        let Some(i) = self.marquee_tab else {
+            return false;
+        };
+        let Some(&(lo, hi)) = self.layout.tabs.get(i) else {
+            return false;
+        };
+        let cw = self.metrics.cell_width;
+        let full = self
+            .titles
+            .get(i)
+            .map_or(0.0, |t| t.chars().count() as f32 * cw);
+        // One pass: from off the tab's right edge until off its left edge.
+        let cycle = (hi - lo) - TAB_CHROME + full + cw;
+        self.marquee_x += 6.0;
+        if self.marquee_x > cycle {
+            self.marquee_x = 0.0;
+        }
+        true
     }
 
     /// `[window.padding]` (WINDOW-011). Callers re-read [`Renderer::grid_size`]
@@ -1535,13 +1645,17 @@ impl Renderer {
         titles.resize(app.tabs().len(), String::new());
         for (slot, tab) in titles.iter_mut().zip(app.tabs()) {
             label.clear();
-            if self.tab_show_profiles && !tab.profile().is_empty() {
+            if let Some((glyph, _)) = shell_icon(tab.profile()) {
+                label.push(glyph);
+                label.push(' ');
+            }
+            if self.tab_show_profiles && !tab.profile().is_empty() && !tab.title_is_fixed() {
                 label.push_str(tab.profile());
-                label.push_str(" Â· ");
+                label.push_str(" \u{b7} ");
             }
             label.push_str(tab.title());
             if self.tab_close_button {
-                label.push_str("  Ã");
+                label.push_str("  \u{d7}");
             }
             std::mem::swap(slot, &mut label);
         }
@@ -1582,19 +1696,33 @@ impl Renderer {
                 );
             }
             let close_w = if self.tab_close_button { cw * 1.5 } else { 0.0 };
+            let icon = shell_icon(tab.profile());
+            let icon_w = if icon.is_some() { cw * 1.6 } else { 0.0 };
+            let marquee = self.marquee_tab == Some(i);
             tabbar::fit_title_into(
                 &self.titles[i],
-                (hi - lo) - TAB_CHROME - close_w,
+                (hi - lo) - TAB_CHROME - close_w - icon_w,
                 cw,
                 &mut label,
             );
+            if marquee {
+                // Signboard: show the whole title, not the ellipsised fit.
+                label.clear();
+                label.push_str(&self.titles[i]);
+                if self.tab_close_button {
+                    label.truncate(label.len() - 4);
+                }
+            }
             if label.is_empty() {
                 continue;
+            }
+            if let Some((glyph, _)) = icon {
+                label.drain(..glyph.len_utf8() + 1);
             }
             units.clear();
             units.extend(label.encode_utf16());
             let rect = D2D_RECT_F {
-                left: lo + TAB_CHROME / 2.0,
+                left: lo + TAB_CHROME / 2.0 + icon_w,
                 top: y_top,
                 right: hi - TAB_CHROME / 2.0,
                 bottom: y_top + self.metrics.text_height,
@@ -1607,8 +1735,38 @@ impl Renderer {
             let Some(brush) = self.brush(color) else {
                 continue;
             };
+            if let Some((glyph, icon_color)) = icon
+                && let (Some(icon_brush), Some(icon_format)) =
+                    (self.brush(icon_color), self.icon_format.as_ref())
+            {
+                let icon_units = [glyph as u16]; // icon glyph is BMP
+                let icon_rect = D2D_RECT_F {
+                    left: lo + TAB_CHROME / 2.0,
+                    top: y_top,
+                    right: lo + TAB_CHROME / 2.0 + icon_w,
+                    bottom: y_top + self.metrics.text_height,
+                };
+                self.draw_units(&icon_units, icon_format, icon_rect, &icon_brush);
+            }
             let format = &self.formats[0];
-            self.draw_units(&units, format, rect, &brush);
+            if marquee {
+                // Ticker: the title enters from the tab's right edge,
+                // scrolls across, exits left, and the loop restarts.
+                let scroll = D2D_RECT_F {
+                    left: rect.right - self.marquee_x,
+                    top: rect.top,
+                    right: rect.right - self.marquee_x + label.chars().count() as f32 * cw + cw,
+                    bottom: rect.bottom,
+                };
+                unsafe {
+                    self.target
+                        .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_ALIASED)
+                };
+                self.draw_units(&units, format, scroll, &brush);
+                unsafe { self.target.PopAxisAlignedClip() };
+            } else {
+                self.draw_units(&units, format, rect, &brush);
+            }
             if self.tab_close_button {
                 let close_w = cw * 1.5;
                 units.clear();

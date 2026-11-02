@@ -495,7 +495,7 @@ impl App {
                 })
             };
             if let Some(title) = title {
-                tab.set_title(title);
+                tab.set_auto_title(title);
             }
         }
     }

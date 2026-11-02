@@ -289,10 +289,15 @@ impl Tab {
             return false;
         };
         self.tree.close(&target);
-        // Focus the pane that took the closed slot (SPLIT-004).
+        // Focus the pane that took the closed slot (SPLIT-004), but only
+        // when the focused pane itself closed (issue #34: closing a
+        // background pane must not steal focus from the selected pane).
         let idx = idx.min(self.tree.count() - 1);
         self.relayout();
-        self.active = Rc::clone(&self.panes[idx]);
+        let keep = self.panes.iter().any(|p| Rc::ptr_eq(p, &self.active));
+        if !keep {
+            self.active = Rc::clone(&self.panes[idx]);
+        }
         let _ = self.apply_layout();
         false
     }
@@ -498,6 +503,15 @@ mod tests {
     }
 
     #[test]
+    fn user_rename_wins_over_auto_titles() {
+        let mut tab = Tab::new();
+        tab.set_title("my tab");
+        tab.set_auto_title("PowerShell");
+        assert_eq!(tab.title(), "my tab");
+        assert!(tab.title_is_fixed());
+    }
+
+    #[test]
     fn one_pane_fills_the_tab() {
         let tab = Tab::with_size(80, 24, 1000);
         assert_eq!(tab.pane_count(), 1);
@@ -550,6 +564,16 @@ mod tests {
         tab.split_active(Dir::Vertical).expect("split");
         assert!(!tab.close_pane(9));
         assert_eq!(tab.pane_count(), 2);
+    }
+
+    #[test]
+    fn closing_a_background_pane_keeps_the_selected_pane_focused() {
+        // Issue #34: pane 1 exits while pane 0 is selected.
+        let mut tab = Tab::with_size(80, 24, 1000);
+        tab.split_active(Dir::Vertical).expect("split");
+        tab.focus_index(0);
+        assert!(!tab.close_pane(1), "one pane is left, the tab stays");
+        assert_eq!(tab.focused_index(), Some(0), "focus stays on pane 0");
     }
 
     #[test]

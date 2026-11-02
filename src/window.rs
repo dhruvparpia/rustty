@@ -61,20 +61,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
     GetClientRect, GetCursorPos, GetForegroundWindow, GetMenu, GetMessageW, GetSubMenu,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, HICON, HMENU, HWND_TOPMOST, IDC_ARROW,
-    IDC_IBEAM, IDYES, IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, LoadCursorW, MB_DEFBUTTON2,
-    MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED,
-    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW,
-    PostMessageW, PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_HIDE, SW_MAXIMIZE,
-    SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetMenu, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, SetWindowTextW, ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
-    WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, HICON, HMENU, HTCLIENT, HWND_TOPMOST,
+    IDC_ARROW, IDC_IBEAM, IDYES, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA,
+    LoadCursorW, MB_DEFBUTTON2, MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND,
+    MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
+    MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_HIDE,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
+    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetMenu, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE,
+    WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_GETMINMAXINFO,
+    WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT,
+    WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR,
+    WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{ComObject, PCWSTR, Result};
@@ -122,6 +123,9 @@ fn aumid() -> windows::core::HSTRING {
 const BELL_MS: u32 = 300;
 /// BELL-003/004: the visual-bell timer id (`SetTimer` `nIDEvent`).
 const BELL_TIMER: usize = 3;
+/// Signboard tab-title marquee (TAB-013 hover scroll): timer id and cadence.
+const MARQUEE_TIMER: usize = 4;
+const MARQUEE_MS: u32 = 50;
 /// Typical terminal cursor blink period.
 const BLINK_MS: u32 = 530;
 
@@ -205,11 +209,20 @@ struct BuiltinProfile {
     args: &'static [&'static str],
 }
 
-const PROFILES: [BuiltinProfile; 6] = [
+const PROFILES: [BuiltinProfile; 7] = [
     BuiltinProfile {
         name: "PowerShell",
         program: "powershell.exe",
         args: &[],
+    },
+    BuiltinProfile {
+        name: "Rust Console",
+        program: "powershell.exe",
+        args: &[
+            "-NoExit",
+            "-Command",
+            "& 'C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\Launch-VsDevShell.ps1' -Arch amd64 -SkipAutomaticLocation; Set-Location $HOME",
+        ],
     },
     BuiltinProfile {
         name: "Command Prompt",
@@ -504,12 +517,14 @@ fn update_menu_checks(hwnd: HWND, wparam: WPARAM) {
 
 fn handle_command(hwnd: HWND, wparam: WPARAM) {
     let id = wparam.0 & 0xFFFF;
-    if let Some(idx) = theme_command(id) {
-        set_theme(hwnd, idx);
-        return;
-    }
+    // Profiles first: theme_command is unbounded (id - 0xF000), so profile
+    // ids (0xF100+) would otherwise be swallowed as out-of-range themes.
     if let Some(idx) = state_ref(hwnd).and_then(|s| profile_command(s, id)) {
         open_profile_tab(hwnd, idx);
+        return;
+    }
+    if let Some(idx) = theme_command(id) {
+        set_theme(hwnd, idx);
         return;
     }
     match id {
@@ -1009,8 +1024,18 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_SETCURSOR => {
-            set_cursor_for_position(wparam);
-            LRESULT(1)
+            // Only claim client-area hits (I-beam/arrow over the tab bar).
+            // Non-client hit codes (HTLEFT..HTBOTTOMRIGHT sizing frame,
+            // HTCAPTION, HTMINBUTTON...) must fall through to
+            // DefWindowProcW so it sets the sizing/move cursors; claiming
+            // every hit made border drag-resize cursorless.
+            let hit = (lparam.0 & 0xFFFF) as u32;
+            if hit == HTCLIENT {
+                set_cursor_for_position(wparam);
+                LRESULT(1)
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
         }
         WM_TIMER => {
             if wparam.0 == BLINK_TIMER {
@@ -1022,6 +1047,15 @@ unsafe extern "system" fn wnd_proc(
                     state.bell_tabs.clear();
                 }
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            } else if wparam.0 == MARQUEE_TIMER {
+                let running = state_mut(hwnd)
+                    .and_then(|s| s.renderer.as_mut())
+                    .is_some_and(|r| r.advance_marquee());
+                if running {
+                    invalidate_tab_bar(hwnd);
+                } else {
+                    let _ = unsafe { KillTimer(Some(hwnd), MARQUEE_TIMER) };
+                }
             }
             drain_and_cleanup(hwnd);
             LRESULT(0)
@@ -1522,7 +1556,8 @@ fn restore_tabs(s: &mut WindowState) {
         );
         if let Some(tab) = s.app.tab_at_mut(idx) {
             tab.set_confirm(spec.confirm_close);
-            if !st.title.is_empty() {
+            // A user rename wins over the shell's title (TAB-013).
+            if !st.title.is_empty() && !tab.title_is_fixed() {
                 if st.title_fixed {
                     tab.set_title(st.title.clone());
                 } else {
@@ -2309,8 +2344,29 @@ fn handle_context_menu(hwnd: HWND, lparam: LPARAM) {
         x: (lparam.0 & 0xFFFF) as u16 as i16 as i32,
         y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32,
     };
-    if pt.x < 0 || pt.y < 0 {
+    // handle_rbutton_down passes LPARAM(0): use the real cursor so the
+    // tab-bar hit test below sees the click where it actually happened.
+    if pt.x < 0 || pt.y < 0 || (pt.x == 0 && pt.y == 0) {
         let _ = unsafe { GetCursorPos(&mut pt) };
+    }
+    // Right-click on the tab-bar strip: tab popup (rename/close) or the
+    // profile menu on `+`, not the grid menu.
+    let mut cpt = pt;
+    if unsafe { ScreenToClient(hwnd, &mut cpt) }.as_bool() {
+        let lp = LPARAM((((cpt.y as u32 & 0xFFFF) << 16) | (cpt.x as u32 & 0xFFFF)) as isize);
+        let (x, y) = cursor_dips(hwnd, lp);
+        let hit = state_ref(hwnd).map(|s| s.tab_hit(x, y, client_height_dips(hwnd)));
+        match hit {
+            Some(TabHit::Tab(i)) | Some(TabHit::Close(i)) => {
+                show_tab_menu(hwnd, i);
+                return;
+            }
+            Some(TabHit::Plus) => {
+                show_profile_menu(hwnd);
+                return;
+            }
+            _ => {}
+        }
     }
     unsafe {
         let menu = match CreatePopupMenu() {
@@ -2328,6 +2384,91 @@ fn handle_context_menu(hwnd: HWND, lparam: LPARAM) {
         let _ = append_menu_item(menu, "Close Tab	Ctrl+Shift+W", MENU_CLOSE_TAB);
         let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, None, hwnd, None);
         let _ = DestroyMenu(menu);
+    }
+}
+
+/// `+` click: native dropdown of the shell profiles (Windows-Terminal
+/// style). Reuses the File > Profiles command ids, so selection dispatches
+/// through `handle_command` into `open_profile_tab`.
+fn show_profile_menu(hwnd: HWND) {
+    let Some(names) = state_ref(hwnd).map(|s| {
+        s.profiles
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>()
+    }) else {
+        return;
+    };
+    if names.is_empty() {
+        return;
+    }
+    let mut pt = POINT::default();
+    if unsafe { GetCursorPos(&mut pt) }.is_err() {
+        return;
+    }
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            return;
+        };
+        for (idx, name) in names.iter().enumerate() {
+            let _ = append_menu_item(menu, name, MENU_PROFILE_BASE + idx);
+        }
+        // The popup runs a modal loop that re-enters the window proc.
+        let _ = SetForegroundWindow(hwnd);
+        let sel = TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            None,
+            hwnd,
+            None,
+        );
+        let _ = DestroyMenu(menu);
+        // The documented follow-up so the next click is not swallowed.
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        if sel.0 > 0 {
+            handle_command(hwnd, WPARAM(sel.0 as usize));
+        }
+    }
+}
+
+/// Right-click on a tab: native popup targeting that tab. The tab is
+/// selected first so Rename/Close apply to it.
+fn show_tab_menu(hwnd: HWND, idx: usize) {
+    if let Some(s) = state_mut(hwnd)
+        && s.app.select_tab(idx)
+    {
+        apply_active_profile_theme(s);
+        set_title(hwnd, &s.app);
+    }
+    sync_active_tab_geometry(hwnd);
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    let mut pt = POINT::default();
+    if unsafe { GetCursorPos(&mut pt) }.is_err() {
+        return;
+    }
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            return;
+        };
+        let _ = append_menu_item(menu, "&Rename Tab", MENU_RENAME_TAB);
+        let _ = append_menu_item(menu, "Close Tab\tCtrl+Shift+W", MENU_CLOSE_TAB);
+        let _ = SetForegroundWindow(hwnd);
+        let sel = TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            None,
+            hwnd,
+            None,
+        );
+        let _ = DestroyMenu(menu);
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        if sel.0 > 0 {
+            handle_command(hwnd, WPARAM(sel.0 as usize));
+        }
     }
 }
 
@@ -2354,7 +2495,7 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
             return;
         }
         Some(TabHit::Plus) => {
-            new_tab(hwnd);
+            show_profile_menu(hwnd);
             return;
         }
         Some(TabHit::None) | None => {}
@@ -2478,6 +2619,7 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         }
         return;
     }
+    update_tab_marquee(hwnd, x, y, height);
     if let Some((idx, row, col)) = state_ref(hwnd).and_then(|s| cell_at(s, x, y, height))
         && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
     {
@@ -2529,6 +2671,48 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         pane.set_selection(Some(Selection::between(a, cur)));
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Signboard marquee: while the mouse rests on a tab whose title is cut
+/// off, scroll the full title through it (a timer drives the frames).
+fn update_tab_marquee(hwnd: HWND, x: f32, y: f32, height: f32) {
+    let target = match state_ref(hwnd).map(|s| s.tab_hit(x, y, height)) {
+        Some(TabHit::Tab(i)) => Some(i),
+        _ => None,
+    };
+    let Some(s) = state_mut(hwnd) else {
+        return;
+    };
+    let Some(r) = s.renderer.as_mut() else {
+        return;
+    };
+    let target = target.filter(|i| r.title_overflows(*i));
+    if r.marquee_tab() == target {
+        return;
+    }
+    r.set_marquee(target);
+    if target.is_some() {
+        let _ = unsafe { SetTimer(Some(hwnd), MARQUEE_TIMER, MARQUEE_MS, None) };
+    } else {
+        let _ = unsafe { KillTimer(Some(hwnd), MARQUEE_TIMER) };
+    }
+    invalidate_tab_bar(hwnd);
+}
+
+/// Repaint only the tab-bar strip: the marquee animation lives there, and
+/// repainting the grid every 50 ms is what makes the ticker feel laggy.
+fn invalidate_tab_bar(hwnd: HWND) {
+    let mut rc = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    let bottom = state_ref(hwnd).map_or(1.0, |s| s.grid_top()).max(1.0) * scale;
+    let bar = RECT {
+        left: 0,
+        top: 0,
+        right: rc.right,
+        bottom: bottom.ceil() as i32,
+    };
+    let _ = unsafe { InvalidateRect(Some(hwnd), Some(&bar), false) };
 }
 
 /// WM_LBUTTONUP: end the selection drag (the selection stays visible
@@ -3553,8 +3737,15 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
     match std::env::current_exe() {
         Ok(exe) => {
             let tasks = crate::jumplist::tasks_for(&names);
-            if let Err(e) =
-                crate::jumplist::build(&aumid().to_string(), &exe.display().to_string(), &tasks)
+            let res =
+                crate::jumplist::build(&aumid().to_string(), &exe.display().to_string(), &tasks);
+            // shortcut: Windows rejects user tasks for unpackaged exes with
+            // no Start Menu shortcut (E_INVALIDARG), so every cargo dev run
+            // would print this. Drop the guard when packaging installs one.
+            // (window.rs is Windows-only, so the `\target\` separator is fine.)
+            let dev_build = exe.to_string_lossy().contains(r"\target\");
+            if let Err(e) = res
+                && !dev_build
             {
                 eprintln!("rusttyterm: jump list failed: {e}");
             }

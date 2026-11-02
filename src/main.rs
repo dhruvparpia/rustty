@@ -1,6 +1,10 @@
 //! `rusttyterm` CLI entry point: load config, probe a shell, open the
 //! terminal window (spec §32, window milestone).
 
+// GUI subsystem: launching the app (double-click, Jump List, autostart)
+// must not allocate a console window next to the terminal.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(windows)]
 use std::path::Path;
 use std::process::ExitCode;
@@ -55,6 +59,14 @@ fn probe_shell(cfg: &Config) -> SpawnOptions {
 #[cfg(windows)]
 fn main() -> ExitCode {
     let cli = rusttyterm::cli::parse(std::env::args_os().skip(1));
+    if cli.help || cli.version {
+        // The binary is a GUI-subsystem exe, so no console is attached at
+        // startup; attach to the calling console so --help/--version print
+        // where they were typed (fails harmlessly when there is none).
+        // SAFETY: FFI boundary (NFR-401).
+        use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+        let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    }
     for unknown in &cli.unknown {
         eprintln!("rusttyterm: ignoring unknown argument {unknown:?}");
     }

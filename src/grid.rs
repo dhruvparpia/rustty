@@ -248,7 +248,9 @@ impl Grid {
 
     /// Append a line at the end of the buffer, evicting the oldest when full
     pub fn append_line(&mut self, line: Line) {
-        let idx = if self.total < self.capacity() {
+        let old_top = self.top();
+        let evicting = self.total >= self.capacity();
+        let idx = if !evicting {
             let idx = (self.head + self.total) % self.capacity();
             self.total += 1;
             idx
@@ -260,7 +262,13 @@ impl Grid {
         };
         self.lines[idx] = line;
         self.lines[idx].is_dirty = true;
-        self.full_dirty = false;
+        // Issue #13: eviction (or the buffer top crossing the viewport top)
+        // shifts every visible row onto the next buffer line, so the new
+        // line's own dirty flag is not enough. Mark the viewport fully
+        // dirty; writers must never clear a pending full-redraw event.
+        if evicting || self.top() != old_top {
+            self.full_dirty = true;
+        }
     }
 
     /// Write a line to a viewport row (0-based). Rows past the end of the
@@ -274,7 +282,6 @@ impl Grid {
         let slot = self.slot(virtual_index);
         self.lines[slot] = line;
         self.lines[slot].is_dirty = true;
-        self.full_dirty = false;
     }
 
     /// Write a stub line containing plain text (helper for tests and scaffolding)
@@ -298,7 +305,6 @@ impl Grid {
             *dest = cell;
         }
         self.lines[slot].is_dirty = true;
-        self.full_dirty = false;
     }
 
     /// Get a reference to a viewport line
@@ -453,7 +459,6 @@ impl Grid {
         }
         let slot = self.slot(virtual_index);
         self.lines[slot].is_dirty = true;
-        self.full_dirty = false;
         Some(&mut self.lines[slot])
     }
 
@@ -868,6 +873,7 @@ mod tests {
     #[test]
     fn test_resize_marks_all_dirty() {
         let mut grid = Grid::with_size(80, 24, 100);
+        grid.clear_dirty_rows(); // simulate the initial full repaint
         let mut line = Line::blank(80);
         line.cells[0].char = 'x';
         grid.write_line(5, line);
@@ -1016,6 +1022,23 @@ mod tests {
         assert!(!grid.all_dirty());
         grid.for_each_dirty_row(|_| count += 1);
         assert_eq!(count, 24);
+    }
+
+    #[test]
+    fn scrolling_the_viewport_marks_every_visible_row_dirty() {
+        // Issue #13: an append that shifts the bottom-pinned viewport must
+        // repaint every visible row, not just the new bottom line.
+        let mut grid = Grid::with_size(10, 3, 4);
+        grid.write_line(0, make_line("a", 10));
+        grid.write_line(1, make_line("b", 10));
+        grid.write_line(2, make_line("c", 10));
+        grid.clear_dirty_rows();
+        assert!(grid.dirty_rows().is_empty());
+        grid.append_line(make_line("d", 10));
+        assert!(grid.all_dirty());
+        assert_eq!(grid.dirty_rows(), vec![0, 1, 2]);
+        assert_eq!(row_text(&grid, 0), "b");
+        assert_eq!(row_text(&grid, 2), "d");
     }
 
     #[test]
