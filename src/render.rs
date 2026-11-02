@@ -19,11 +19,12 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_WINDOW_STATE_OCCLUDED,
-    D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG,
@@ -33,7 +34,12 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout, IDWriteTypography,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::core::PCWSTR;
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppBGRA, IWICBitmapSource, IWICImagingFactory,
+    WICDecodeMetadataCacheOnDemand,
+};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
+use windows::core::{Interface, PCWSTR};
 use windows_numerics::Vector2;
 
 use crate::app::App;
@@ -41,7 +47,7 @@ use crate::color::Color;
 use crate::config::{CursorShape, FontConfig, TabBarPlacement};
 use crate::glyph_cache::{self, GlyphAtlas, GlyphKey, Tile};
 use crate::grid::{Cell, CellAttribute, Grid};
-use crate::pane::Pane;
+use crate::pane::{Pane, StoredImage};
 use crate::search::SearchState;
 use crate::selection::Selection;
 use crate::split::Rect;
@@ -379,6 +385,11 @@ pub struct Renderer {
     /// Ligatures on (FONT-010): the atlas is per-cell, so ligature text is
     /// shaped as runs through DirectWrite instead, with no atlas at all.
     ligatures: bool,
+    /// WIC factory: decodes kitty PNG/JPEG payloads (roadmap v0.5).
+    wic: IWICImagingFactory,
+    /// Decoded kitty bitmaps: `(pane index, image id) → (store generation,
+    /// bitmap)`. Re-decoded when the pane's store generation changes.
+    image_cache: HashMap<(usize, u32), (u64, Option<ID2D1Bitmap>)>,
 }
 
 /// What the last painted frame looked like: enough to decide which rows a
@@ -413,6 +424,9 @@ struct PaneDamage {
     cursor_row: usize,
     /// Mouse selection painted on this pane.
     selection: Option<Selection>,
+    /// Kitty store generation painted on this pane: a change (add, delete,
+    /// clear) repaints fully so removed images leave no residue.
+    graphics_generation: u64,
 }
 
 /// Flatten index of the leaf whose layout box covers cell `(col, row)`
@@ -461,6 +475,79 @@ fn selection_rows(
     true
 }
 
+/// Convert packed kitty RGB/RGBA pixels to BGRA rows with a 4-byte stride.
+fn raw_bgra(data: &[u8], width: u32, height: u32, per: usize) -> Option<(Vec<u8>, u32)> {
+    let n = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?;
+    let src = data.get(..n.checked_mul(per)?)?;
+    let mut out = vec![0u8; n * 4];
+    for (i, px) in src.chunks_exact(per).enumerate() {
+        let alpha = px.get(3).copied().unwrap_or(0xff);
+        out[i * 4..i * 4 + 4].copy_from_slice(&[px[2], px[1], px[0], alpha]);
+    }
+    Some((out, width.checked_mul(4)?))
+}
+
+/// Decode a stored kitty image into a render-target bitmap: PNG/JPEG
+/// through the WIC decoder, raw RGB/RGBA converted to BGRA first
+/// (roadmap v0.5). `None` on any decode failure: the placement is
+/// skipped, never panics.
+fn decode_kitty_image(
+    wic: &IWICImagingFactory,
+    target: &ID2D1HwndRenderTarget,
+    img: &StoredImage,
+) -> Option<ID2D1Bitmap> {
+    // 96 dpi: the bitmap's DIP size equals its pixel size, so the draw
+    // pass can scale it to device pixels with the target dpi.
+    let props = D2D1_BITMAP_PROPERTIES {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_IGNORE,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+    };
+    // shortcut: alpha is dropped (images paint opaque over text); upgrade
+    // to PBGRA + per-primitive blending if transparency tools show up.
+    let source: IWICBitmapSource = match img.kind {
+        crate::pane::ImageKind::Encoded => {
+            let stream = unsafe { wic.CreateStream() }.ok()?;
+            unsafe { stream.InitializeFromMemory(&img.data) }.ok()?;
+            let decoder = unsafe {
+                wic.CreateDecoderFromStream(
+                    &stream,
+                    std::ptr::null(),
+                    WICDecodeMetadataCacheOnDemand,
+                )
+            }
+            .ok()?;
+            unsafe { decoder.GetFrame(0) }.ok()?.cast().ok()?
+        }
+        kind => {
+            let (width, height, per) = match kind {
+                crate::pane::ImageKind::Rgb { width, height } => (width, height, 3),
+                crate::pane::ImageKind::Rgba { width, height } => (width, height, 4),
+                crate::pane::ImageKind::Encoded => unreachable!("handled above"),
+            };
+            let (bgra, stride) = raw_bgra(&img.data, width, height, per)?;
+            unsafe {
+                wic.CreateBitmapFromMemory(
+                    width,
+                    height,
+                    &GUID_WICPixelFormat32bppBGRA,
+                    stride,
+                    &bgra,
+                )
+            }
+            .ok()?
+            .cast()
+            .ok()?
+        }
+    };
+    unsafe { target.CreateBitmapFromWicBitmap(&source, Some(&props)) }.ok()
+}
+
 impl Renderer {
     /// Create the render target for `hwnd`, sized for `cols` x `rows` cells
     /// plus the tab-bar strip of `tab_bar_height` DIPs.
@@ -507,6 +594,8 @@ impl Renderer {
             presentOptions: D2D1_PRESENT_OPTIONS_NONE,
         };
         let target = unsafe { factory.CreateHwndRenderTarget(&props, &hwnd_props) }?;
+        let wic: IWICImagingFactory =
+            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }?;
         Ok(Self {
             target,
             dwrite,
@@ -542,6 +631,8 @@ impl Renderer {
             atlas: None,
             atlas_failed: false,
             ligatures: font.ligatures,
+            wic,
+            image_cache: HashMap::new(),
         })
     }
 
@@ -924,6 +1015,11 @@ impl Renderer {
                     {
                         full = true;
                     }
+                    // An image added, deleted or cleared repaints the pane:
+                    // removed placements must leave no residue.
+                    if d.graphics_generation != pane.graphics().generation() {
+                        full = true;
+                    }
                 }
             }
             idx += 1;
@@ -1023,6 +1119,72 @@ impl Renderer {
                     self.paint_row_text(left, top, cells, span, theme);
                     self.paint_row_decorations(left, top, cells, theme);
                 }
+                // kitty graphics (roadmap v0.5): placements paint over this
+                // pane's text, clipped to its content box. Decoded bitmaps
+                // are cached per (pane, id) until the store generation moves.
+                if pane.graphics().visible(grid).next().is_some() {
+                    let dpi = self.dpi;
+                    let Self {
+                        target,
+                        wic,
+                        image_cache,
+                        ..
+                    } = &mut *self;
+                    let clip = D2D_RECT_F {
+                        left,
+                        top: top0,
+                        right: left + rect.cols as f32 * cw - 2.0 * pad,
+                        bottom: top0 + rows as f32 * ch,
+                    };
+                    unsafe { target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED) };
+                    for (p, row) in pane.graphics().visible(grid) {
+                        let Some(img) = pane.graphics().image(p.id) else {
+                            continue;
+                        };
+                        let key = (idx, p.id);
+                        if image_cache
+                            .get(&key)
+                            .is_none_or(|(g, _)| *g != img.generation)
+                        {
+                            let bmp = decode_kitty_image(wic, target, img);
+                            image_cache.insert(key, (img.generation, bmp));
+                        }
+                        let Some(bmp) = image_cache.get(&key).and_then(|(_, b)| b.as_ref()) else {
+                            continue;
+                        };
+                        let size = unsafe { bmp.GetSize() };
+                        let x = left + p.col as f32 * cw;
+                        let y = top0 + row as f32 * ch;
+                        // `c=`/`r=` cover whole cells; the native size is
+                        // bitmap pixels scaled to the target's dpi.
+                        let w = if p.cols > 0 {
+                            f32::from(p.cols) * cw
+                        } else {
+                            size.width * 96.0 / dpi
+                        };
+                        let h = if p.rows > 0 {
+                            f32::from(p.rows) * ch
+                        } else {
+                            size.height * 96.0 / dpi
+                        };
+                        let dst = D2D_RECT_F {
+                            left: x,
+                            top: y,
+                            right: x + w,
+                            bottom: y + h,
+                        };
+                        unsafe {
+                            target.DrawBitmap(
+                                bmp,
+                                Some(&dst),
+                                1.0,
+                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                                None,
+                            )
+                        };
+                    }
+                    unsafe { target.PopAxisAlignedClip() };
+                }
             });
             if tab.pane_count() > 1 {
                 self.paint_split_borders(tab, theme);
@@ -1121,6 +1283,15 @@ impl Renderer {
                     }
                 }
             }
+            // kitty placements paint over these rows every frame, so keep
+            // them in the mask: the text under an image stays repainted.
+            for (p, row) in pane.graphics().visible(grid) {
+                for r in row..row.saturating_add(usize::from(p.rows.max(1))) {
+                    if r < rows {
+                        self.mask[rect.row + r] = true;
+                    }
+                }
+            }
             idx += 1;
         });
         self.pane_damage = prev;
@@ -1141,6 +1312,7 @@ impl Renderer {
                     grid_rows: grid.rows(),
                     cursor_row: cursor_cell(pane, grid).map_or(usize::MAX, |(row, _)| row),
                     selection: pane.selection(),
+                    graphics_generation: pane.graphics().generation(),
                 });
             });
             self.pane_damage = snapshot;

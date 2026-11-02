@@ -160,6 +160,19 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   spellings work too), and built-in `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0`
   font zoom. Zoom is clamped to the configured font-size bounds and a
   refused font leaves the window unchanged, the same rule as profile fonts.
+- Kitty graphics protocol subset (spec "graphics protocols", roadmap v0.5):
+  `ESC _ G` / `ESC P G` /
+  `0x90 G` strings with transmit (`a=t`, chunked via `m=1/2`), placement
+  (`a=p`, cursor-anchored, transient `t=1` placements drop when they scroll
+  out of the viewport), delete (`a=d`, by id or all), and capability queries
+  (`a=I`/`a=Q`) answered with `OK` / `IMGNOTFOUND`. PNG/JPEG payloads are
+  decoded through WIC and cached per image id; `f=24`/`f=32` raw pixels need
+  `w=`/`h=`. Images draw above the text, scroll with the viewport, and are
+  cleared when a pane enters/leaves the alt screen or clears scrollback.
+  Out of scope: compression, file storage, animation, cropping, z-index.
+- 6-bit SGR graphics (the block-character "sixel" look from `ls --color`
+  charts and ANSI art) needed no work: SGR 256-colour cells and the Unicode
+  block characters already render, so those programs just work.
 
 ### Fixed
 

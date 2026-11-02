@@ -10,10 +10,229 @@
 //! replies go straight back to the shell. Scroll snap (returning to the
 //! live edge when new output arrives) is applied here too.
 
+use crate::graphics::GraphicsAction;
 use crate::grid::Grid;
 use crate::parser::{Parser, ParserEvent};
 use crate::selection::Selection;
 use crate::shell::{Shell, ShellError, ShellEvent, SpawnOptions};
+
+/// Reply to a kitty capability query (`a=I`): meta code 0, data "OK".
+const GRAPHICS_QUERY_OK: &[u8] = b"\x1b_G0;OK\x1b\\";
+/// Reply to a kitty image query for an id that is not loaded (meta code 5).
+const GRAPHICS_QUERY_MISS: &[u8] = b"\x1b_G5;IMGNOTFOUND\x1b\\";
+
+/// Payload format of a stored kitty image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageKind {
+    /// PNG (`f=100`) or JPEG (`f=101`): the renderer decodes.
+    Encoded,
+    /// `f=24`: raw RGB, row-major; needs `w=`/`h=`.
+    Rgb {
+        /// Pixel width.
+        width: u32,
+        /// Pixel height.
+        height: u32,
+    },
+    /// `f=32`: raw RGBA, row-major; needs `w=`/`h=`.
+    Rgba {
+        /// Pixel width.
+        width: u32,
+        /// Pixel height.
+        height: u32,
+    },
+}
+
+/// One decoded kitty image, keyed by its protocol id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredImage {
+    /// Encoded (PNG/JPEG) or raw pixel bytes.
+    pub data: Vec<u8>,
+    /// Payload format.
+    pub kind: ImageKind,
+    /// Store generation at insert time: the renderer re-decodes on change.
+    pub generation: u64,
+}
+
+/// Where one kitty image is shown: anchored to an absolute grid row, so it
+/// scrolls with the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    /// Image id.
+    pub id: u32,
+    /// Absolute grid row of the image top.
+    pub top_abs: usize,
+    /// Grid column of the image left edge.
+    pub col: usize,
+    /// `c=`: columns to cover; 0 = native pixel width.
+    pub cols: u16,
+    /// `r=`: rows to cover; 0 = native pixel height.
+    pub rows: u16,
+    /// `t=1`: dropped once it scrolls out of view.
+    pub transient: bool,
+}
+
+/// The pane's kitty images and placements (roadmap v0.5).
+#[derive(Debug, Default)]
+pub struct ImageStore {
+    images: std::collections::BTreeMap<u32, StoredImage>,
+    placements: Vec<Placement>,
+    chunks: std::collections::BTreeMap<u32, Vec<u8>>,
+    auto_id: u32,
+    generation: u64,
+}
+
+impl ImageStore {
+    /// Apply one decoded command at the cursor (`grid` resolves the
+    /// absolute-row anchors). Returns reply bytes for queries.
+    pub fn apply(
+        &mut self,
+        action: GraphicsAction,
+        cursor_row: usize,
+        cursor_col: usize,
+        grid: &Grid,
+    ) -> Option<Vec<u8>> {
+        match action {
+            GraphicsAction::Transmit {
+                id,
+                format,
+                width,
+                height,
+                data,
+                more,
+            } => {
+                let id = if id == 0 { self.next_id() } else { id };
+                if more == 1 {
+                    self.chunks.entry(id).or_default().extend_from_slice(&data);
+                    return None;
+                }
+                let mut bytes = self.chunks.remove(&id).unwrap_or_default();
+                bytes.extend_from_slice(&data);
+                let kind = match format {
+                    24 => ImageKind::Rgb { width, height },
+                    32 => ImageKind::Rgba { width, height },
+                    _ => ImageKind::Encoded,
+                };
+                self.generation += 1;
+                self.images.insert(
+                    id,
+                    StoredImage {
+                        data: bytes,
+                        kind,
+                        generation: self.generation,
+                    },
+                );
+                // A completed transmission displays at the cursor unless
+                // `m=2` (load only).
+                if more != 2 {
+                    self.placements.push(Placement {
+                        id,
+                        top_abs: Self::anchor(grid, cursor_row, 0),
+                        col: cursor_col,
+                        cols: 0,
+                        rows: 0,
+                        transient: false,
+                    });
+                }
+                None
+            }
+            GraphicsAction::Place {
+                id,
+                x,
+                y,
+                cols,
+                rows,
+                transient,
+            } => {
+                if self.images.contains_key(&id) {
+                    self.placements.push(Placement {
+                        id,
+                        top_abs: Self::anchor(grid, cursor_row, y),
+                        col: i64::from(x)
+                            .checked_add(cursor_col as i64)
+                            .filter(|c| *c >= 0)
+                            .map_or(0, |c| c as usize),
+                        cols,
+                        rows,
+                        transient,
+                    });
+                }
+                None
+            }
+            GraphicsAction::DeleteAll => {
+                self.clear_all();
+                None
+            }
+            GraphicsAction::DeleteId(id) => {
+                self.images.remove(&id);
+                self.placements.retain(|p| p.id != id);
+                self.chunks.remove(&id);
+                self.generation += 1;
+                None
+            }
+            GraphicsAction::Query(None) => Some(GRAPHICS_QUERY_OK.to_vec()),
+            GraphicsAction::Query(Some(id)) => Some(
+                if self.images.contains_key(&id) {
+                    GRAPHICS_QUERY_OK
+                } else {
+                    GRAPHICS_QUERY_MISS
+                }
+                .to_vec(),
+            ),
+        }
+    }
+
+    /// Drop every image and placement (screen clear, alternate-screen swap).
+    pub fn clear_all(&mut self) {
+        self.images.clear();
+        self.placements.clear();
+        self.chunks.clear();
+        self.generation += 1;
+    }
+
+    /// Store generation: changes on every add, delete and clear. The
+    /// renderer re-decodes changed images and repaints on generation jumps.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Drop transient placements that scrolled out of the viewport.
+    pub fn prune_transient(&mut self, grid: &Grid) {
+        self.placements
+            .retain(|p| !p.transient || grid.view_of_abs(p.top_abs).is_some());
+    }
+
+    /// The stored image for `id`.
+    #[must_use]
+    pub fn image(&self, id: u32) -> Option<&StoredImage> {
+        self.images.get(&id)
+    }
+
+    /// Every placement, in receive order.
+    #[must_use]
+    pub fn placements(&self) -> &[Placement] {
+        &self.placements
+    }
+
+    /// Placements with the pane viewport row their top sits on.
+    pub fn visible(&self, grid: &Grid) -> impl Iterator<Item = (&Placement, usize)> {
+        self.placements
+            .iter()
+            .filter_map(move |p| grid.view_of_abs(p.top_abs).map(|row| (p, row)))
+    }
+
+    /// Cursor row `view_row` (+ row offset `y`) as an absolute grid row.
+    fn anchor(grid: &Grid, view_row: usize, y: i32) -> usize {
+        grid.abs_of_view(view_row)
+            .unwrap_or_else(|| grid.last_abs() + 1)
+            .saturating_add_signed(i64::from(y) as isize)
+    }
+
+    fn next_id(&mut self) -> u32 {
+        self.auto_id = self.auto_id.wrapping_add(1).max(1);
+        self.auto_id
+    }
+}
 
 /// Turn an OSC 7 `file://host/path` (percent-encoded) into a path.
 fn cwd_from_url(url: &str) -> String {
@@ -70,6 +289,8 @@ pub struct Pane {
     dirty: bool,
     /// Mouse text selection, in absolute grid coordinates (WIN-004).
     selection: Option<Selection>,
+    /// Kitty graphics images and placements (roadmap v0.5).
+    graphics: ImageStore,
 }
 
 impl Pane {
@@ -90,6 +311,7 @@ impl Pane {
             in_alt: false,
             dirty: true,
             selection: None,
+            graphics: ImageStore::default(),
         }
     }
 
@@ -111,6 +333,7 @@ impl Pane {
             in_alt: false,
             dirty: true,
             selection: None,
+            graphics: ImageStore::default(),
         }
     }
 
@@ -151,6 +374,13 @@ impl Pane {
     #[must_use]
     pub fn parser(&self) -> &Parser {
         &self.parser
+    }
+
+    /// The pane's kitty images and placements (roadmap v0.5), for the
+    /// renderer's image draw pass.
+    #[must_use]
+    pub fn graphics(&self) -> &ImageStore {
+        &self.graphics
     }
 
     /// The pane's shell.
@@ -258,6 +488,7 @@ impl Pane {
                         let fresh = Grid::with_size(cols, rows, 0);
                         self.main_grid = Some(std::mem::replace(&mut self.grid, fresh));
                         self.in_alt = true;
+                        self.graphics.clear_all();
                     }
                 }
                 ParserEvent::ExitAltScreen => {
@@ -267,6 +498,7 @@ impl Pane {
                             self.grid.resize(cols, rows);
                         }
                         self.in_alt = false;
+                        self.graphics.clear_all();
                     }
                 }
                 // The parser owns the flag; the renderer reads it via
@@ -274,13 +506,22 @@ impl Pane {
                 ParserEvent::CursorVisibility(_) => {}
                 ParserEvent::ClearScrollback => {
                     self.grid = Grid::with_size(cols, rows, scrollback);
+                    self.graphics.clear_all();
                 }
                 // DSR/DA replies go straight back to the shell.
                 ParserEvent::Respond(reply) => {
                     let _ = self.shell.write_input(&reply);
                 }
+                ParserEvent::Graphics(action) => {
+                    let (row, col) = (self.parser.cursor_row, self.parser.cursor_col);
+                    if let Some(reply) = self.graphics.apply(action, row, col, &self.grid) {
+                        let _ = self.shell.write_input(&reply);
+                    }
+                }
             }
         }
+
+        self.graphics.prune_transient(&self.grid);
 
         if outcome.printed {
             let above = self.grid.scroll_offset();
@@ -439,6 +680,105 @@ mod tests {
         assert!(
             pane.selection().is_none(),
             "reflow invalidates the selection's line ids"
+        );
+    }
+
+    #[test]
+    fn kitty_transmit_stores_and_places_at_cursor() {
+        let mut pane = Pane::with_size(10, 5, 20);
+        pane.feed(b"\x1b[2;4H\x1b_Ga=t,f=24,w=1,h=1;AA==\x1b\\");
+        let img = pane.graphics().image(1).expect("image stored");
+        assert_eq!(img.data, vec![0]);
+        assert_eq!(
+            img.kind,
+            ImageKind::Rgb {
+                width: 1,
+                height: 1
+            }
+        );
+        let placements = pane.graphics().placements();
+        assert_eq!(placements.len(), 1);
+        assert_eq!((placements[0].top_abs, placements[0].col), (1, 3));
+        assert_eq!(pane.graphics().visible(pane.grid()).count(), 1);
+    }
+
+    #[test]
+    fn kitty_chunks_assemble_and_auto_ids_increment() {
+        let mut pane = Pane::with_size(10, 5, 20);
+        pane.feed(b"\x1b_Ga=t,m=1,i=9;YQ\x1b\\");
+        assert!(pane.graphics().image(9).is_none(), "m=1 only buffers");
+        pane.feed(b"\x1b_Ga=t,m=0,i=9;Yg==\x1b\\");
+        assert_eq!(pane.graphics().image(9).expect("assembled").data, b"ab");
+        pane.feed(b"\x1b_Ga=t,m=2;AA==\x1b\\");
+        assert!(pane.graphics().image(1).is_some(), "auto id");
+        assert_eq!(
+            pane.graphics().placements().len(),
+            1,
+            "m=2 loads, no placement"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_id_drops_image_and_placements() {
+        let mut pane = Pane::with_size(10, 5, 20);
+        pane.feed(b"\x1b_Ga=t,i=3,f=24,w=1,h=1;AA==\x1b\\");
+        pane.feed(b"\x1b_Ga=d,i=3\x1b\\");
+        assert!(pane.graphics().image(3).is_none());
+        assert!(pane.graphics().placements().is_empty());
+    }
+
+    #[test]
+    fn kitty_alt_screen_clears_images() {
+        let mut pane = Pane::with_size(10, 5, 20);
+        pane.feed(b"\x1b_Ga=t,f=24,w=1,h=1;AA==\x1b\\");
+        pane.feed(b"\x1b[?1049h");
+        assert!(pane.graphics().image(1).is_none());
+        pane.feed(b"\x1b[?1049l");
+        assert!(
+            pane.graphics().image(1).is_none(),
+            "main screen images are gone too"
+        );
+    }
+
+    #[test]
+    fn kitty_transient_placements_prune_on_scroll() {
+        let mut pane = Pane::with_size(10, 5, 20);
+        pane.feed(b"\x1b_Ga=t,f=24,w=1,h=1,m=2,i=1;AA==\x1b\\");
+        pane.feed(b"\x1b_Ga=p,i=1,t=1\x1b\\\x1b_Ga=p,i=1\x1b\\");
+        assert_eq!(pane.graphics().placements().len(), 2);
+        pane.feed(b"\r\na\r\nb\r\nc\r\nd\r\ne\r\nf");
+        assert_eq!(pane.graphics().placements().len(), 1, "transient pruned");
+        assert!(!pane.graphics().placements()[0].transient);
+    }
+
+    #[test]
+    fn kitty_query_replies() {
+        let mut store = ImageStore::default();
+        let grid = Grid::with_size(10, 5, 0);
+        assert_eq!(
+            store.apply(GraphicsAction::Query(None), 0, 0, &grid),
+            Some(GRAPHICS_QUERY_OK.to_vec())
+        );
+        assert_eq!(
+            store.apply(GraphicsAction::Query(Some(1)), 0, 0, &grid),
+            Some(GRAPHICS_QUERY_MISS.to_vec())
+        );
+        store.apply(
+            GraphicsAction::Transmit {
+                id: 1,
+                format: 100,
+                width: 0,
+                height: 0,
+                data: vec![1],
+                more: 0,
+            },
+            0,
+            0,
+            &grid,
+        );
+        assert_eq!(
+            store.apply(GraphicsAction::Query(Some(1)), 0, 0, &grid),
+            Some(GRAPHICS_QUERY_OK.to_vec())
         );
     }
 }

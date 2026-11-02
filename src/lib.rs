@@ -14,6 +14,9 @@ pub mod app;
 pub mod cli;
 pub mod color;
 pub mod config;
+/// Kitty graphics protocol: header parsing and base64 (pure, spec graphics
+/// protocols, roadmap v0.5).
+pub mod graphics;
 pub mod grid;
 // Glyph atlas FFI boundary (spec §20 "custom glyph cache / custom font
 // atlas", §21): Direct2D calls on the atlas' bitmap render target.

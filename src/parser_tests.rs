@@ -405,4 +405,64 @@ mod tests {
             b"[34;1;1M".to_vec()
         );
     }
+
+    use crate::graphics::GraphicsAction;
+
+    #[test]
+    fn kitty_apc_transmit_over_st() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        let events = feed(&mut p, &mut g, "\x1b_Ga=t,i=7;YWJj\x1b\\hi");
+        assert!(
+            events.contains(&ParserEvent::Graphics(GraphicsAction::Transmit {
+                id: 7,
+                format: 100,
+                width: 0,
+                height: 0,
+                data: b"abc".to_vec(),
+                more: 0,
+            })),
+            "APC transmit becomes a Graphics event"
+        );
+        assert_eq!(rows(&g)[0], "hi", "text after the payload prints");
+    }
+
+    #[test]
+    fn kitty_over_dcs_and_int8_dcs() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        let events = feed(&mut p, &mut g, "\x1bPGa=I\x1b\\");
+        assert!(events.contains(&ParserEvent::Graphics(GraphicsAction::Query(None))));
+        let events: Vec<ParserEvent> = p
+            .advance(
+                &mut g,
+                &[0x90, b'G', b'a', b'=', b'Q', b',', b'i', b'=', b'5', 0x9C],
+            )
+            .events;
+        assert!(events.contains(&ParserEvent::Graphics(GraphicsAction::Query(Some(5)))));
+    }
+
+    #[test]
+    fn kitty_bel_terminator() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        let events = feed(&mut p, &mut g, "\x1b_Ga=d\x07");
+        assert!(events.contains(&ParserEvent::Graphics(GraphicsAction::DeleteAll)));
+    }
+
+    #[test]
+    fn non_g_apc_and_dcs_and_pm_stay_ignored() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        let events = feed(
+            &mut p,
+            &mut g,
+            "\x1bPq=sx;re\x1b\\\x1b_abc\x1b\\\x1b}zz\x1b\\X",
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, ParserEvent::Graphics(_))),
+            "no graphics from other string sequences"
+        );
+        assert_eq!(rows(&g)[0], "X");
+    }
 }

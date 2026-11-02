@@ -12,6 +12,7 @@
 //! `1000`, `1002`, `1003`, `1006`, and `1015` (MOUSE-009..012).
 
 use crate::color::{Color, ansi_palette};
+use crate::graphics::{GraphicsAction, parse_kitty};
 use crate::grid::{Cell, CellAttribute, Grid};
 
 /// Side effects the pane must apply after a [`Parser::advance`] call.
@@ -42,6 +43,8 @@ pub enum ParserEvent {
     PromptEnd(Option<i32>),
     /// BEL: the shell rang the bell (BELL-001).
     Bell,
+    /// Kitty graphics command (`ESC _ G ...` / `ESC P G ...`, roadmap v0.5).
+    Graphics(GraphicsAction),
 }
 
 /// What one [`Parser::advance`] call produced.
@@ -61,6 +64,12 @@ enum State {
     Csi,
     Osc,
     OscEscape,
+    /// Inside a kitty graphics string, after `ESC _`/`ESC P`/0x90.
+    KittyDetect,
+    /// Inside a kitty graphics string, collecting the payload.
+    Kitty,
+    /// Kitty string saw `ESC`: next byte is the ST (`\`) or payload data.
+    KittyEscape,
     Ignore,
     IgnoreEscape,
 }
@@ -199,7 +208,8 @@ impl Parser {
                         self.osc.clear();
                         self.state = State::Osc;
                     }
-                    0x50 | 0x5F | 0x7D => self.state = State::Ignore,
+                    0x50 | 0x5F => self.state = State::KittyDetect,
+                    0x7D => self.state = State::Ignore,
                     0x20..=0x2F => self.state = State::EscapeIntermediate,
                     // ECMA-48 lets 0x30..=0x3F close an escape sequence:
                     // ESC 7 / ESC 8 (DECSC / DECRC) live here.
@@ -241,6 +251,35 @@ impl Parser {
                         self.osc.push(0x1B);
                         self.osc.push(b);
                         self.state = State::Osc;
+                    }
+                },
+                State::KittyDetect => match b {
+                    b'G' => {
+                        self.osc.clear();
+                        self.state = State::Kitty;
+                    }
+                    0x1B => self.state = State::Escape,
+                    0x07 | 0x9C => self.state = State::Ground,
+                    _ => self.state = State::Ignore,
+                },
+                State::Kitty => match b {
+                    0x1B => self.state = State::KittyEscape,
+                    0x07 | 0x9C => {
+                        self.finish_kitty(&mut events);
+                        self.state = State::Ground;
+                    }
+                    _ => self.osc.push(b),
+                },
+                State::KittyEscape => match b {
+                    0x5C => {
+                        self.finish_kitty(&mut events);
+                        self.state = State::Ground;
+                    }
+                    0x1B => {}
+                    _ => {
+                        self.osc.push(0x1B);
+                        self.osc.push(b);
+                        self.state = State::Kitty;
                     }
                 },
                 State::Ignore => match b {
@@ -320,7 +359,8 @@ impl Parser {
                     self.osc.clear();
                     self.state = State::Osc;
                 }
-                0x90 | 0x98 | 0x9E | 0x9F => self.state = State::Ignore,
+                0x90 => self.state = State::KittyDetect,
+                0x98 | 0x9E | 0x9F => self.state = State::Ignore,
                 0x9C => {
                     self.finish_osc(events);
                     self.state = State::Ground;
@@ -398,6 +438,14 @@ impl Parser {
         self.scroll_top = 0;
         self.scroll_bottom = usize::MAX;
         self.wrap_pending = false;
+    }
+
+    /// A kitty graphics string ended: decode the payload into an event.
+    fn finish_kitty(&mut self, events: &mut Vec<ParserEvent>) {
+        let payload = std::mem::take(&mut self.osc);
+        if let Some(action) = parse_kitty(&payload) {
+            events.push(ParserEvent::Graphics(action));
+        }
     }
 
     fn finish_osc(&mut self, events: &mut Vec<ParserEvent>) {
