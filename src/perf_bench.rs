@@ -83,7 +83,7 @@ fn bench_lock() -> MutexGuard<'static, ()> {
     }
 }
 
-const CLASS_NAME: &str = "rusttyterm-perf-bench";
+const CLASS_NAME: &str = "rustty-perf-bench";
 
 /// Number of shell lines painted per frame in the burst benchmark. A real
 /// ConPTY burst delivers far more than this per poll tick, so this is the
@@ -134,7 +134,7 @@ fn bench_target(cols: usize, rows: usize) -> (HWND, Renderer) {
             "bench: window class registration failed"
         );
     });
-    let title = wstr("rusttyterm perf bench");
+    let title = wstr("rustty perf bench");
     let hwnd = unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -170,7 +170,7 @@ fn bench_target(cols: usize, rows: usize) -> (HWND, Renderer) {
 fn lines(from: usize, count: usize) -> String {
     let mut out = String::with_capacity(count * 32);
     for i in from..from + count {
-        out.push_str("rusttyterm perf line ");
+        out.push_str("rustty perf line ");
         out.push_str(&i.to_string());
         out.push_str("\r\n");
     }
@@ -194,7 +194,7 @@ fn present_floor(app: &mut App, renderer: &mut Renderer, theme: &Theme) -> Durat
     }
     let floor = sum / 20;
     eprintln!(
-        "rusttyterm bench present floor: {:.2} ms/frame (display refresh, not paint work)",
+        "rustty bench present floor: {:.2} ms/frame (display refresh, not paint work)",
         floor.as_secs_f64() * 1_000.0,
     );
     floor
@@ -299,7 +299,7 @@ impl BenchReport {
     fn print(&self, label: &str) {
         let per_frame = self.paint.as_secs_f64() / self.frames.max(1) as f64;
         eprintln!(
-            "rusttyterm bench {label}: {} frames, {} lines, {:.1} ms wall, \
+            "rustty bench {label}: {} frames, {} lines, {:.1} ms wall, \
              {:.1} ms paint, {:.2} ms/frame paint, {:.2} ms worst frame paint, \
              {} allocations",
             self.frames,
@@ -311,7 +311,7 @@ impl BenchReport {
             self.allocations,
         );
         eprintln!(
-            "rusttyterm bench {label}: atlas {} tiles, {} new, {} evictions, \
+            "rustty bench {label}: atlas {} tiles, {} new, {} evictions, \
              {} glyph blits, {} fallback runs",
             self.tiles, self.inserts, self.evictions, self.blits, self.fallbacks,
         );
@@ -451,9 +451,9 @@ fn damage_frames_cover_only_the_dirty_rows() {
     let damaged = renderer.last_mask_rows();
     app.clear_grid_damage();
     let atlas = renderer.atlas_stats();
-    eprintln!("rusttyterm bench damage rows: {damaged} of {rows}");
+    eprintln!("rustty bench damage rows: {damaged} of {rows}");
     eprintln!(
-        "rusttyterm bench damage atlas: {} tiles, {} rendered, {} evictions",
+        "rustty bench damage atlas: {} tiles, {} rendered, {} evictions",
         atlas.tiles, atlas.inserts, atlas.evictions,
     );
 

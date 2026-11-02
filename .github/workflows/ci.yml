@@ -43,5 +43,5 @@ jobs:
       - name: Upload portable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: rusttyterm-portable-zip
+          name: rustty-portable-zip
           path: dist/*.zip

@@ -1,5 +1,5 @@
-//! `rusttyterm` — a fast, native-feeling, MIT-licensed terminal emulator
-//! for Windows (spec: [`docs/SPEC.md`](https://github.com/dhruvparpia/rusttyterm)).
+//! `rustty` — a fast, native-feeling, MIT-licensed terminal emulator
+//! for Windows (spec: [`docs/SPEC.md`](https://github.com/dhruvparpia/rustty)).
 //!
 //! Data-model core: grid + scrollback, panes, shells, tabs, app state,
 //! TOML config, themes. The ConPTY backend and the Direct2D renderer are

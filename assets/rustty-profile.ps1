@@ -1,4 +1,4 @@
-# rusttyterm PowerShell integration (SHELLINT-014, issue #38).
+# rustty PowerShell integration (SHELLINT-014, issue #38).
 # Dot-sourced with `pwsh -NoExit -Command ". <this file>"`.
 $rtEsc = [char]27
 $rtBel = [char]7

@@ -5,7 +5,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-use rusttyterm::{app, color, pane};
+use rustty::{app, color, pane};
 
 #[test]
 fn issue1_alt_screen_chunk_invariance() {

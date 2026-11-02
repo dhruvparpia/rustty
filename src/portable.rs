@@ -1,7 +1,7 @@
 //! Portable mode (SPEC CONFIG-020, PKG-004, FR-103): when the app runs
 //! from an extracted folder, the config lives beside the executable instead
 //! of in `%APPDATA%`. The portable ZIP built by `packaging/build-portable.ps1`
-//! ships a `rusttyterm.portable` marker file that selects this mode; a
+//! ships a `rustty.portable` marker file that selects this mode; a
 //! folder holding a local `config.toml` beside the exe counts as portable
 //! even without the marker, which is what PKG-004 ("use local config by
 //! default") asks for. No FFI here: plain path checks.
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 /// Marker file in the portable ZIP: its presence beside the exe selects the
 /// local `config.toml`.
-pub const MARKER: &str = "rusttyterm.portable";
+pub const MARKER: &str = "rustty.portable";
 
 /// Portable config path for the folder holding the executable, or `None`
 /// when the folder is not a portable install (no marker, no local config).
@@ -39,7 +39,7 @@ mod tests {
     /// Freshly created temp folder for one test; unique per test name.
     fn temp_dir(tag: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("rusttyterm-portable-{tag}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("rustty-portable-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir

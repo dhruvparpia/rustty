@@ -1,6 +1,6 @@
 //! Persistent session host (issue #46, docs/design-session-host.md).
 //!
-//! `rusttyhost.exe` owns managed ConPTY sessions per user, independently
+//! `rustty-host.exe` owns managed ConPTY sessions per user, independently
 //! of any GUI/console client: a client's death never kills a host-owned
 //! shell (each session lives in its own kill-on-close job object), and
 //! termination is always explicit. Transport is one local named pipe,
@@ -73,7 +73,7 @@ pub const EXIT_PROTOCOL: u8 = 6;
 /// The session is controlled by another client.
 pub const EXIT_BUSY: u8 = 7;
 
-/// Pipe name base; the full name is `\\.\pipe\rusttyhost.<user>`.
+/// Pipe name base; the full name is `\\.\pipe\rustty-host.<user>`.
 /// The user suffix keeps two accounts on one machine apart; the real
 /// boundary is the pipe DACL (current user only), not the name.
 #[must_use]
@@ -82,7 +82,7 @@ pub fn pipe_name() -> String {
         .or_else(|_| std::env::var("USER"))
         .map(|u| u.to_ascii_lowercase())
         .unwrap_or_else(|_| "user".to_string());
-    format!(r"\\.\pipe\rusttyhost.{user}")
+    format!(r"\\.\pipe\rustty-host.{user}")
 }
 
 /// Directory holding the persistent id/alias allocator:
@@ -335,7 +335,7 @@ pub fn overlapped_write(
 }
 
 /// The Windows session host: App state, per-session job objects, the
-/// RPC dispatch table. The `rusttyhost.exe` bin drives it; clients
+/// RPC dispatch table. The `rustty-host.exe` bin drives it; clients
 /// speak through [`client`].
 #[cfg(windows)]
 pub mod server {
@@ -800,8 +800,7 @@ pub mod server {
             g.save_ids();
             // Self-attach prevention (attach ADR): a shell started by the
             // host knows its alias and refuses to attach to its own session.
-            opts.env
-                .insert("RUSTTYTERM_SESSION".into(), alias.to_string());
+            opts.env.insert("RUSTTY_SESSION".into(), alias.to_string());
             let job = create_kill_job().map_err(|e| Fail::Code("internal", e.to_string()))?;
             let spawned = ConPty::spawn(
                 &opts.program,
@@ -1416,7 +1415,7 @@ pub mod server {
                 } else {
                     Ok(json!({
                         "protocol": negotiated,
-                        "host": "rusttyhost",
+                        "host": "rustty-host",
                         "version": env!("CARGO_PKG_VERSION"),
                         "ops": OPS,
                         "snapshotSchema": SNAPSHOT_SCHEMA,
@@ -1801,12 +1800,12 @@ pub mod client {
         pub protocol: u32,
     }
 
-    /// Locate `rusttyhost.exe` beside this executable.
+    /// Locate `rustty-host.exe` beside this executable.
     #[must_use]
     pub fn host_exe_path() -> Option<std::path::PathBuf> {
         let exe = std::env::current_exe().ok()?;
         let dir = exe.parent()?;
-        let host = dir.join("rusttyhost.exe");
+        let host = dir.join("rustty-host.exe");
         host.exists().then_some(host)
     }
 
@@ -1814,7 +1813,7 @@ pub mod client {
     fn spawn_host() -> io::Result<()> {
         let host = host_exe_path().ok_or(io::Error::new(
             io::ErrorKind::NotFound,
-            "rusttyhost.exe is not beside rusttyterm.exe",
+            "rustty-host.exe is not beside rustty.exe",
         ))?;
         // The host is a GUI-subsystem exe (no console flashes) and must
         // outlive us, so spawn it detached. `bInheritHandles=FALSE` is
@@ -2168,7 +2167,7 @@ mod tests {
         assert_eq!((a2, i2), (2, 2));
         assert_eq!(ids.resolve(a1), Some(i1));
         // A reload keeps the allocator moving forward: no reuse.
-        let dir = std::env::temp_dir().join(format!("rusttyhost-ids-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rustty-host-ids-{}", std::process::id()));
         ids.save(&dir).expect("save");
         let mut re = IdsState::load(&dir).expect("load");
         let (a3, i3) = re.allocate();
@@ -2178,7 +2177,7 @@ mod tests {
 
     #[test]
     fn corrupt_allocator_is_an_error_never_a_reset() {
-        let dir = std::env::temp_dir().join(format!("rusttyhost-bad-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rustty-host-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(dir.join("ids.json"), b"not json").expect("write");
         assert!(IdsState::load(&dir).is_err());

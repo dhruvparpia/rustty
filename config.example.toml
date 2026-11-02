@@ -1,5 +1,5 @@
-# rusttyterm config — %APPDATA%\rusttyterm\config.toml
-# (portable mode: a `config.toml` next to rusttyterm.exe wins)
+# rustty config — %APPDATA%\rustty\config.toml
+# (portable mode: a `config.toml` next to rustty.exe wins)
 #
 # The app re-reads this file when you save it (CONFIG-018): themes, colours,
 # fonts, window padding, split, tab bar, cursor, opacity, key bindings, bell

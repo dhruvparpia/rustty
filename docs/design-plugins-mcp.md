@@ -8,7 +8,7 @@ document, not a contract: nothing here is implemented and no key is in
 
 A plugin is a **separate process** that speaks
 [MCP](https://modelcontextprotocol.io) (JSON-RPC 2.0) over its stdin/stdout.
-rusttyterm is the MCP host. There is no in-process plugin ABI: no DLL
+rustty is the MCP host. There is no in-process plugin ABI: no DLL
 loading, no embedded scripting language, no stable-Rust-plugin interface.
 
 Why:
@@ -27,7 +27,7 @@ Why:
   no plugin directory scan, download, or update mechanism.
 - Startup: each enabled plugin launches with the window; a plugin that
   fails the MCP handshake within 5 s is marked dead and reported once.
-- Plugins expose **tools**; rusttyterm exposes its own capabilities as
+- Plugins expose **tools**; rustty exposes its own capabilities as
   MCP server tools (read visible grid text, read scrollback, send text to
   a pane, open/close/focus tabs and panes, query config).
 - Every plugin tool that *writes* (send text, open tab, change config)

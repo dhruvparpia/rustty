@@ -1,6 +1,6 @@
 //! TOML configuration (SPEC §13 schema, §14 defaults).
 //!
-//! User file: `%APPDATA%\rusttyterm\config.toml` on Windows; in portable
+//! User file: `%APPDATA%\rustty\config.toml` on Windows; in portable
 //! mode (see [`crate::portable`]) the `config.toml` beside the executable
 //! wins (CONFIG-020). Missing or invalid files fall back to defaults;
 //! invalid values are reported by [`Config::load`]. Value ranges are
@@ -789,7 +789,7 @@ pub struct Config {
     #[serde(rename = "session-restore", default = "default_true")]
     pub session_restore: bool,
     /// SHELLINT-013/014: launch known shells (Git Bash, PowerShell, WSL
-    /// bash) with the rusttyterm integration script, and enable per-command
+    /// bash) with the rustty integration script, and enable per-command
     /// tracking, navigation and completion notices. Explicit opt-in.
     #[serde(rename = "shell-integration", default)]
     pub shell_integration: bool,
@@ -798,7 +798,7 @@ pub struct Config {
     /// 0 disables the toasts.
     #[serde(rename = "command-notify-ms", default = "default_notify_ms")]
     pub command_notify_ms: u64,
-    /// Detach prefix for `rusttyterm --attach` (issue #47): `C-<char>`,
+    /// Detach prefix for `rustty --attach` (issue #47): `C-<char>`,
     /// default `C-]` (Ctrl+]). `prefix d` detaches, `prefix ?` shows help.
     #[serde(rename = "detach-prefix", default = "default_detach_prefix")]
     pub detach_prefix: String,
@@ -1123,12 +1123,23 @@ impl Config {
 ///
 /// Portable mode wins over `%APPDATA%` (CONFIG-020, PKG-004): when the
 /// executable sits in a portable folder (see [`crate::portable`]), the
-/// `config.toml` beside it is used.
+/// `config.toml` beside it is used. When the `rustty` dir has no config
+/// yet and the pre-rename `rusttyterm` dir does, that file is read, so
+/// the rename does not silently reset user settings.
 #[must_use]
 pub fn config_path() -> Option<PathBuf> {
     crate::portable::running_config_path().or_else(|| {
-        std::env::var_os("APPDATA")
-            .map(|dir| PathBuf::from(dir).join("rusttyterm").join("config.toml"))
+        std::env::var_os("APPDATA").map(|dir| {
+            let dir = PathBuf::from(dir);
+            let new = dir.join("rustty").join("config.toml");
+            if !new.is_file() {
+                let old = dir.join("rusttyterm").join("config.toml");
+                if old.is_file() {
+                    return old;
+                }
+            }
+            new
+        })
     })
 }
 

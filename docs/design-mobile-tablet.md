@@ -5,7 +5,7 @@ nothing here is implemented. SPEC.md stays the source of truth.
 
 ## Decision: one app, adaptive input — not a phone app
 
-rusttyterm stays a native Win32/Direct2D app. The same binary runs on
+rustty stays a native Win32/Direct2D app. The same binary runs on
 Windows on ARM tablets (the ARM64 build, roadmap v0.5); touch changes the
 *input layer*, never the renderer, parser, or PTY path. There is no
 separate mobile binary, no XAML/WinUI rewrite, no Electron webview

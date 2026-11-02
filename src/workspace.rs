@@ -2,7 +2,7 @@
 //! reusable launch layouts — tabs, pane split shapes, profiles, tab titles,
 //! per-pane working directories, focus, and optional explicit per-pane
 //! startup commands. Schema and migration policy:
-//! [`docs/design-workspaces.md`](https://github.com/dhruvparpia/rusttyterm).
+//! [`docs/design-workspaces.md`](https://github.com/dhruvparpia/rustty).
 //!
 //! Templates live in `workspaces.toml` beside `config.toml` (portable mode
 //! wins, the same resolution as `session.toml`). They are *templates*: the
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::session::{self, MAX_DEPTH, MAX_TABS};
 use crate::split::Dir;
 
-/// Schema version this rusttyterm writes (WORKSPACE-009).
+/// Schema version this rustty writes (WORKSPACE-009).
 pub const VERSION: u32 = 1;
 /// Workspaces the store may hold before writes are refused.
 pub const MAX_WORKSPACES: usize = 64;
@@ -257,7 +257,7 @@ pub fn read_store(path: &Path) -> Loaded {
     }
     match toml::from_str::<Store>(&text) {
         Ok(store) if store.version > VERSION => Loaded::Unusable(format!(
-            "workspaces file is version {}; this rusttyterm understands version {VERSION}",
+            "workspaces file is version {}; this rustty understands version {VERSION}",
             store.version
         )),
         Ok(store) if store.workspace.len() > MAX_WORKSPACES => Loaded::Unusable(format!(
@@ -391,7 +391,7 @@ mod tests {
     use crate::split::Dir;
 
     fn temp_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("rusttyterm-ws-{}-{tag}.toml", std::process::id()))
+        std::env::temp_dir().join(format!("rustty-ws-{}-{tag}.toml", std::process::id()))
     }
 
     fn leaf(cwd: Option<&str>, command: Option<&[&str]>) -> WsShape {

@@ -1,15 +1,15 @@
 # Persistent sessions and console attach
 
-Next major milestone, tracked by [#43](https://github.com/dhruvparpia/rusttyterm/issues/43).
-Owner-requested entry point: **`rusttyterm --attach <n>` from another console**.
+Next major milestone, tracked by [#43](https://github.com/dhruvparpia/rustty/issues/43).
+Owner-requested entry point: **`rustty --attach <n>` from another console**.
 This is a feature/architecture specification; the commands below are planned,
 not implemented. No version number or release date is assigned yet.
 
 ## User experience
 
-A developer starts a managed shell in rusttyterm, runs a build or opens Neovim,
+A developer starts a managed shell in rustty, runs a build or opens Neovim,
 then connects to that same session from PowerShell in Windows Terminal, another
-rusttyterm window, or another supported local console. Attaching preserves the
+rustty window, or another supported local console. Attaching preserves the
 shell PID, current directory, environment, jobs and terminal state. Detaching
 returns to the caller's shell without stopping the managed session.
 
@@ -21,17 +21,17 @@ attaches to individual sessions; full workspace-layout attach can follow.
 
 | Command | Behavior |
 |---|---|
-| `rusttyterm --list-sessions` | List session number, name, profile, cwd when known, state, controller and viewer count |
-| `rusttyterm --list-sessions --json` | Versioned structured output for scripts; include durable ID and exit status |
-| `rusttyterm --new-session --profile "PowerShell" --name build` | Create a persistent session and attach in the invoking console |
-| `rusttyterm --new-session --profile "PowerShell" --name build --detach` | Create a persistent session without a view; print its session number |
-| `rusttyterm --attach 3` | Attach interactively to existing session 3 in the invoking console |
-| `rusttyterm --attach 3 --read-only` | Watch the session without acquiring input or resize ownership |
-| `rusttyterm --attach 3 --take-control` | Explicitly transfer input/resize ownership from the current controller |
-| `rusttyterm --attach 3 --window` | Open a native GUI view of the same session |
-| `rusttyterm --session-info 3 --json` | Inspect metadata, geometry, attachments and exit state |
-| `rusttyterm --terminate-session 3` | Request graceful termination; report completion or timeout |
-| `rusttyterm --terminate-session 3 --force` | Explicitly force termination according to the documented process-tree policy |
+| `rustty --list-sessions` | List session number, name, profile, cwd when known, state, controller and viewer count |
+| `rustty --list-sessions --json` | Versioned structured output for scripts; include durable ID and exit status |
+| `rustty --new-session --profile "PowerShell" --name build` | Create a persistent session and attach in the invoking console |
+| `rustty --new-session --profile "PowerShell" --name build --detach` | Create a persistent session without a view; print its session number |
+| `rustty --attach 3` | Attach interactively to existing session 3 in the invoking console |
+| `rustty --attach 3 --read-only` | Watch the session without acquiring input or resize ownership |
+| `rustty --attach 3 --take-control` | Explicitly transfer input/resize ownership from the current controller |
+| `rustty --attach 3 --window` | Open a native GUI view of the same session |
+| `rustty --session-info 3 --json` | Inspect metadata, geometry, attachments and exit state |
+| `rustty --terminate-session 3` | Request graceful termination; report completion or timeout |
+| `rustty --terminate-session 3 --force` | Explicitly force termination according to the documented process-tree policy |
 
 These auxiliary spellings are the proposed first CLI contract. Resolve grammar
 and compatibility with #44 before implementation. `--attach <n>` is the required
@@ -57,7 +57,7 @@ display labels initially, avoiding ambiguous duplicate-name lookup.
   number to an unrelated live session. Persist allocator state; if registry state
   is lost, require explicit recovery rather than silent alias recycling.
 - Rename/reorder tabs and split/focus changes do not change a session ID.
-- Initial delivery supports sessions created by rusttyterm's session host. It does
+- Initial delivery supports sessions created by rustty's session host. It does
   not adopt arbitrary external consoles or recover already-lost ConPTY handles.
 - Introduce persistent mode explicitly. Legacy ephemeral sessions keep their
   documented destructive close behavior. Persistent views clearly label detach
@@ -159,11 +159,11 @@ backpressure cannot deadlock ConPTY close.
 
 | Slice | Exit criteria |
 |---|---|
-| [A — Host and identity prototype (#46)](https://github.com/dhruvparpia/rusttyterm/issues/46) | Headless managed shell, stable number/ID, versioned discovery/IPC; client death does not kill shell |
-| [B — Single-console attach (#47)](https://github.com/dhruvparpia/rusttyterm/issues/47) | `--list-sessions`, `--attach n`, input/resize, detach escape and caller-console restoration work end-to-end |
-| [C — State continuity (#48)](https://github.com/dhruvparpia/rusttyterm/issues/48) | Attach into running Neovim/build; correct snapshot/delta ordering, single query-reply owner, bounded detached history |
-| [D — GUI integration and shared views (#49)](https://github.com/dhruvparpia/rusttyterm/issues/49) | GUI attaches to host sessions; copy attach command, watchers, explicit takeover and deterministic geometry |
-| [E — Recovery and release gates (#50)](https://github.com/dhruvparpia/rusttyterm/issues/50) | Reconnect, stale records, host incompatibility, shutdown stress, accessibility and documented client matrix |
+| [A — Host and identity prototype (#46)](https://github.com/dhruvparpia/rustty/issues/46) | Headless managed shell, stable number/ID, versioned discovery/IPC; client death does not kill shell |
+| [B — Single-console attach (#47)](https://github.com/dhruvparpia/rustty/issues/47) | `--list-sessions`, `--attach n`, input/resize, detach escape and caller-console restoration work end-to-end |
+| [C — State continuity (#48)](https://github.com/dhruvparpia/rustty/issues/48) | Attach into running Neovim/build; correct snapshot/delta ordering, single query-reply owner, bounded detached history |
+| [D — GUI integration and shared views (#49)](https://github.com/dhruvparpia/rustty/issues/49) | GUI attaches to host sessions; copy attach command, watchers, explicit takeover and deterministic geometry |
+| [E — Recovery and release gates (#50)](https://github.com/dhruvparpia/rustty/issues/50) | Reconnect, stale records, host incompatibility, shutdown stress, accessibility and documented client matrix |
 
 Release acceptance must include actual Windows desktop/console runs:
 

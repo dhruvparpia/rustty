@@ -79,8 +79,8 @@ cwd = "C:/src/web"
 - The writer always emits the current version (1).
 - The reader accepts `version` ≤ current. Today current = 1, so only
   `version = 1` (or the key missing) loads.
-- A file with a **newer** version than this rusttyterm understands is
-  reported ("workspaces file is version N; this rusttyterm understands
+- A file with a **newer** version than this rustty understands is
+  reported ("workspaces file is version N; this rustty understands
   version 1") and treated as empty: it is **never rewritten, migrated
   silently, or clobbered**. Mutating operations (save/rename/delete) refuse
   to touch a store they could not read.
@@ -94,9 +94,9 @@ cwd = "C:/src/web"
 
 ## CLI / UI surface
 
-- `rusttyterm --workspace <name>`: open the template in a new window; a
+- `rustty --workspace <name>`: open the template in a new window; a
   missing template is reported (message box) and a plain window opens.
-- `rusttyterm --workspaces`: print template names to stdout.
+- `rustty --workspaces`: print template names to stdout.
 - File → Workspaces: `Open <name>…` (one item per template, replaces this
   window's tabs after confirmation), `Save As New…`, `Overwrite "<current>"`,
   `Rename…`, and a Delete submenu. The name prompt is a native modal dialog

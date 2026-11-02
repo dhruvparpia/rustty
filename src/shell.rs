@@ -98,13 +98,13 @@ impl SpawnOptions {
 
     /// SHELLINT-013/014 (issue #38): when `shell-integration` is on, launch
     /// known shells (Git Bash, WSL bash, PowerShell) with the embedded
-    /// rusttyterm integration script. Unknown shells, and shells whose args
+    /// rustty integration script. Unknown shells, and shells whose args
     /// already reference an rcfile/profile, are left untouched.
     pub fn apply_shell_integration(&mut self) {
         if self
             .args
             .iter()
-            .any(|a| a.contains("rcfile") || a.contains("rusttyterm"))
+            .any(|a| a.contains("rcfile") || a.contains("rustty"))
         {
             return;
         }
@@ -120,8 +120,8 @@ impl SpawnOptions {
             // Git Bash / MSYS2: source the script as the rcfile.
             let Some(path) = write_integration_script(
                 &dir,
-                "rusttyterm-bash-rc.sh",
-                include_str!("../assets/rusttyterm-bash-rc.sh"),
+                "rustty-bash-rc.sh",
+                include_str!("../assets/rustty-bash-rc.sh"),
             ) else {
                 return;
             };
@@ -130,8 +130,8 @@ impl SpawnOptions {
         } else if base == "wsl" || base == "wsl.exe" {
             let Some(path) = write_integration_script(
                 &dir,
-                "rusttyterm-bash-rc.sh",
-                include_str!("../assets/rusttyterm-bash-rc.sh"),
+                "rustty-bash-rc.sh",
+                include_str!("../assets/rustty-bash-rc.sh"),
             ) else {
                 return;
             };
@@ -145,8 +145,8 @@ impl SpawnOptions {
         } else if base.starts_with("pwsh") || base.starts_with("powershell") {
             let Some(path) = write_integration_script(
                 &dir,
-                "rusttyterm-profile.ps1",
-                include_str!("../assets/rusttyterm-profile.ps1"),
+                "rustty-profile.ps1",
+                include_str!("../assets/rustty-profile.ps1"),
             ) else {
                 return;
             };

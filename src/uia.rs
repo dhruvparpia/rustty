@@ -606,7 +606,7 @@ mod tests {
 
     fn snap() -> Snapshot {
         Snapshot {
-            title: "pwsh — rusttyterm".into(),
+            title: "pwsh — rustty".into(),
             version: "0.1.0".into(),
             tabs: vec![
                 TabInfo {
@@ -905,7 +905,7 @@ mod tests {
     fn props_root() {
         let s = snap();
         let p = props(Node::Root, &s);
-        assert_eq!(vstr(get(&p, P_NAME)), "pwsh — rusttyterm");
+        assert_eq!(vstr(get(&p, P_NAME)), "pwsh — rustty");
         assert_eq!(vstr(get(&p, P_HELP_TEXT)), "0.1.0");
         assert!(vbool(get(&p, P_IS_WINDOW_ROOT)));
         assert_eq!(vi32(get(&p, P_CONTROL_TYPE)), UIA_WindowControlTypeId.0);

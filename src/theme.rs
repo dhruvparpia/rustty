@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn a_named_theme_file_overrides_the_preset() {
-        let dir = std::env::temp_dir().join(format!("rusttyterm-theme-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rustty-theme-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
         let path = dir.join("dracula-ish.toml");
         std::fs::write(
@@ -608,7 +608,7 @@ mod tests {
 
     #[test]
     fn the_config_table_wins_over_the_theme_file() {
-        let dir = std::env::temp_dir().join(format!("rusttyterm-theme2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rustty-theme2-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("grid.toml"), "foreground = \"#111111\"\n").unwrap();
         let table = table("name = \"grid\"\nforeground = \"#222222\"\n");
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn theme_files_are_listed_sorted_by_stem() {
-        let dir = std::env::temp_dir().join(format!("rusttyterm-theme3-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rustty-theme3-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
         std::fs::write(dir.join("zeta.toml"), "").unwrap();
         std::fs::write(dir.join("alpha.toml"), "").unwrap();

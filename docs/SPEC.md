@@ -1203,7 +1203,7 @@ PowerShell, and Visual Studio developer shells (`vswhere`).
 | DISCOVERY-003 | Discovery shall run off the UI thread: startup never waits on a probe, and late results merge into the live profile list and Jump List. | P1 |
 | DISCOVERY-004 | A failed probe shall be nonfatal and explainable (the profile just does not appear); "Reload Config" re-runs discovery. | P1 |
 | DISCOVERY-005 | Discovery shall never modify the registry or install shell extensions (SEC-013/NFR-308). | P0 |
-| OPENHERE-001 | A positional directory argument (`rusttyterm <dir>`, "Open terminal here") shall open the first tab in that directory; a non-directory shall be reported and the default location used. Unicode, spaces and supported UNC paths shall work. | P1 |
+| OPENHERE-001 | A positional directory argument (`rustty <dir>`, "Open terminal here") shall open the first tab in that directory; a non-directory shall be reported and the default location used. Unicode, spaces and supported UNC paths shall work. | P1 |
 | DRAG-001 | Dropping files onto the grid shall insert their paths at the shell prompt, quoted for the receiving shell family (Git Bash, PowerShell, CMD, WSL). | P1 |
 | DRAG-002 | Dropping folders onto the tab bar shall open one new tab per folder in that directory. | P1 |
 | DRAG-003 | The drop shall use the target tab's profile (quoting rules and cloned cwd), not a hard-coded shell. | P1 |
@@ -1244,14 +1244,14 @@ will be specified with their child issues.
 ## 9.32 Session host requirements
 
 Issue #46 (roadmap "Session host"; ADR `docs/design-session-host.md`,
-contract `docs/design-session-attach.md`). The per-user `rusttyhost`
+contract `docs/design-session-attach.md`). The per-user `rustty-host`
 owns managed PTYs independently of any client. Console attach
 (#47), streaming (#48/#58), lifecycle UI (#49) and automation
 (#56–#59) build on these and will be specified with their issues.
 
 | ID | Requirement | Priority |
 |---|---|---|
-| HOST-001 | A per-user session host binary (`rusttyhost`) serves a per-user named pipe; the pipe's DACL grants access to the current user only, and remote clients are rejected. The host is a GUI-subsystem process: it never flashes a console. | P1 |
+| HOST-001 | A per-user session host binary (`rustty-host`) serves a per-user named pipe; the pipe's DACL grants access to the current user only, and remote clients are rejected. The host is a GUI-subsystem process: it never flashes a console. | P1 |
 | HOST-002 | Single instance: the first process to create the pipe owns it; a second instance probes the pipe, finds the live host, and exits 0. The host exits by itself after an idle budget (10 min) with no clients and no live sessions. Host death is visible to clients as a host-unavailable exit, never as a silent success. | P1 |
 | HOST-003 | Sessions get durable u64 ids and stable numeric aliases, persisted atomically under the config dir. A closed alias keeps answering "stale" for the host's process lifetime and across restarts; a stale number is never bound to an unrelated live session. | P1 |
 | HOST-004 | The host owns every managed PTY in its own kill-on-close job object: a client process dying (crash included) never kills a host-owned shell, and explicit termination cleans up the whole process tree and its handles. | P1 |

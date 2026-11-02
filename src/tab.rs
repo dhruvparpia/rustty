@@ -659,7 +659,7 @@ mod tests {
         tab.split_active(Dir::Vertical).expect("split");
         // A program that does not exist: the spawn leg fails for every pane,
         // never a panic, and no live shell/ConPTY is left behind.
-        let opts = SpawnOptions::new("rusttyterm-no-such-program.exe", 1, 1);
+        let opts = SpawnOptions::new("rustty-no-such-program.exe", 1, 1);
         let err = tab.spawn_panes(&opts);
         assert!(err.is_err(), "both panes were asked to spawn and failed");
         assert_eq!(tab.pane_count(), 2);

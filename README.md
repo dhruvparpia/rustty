@@ -1,15 +1,15 @@
-# rusttyterm
+# rustty
 
 <img src="assets/rustty-icon.png" alt="Rustty copper crab terminal icon" width="160" height="160">
 
 A fast, native-feeling terminal emulator for Windows, written in Rust, released under the MIT license.
 
-`rusttyterm` is a from-scratch implementation. It borrows ideas and default values
+`rustty` is a from-scratch implementation. It borrows ideas and default values
 from mature terminals (Ghostty, kitty, Alacritty, WezTerm, Windows Terminal) — the
 behaviors users praise — and implements them natively on Windows with no Electron,
 no web UI, no bundled interpreted runtime.
 
-> **Early development.** `rusttyterm` runs today as a native Windows terminal:
+> **Early development.** `rustty` runs today as a native Windows terminal:
 > ConPTY shells in tabs, Direct2D/DirectWrite rendering with a glyph atlas,
 > mouse selection, clipboard, fullscreen, and a TOML config with theme presets.
 > `packaging/build-portable.ps1` builds the portable ZIP. Splits, search, native
@@ -31,9 +31,9 @@ no web UI, no bundled interpreted runtime.
 
 ## Configuration
 
-The config file is `%APPDATA%\rusttyterm\config.toml`. It is optional: missing
+The config file is `%APPDATA%\rustty\config.toml`. It is optional: missing
 file or keys use the built-in defaults. In a portable ZIP (or any folder with a
-`rusttyterm.portable` marker beside the exe) the `config.toml` beside the
+`rustty.portable` marker beside the exe) the `config.toml` beside the
 executable is used instead. Values are validated — a size, theme,
 scrollback, or grid value outside its range is a startup error with a message,
 never a silent clamp. [`config.example.toml`](config.example.toml) lists every

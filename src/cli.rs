@@ -124,8 +124,8 @@ fn alias<I: Iterator<Item = OsString>>(args: &mut I) -> Option<u32> {
 /// One-line usage for `--help`.
 #[must_use]
 pub const fn usage() -> &'static str {
-    "usage: rusttyterm [directory] [--profile <name>] [--theme <name>] [--workspace <name> | --workspaces] [--version] [-h|--help]\n\
-       session host: rusttyterm --list-sessions [--json] | --new-session [--profile <name>] [--name <label>] [--cwd <dir>] [--cols <n>] [--rows <n>] [--detach] [--ephemeral] | --session-info <n> [--json] | --terminate-session <n> [--force] | --attach <n> [--read-only | --take-control]"
+    "usage: rustty [directory] [--profile <name>] [--theme <name>] [--workspace <name> | --workspaces] [--version] [-h|--help]\n\
+       session host: rustty --list-sessions [--json] | --new-session [--profile <name>] [--name <label>] [--cwd <dir>] [--cols <n>] [--rows <n>] [--detach] [--ephemeral] | --session-info <n> [--json] | --terminate-session <n> [--force] | --attach <n> [--read-only | --take-control]"
 }
 
 /// Attach to the calling console so a GUI-subsystem exe can print to

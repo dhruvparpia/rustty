@@ -1,4 +1,4 @@
-# Contributing to rusttyterm
+# Contributing to rustty
 
 Thanks for helping. This project is MIT-licensed and developed in the open;
 issues and pull requests are the way work happens.

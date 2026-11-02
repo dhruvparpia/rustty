@@ -2,9 +2,9 @@
 //! plus config parsing. Windowing/ConPTY/rendering are not in scope yet.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-use rusttyterm::app::App;
-use rusttyterm::config::Config;
-use rusttyterm::shell::ShellState;
+use rustty::app::App;
+use rustty::config::Config;
+use rustty::shell::ShellState;
 
 #[test]
 fn fresh_app_has_one_tab_and_a_live_grid() {

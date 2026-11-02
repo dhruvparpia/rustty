@@ -1,11 +1,11 @@
-# rusttyterm Roadmap
+# rustty Roadmap
 
 Release plan derived from [`docs/SPEC.md`](docs/SPEC.md) (sections 24–27).
 Versions ship in order; features move down only by explicit decision.
 
 The owner-approved next-work sequence is recorded in
 [Post-v0.5 — Daily-driver excellence and project workflows](#post-v05--daily-driver-excellence-and-project-workflows)
-and [master backlog #45](https://github.com/dhruvparpia/rusttyterm/issues/45).
+and [master backlog #45](https://github.com/dhruvparpia/rustty/issues/45).
 
 ## v0.1 — MVP
 
@@ -79,7 +79,7 @@ command-aware output and first-class Windows integration. Preserve native UI,
 local-first operation, portable support and no telemetry.
 
 These are planned stages, not shipped features or new version/date commitments.
-[Master backlog #45](https://github.com/dhruvparpia/rusttyterm/issues/45) tracks
+[Master backlog #45](https://github.com/dhruvparpia/rustty/issues/45) tracks
 execution; linked issues contain acceptance criteria and dependencies. Reconcile
 new behavior and configuration schemas with `docs/SPEC.md` before implementation.
 
@@ -87,8 +87,8 @@ new behavior and configuration schemas with `docs/SPEC.md` before implementation
 
 | Work | Deliverable | Tracking |
 |---|---|---|
-| Compatibility and recovery gates | Repeatable Windows matrix for PowerShell, Git Bash, WSL, SSH, Neovim, tmux, fzf and interactive coding-agent CLIs; Unicode, IME, AltGr, clipboard, resize, mixed DPI, background exits, sleep/wake and graphics recovery | [#36](https://github.com/dhruvparpia/rusttyterm/issues/36) |
-| Correctness and responsiveness | Triage existing defects; prioritize session identity, terminal replies, content preservation, rendering and resource/lifecycle correctness; measure input latency, startup, memory/handles and sustained output | Individual bug issues, coordinated by [#36](https://github.com/dhruvparpia/rusttyterm/issues/36) |
+| Compatibility and recovery gates | Repeatable Windows matrix for PowerShell, Git Bash, WSL, SSH, Neovim, tmux, fzf and interactive coding-agent CLIs; Unicode, IME, AltGr, clipboard, resize, mixed DPI, background exits, sleep/wake and graphics recovery | [#36](https://github.com/dhruvparpia/rustty/issues/36) |
+| Correctness and responsiveness | Triage existing defects; prioritize session identity, terminal replies, content preservation, rendering and resource/lifecycle correctness; measure input latency, startup, memory/handles and sustained output | Individual bug issues, coordinated by [#36](https://github.com/dhruvparpia/rustty/issues/36) |
 
 Record actual desktop results separately from portable tests and cross-compilation.
 Compare damage-only rendering against full-frame references and exercise protocol
@@ -98,10 +98,10 @@ chunk boundaries. Security remediation remains in the private advisory workflow.
 
 | Feature | First deliverables | Tracking |
 |---|---|---|
-| Native command palette | Fuzzy action/profile/tab search, shortcut discovery and conflict diagnostics; shared action registry (shipped in #39), then pane/theme/settings/workspace providers | [#39](https://github.com/dhruvparpia/rusttyterm/issues/39) |
-| Named project workspaces | Save/open reusable tab and pane layouts with profiles, directories and focus; templates independent of last-session restore; explicit startup tasks and Jump List/CLI entry points; schema in [design-workspaces.md](docs/design-workspaces.md) | [#37](https://github.com/dhruvparpia/rusttyterm/issues/37) |
-| Links and editor navigation | OSC 8 hyperlinks with pointer open/copy shipped in #41; remaining: diagnostic file:line:column links, configured editor launch and keyboard hints; correct Unicode, quoting and cwd resolution (child issues) | [#41](https://github.com/dhruvparpia/rusttyterm/issues/41) |
-| Windows development workflows | WSL/PowerShell/Visual Studio shell discovery, Open terminal here, shell-aware file drag/drop and clear Windows/WSL/remote session identity (shipped in #40) | [#40](https://github.com/dhruvparpia/rusttyterm/issues/40) |
+| Native command palette | Fuzzy action/profile/tab search, shortcut discovery and conflict diagnostics; shared action registry (shipped in #39), then pane/theme/settings/workspace providers | [#39](https://github.com/dhruvparpia/rustty/issues/39) |
+| Named project workspaces | Save/open reusable tab and pane layouts with profiles, directories and focus; templates independent of last-session restore; explicit startup tasks and Jump List/CLI entry points; schema in [design-workspaces.md](docs/design-workspaces.md) | [#37](https://github.com/dhruvparpia/rustty/issues/37) |
+| Links and editor navigation | OSC 8 hyperlinks with pointer open/copy shipped in #41; remaining: diagnostic file:line:column links, configured editor launch and keyboard hints; correct Unicode, quoting and cwd resolution (child issues) | [#41](https://github.com/dhruvparpia/rustty/issues/41) |
+| Windows development workflows | WSL/PowerShell/Visual Studio shell discovery, Open terminal here, shell-aware file drag/drop and clear Windows/WSL/remote session identity (shipped in #40) | [#40](https://github.com/dhruvparpia/rustty/issues/40) |
 
 The initial palette can ship while workspace storage is designed. Fix cwd and
 session-identity defects before building launch/navigation workflows on them.
@@ -110,8 +110,8 @@ session-identity defects before building launch/navigation workflows on them.
 
 | Feature | First deliverables | Tracking |
 |---|---|---|
-| Command-aware scrollback | Opt-in OSC 7/133 integration, bounded command metadata, previous/next command, copy command output, duration/exit status and background completion notifications (shipped in #38); search/export of one command's output fold into large-output mode below | [#38](https://github.com/dhruvparpia/rusttyterm/issues/38) |
-| Large-output mode | Incremental bounded search scan with follow-output pause/resume shipped in #42 slice 1; remaining: search results with context, stable bookmarks, streaming export, optional disk-backed history with explicit retention and disk-full behavior (child issues) | [#42](https://github.com/dhruvparpia/rusttyterm/issues/42) |
+| Command-aware scrollback | Opt-in OSC 7/133 integration, bounded command metadata, previous/next command, copy command output, duration/exit status and background completion notifications (shipped in #38); search/export of one command's output fold into large-output mode below | [#38](https://github.com/dhruvparpia/rustty/issues/38) |
+| Large-output mode | Incremental bounded search scan with follow-output pause/resume shipped in #42 slice 1; remaining: search results with context, stable bookmarks, streaming export, optional disk-backed history with explicit retention and disk-full behavior (child issues) | [#42](https://github.com/dhruvparpia/rustty/issues/42) |
 
 Share stable history anchors between command metadata, search and bookmarks.
 Deliver responsive in-memory navigation before adding disk-backed storage. Shell
@@ -121,8 +121,8 @@ integration stays explicit and opt-in, consistent with the existing spec.
 
 | Feature | First deliverables | Tracking |
 |---|---|---|
-| Persistent running sessions / console attach | `rusttyterm --attach <n>` connects from another console to the same live PTY; session discovery, headless creation, detach/reattach, GUI views, read-only watchers, explicit control transfer and bounded recovery; host ADR settled in [design-session-host.md](docs/design-session-host.md) | [#43](https://github.com/dhruvparpia/rusttyterm/issues/43), [attach design](docs/design-session-attach.md) |
-| Local automation API / CLI / MCP | Stable window/tab/pane/session IDs, versioned operations, structured lifecycle/completion events and streamed capture; MCP adapter over the same API; ADR in [design-automation-api.md](docs/design-automation-api.md) | [#44](https://github.com/dhruvparpia/rusttyterm/issues/44) |
+| Persistent running sessions / console attach | `rustty --attach <n>` connects from another console to the same live PTY; session discovery, headless creation, detach/reattach, GUI views, read-only watchers, explicit control transfer and bounded recovery; host ADR settled in [design-session-host.md](docs/design-session-host.md) | [#43](https://github.com/dhruvparpia/rustty/issues/43), [attach design](docs/design-session-attach.md) |
+| Local automation API / CLI / MCP | Stable window/tab/pane/session IDs, versioned operations, structured lifecycle/completion events and streamed capture; MCP adapter over the same API; ADR in [design-automation-api.md](docs/design-automation-api.md) | [#44](https://github.com/dhruvparpia/rustty/issues/44) |
 
 Persistent sessions retain live processes; current session restore respawns them.
 Resolve lifecycle/backpressure behavior before implementing persistence. Design

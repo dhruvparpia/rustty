@@ -244,7 +244,7 @@ fn build_font_resources(
     let font_size = font.size * dpi / 72.0; // points -> DIPs
     let mut collection: Option<IDWriteFontCollection> = None;
     unsafe { dwrite.GetSystemFontCollection(&raw mut collection, false) }?;
-    let collection = collection.ok_or_else(|| anyhow::anyhow!("rusttyterm: no system fonts"))?;
+    let collection = collection.ok_or_else(|| anyhow::anyhow!("rustty: no system fonts"))?;
     let mut chosen: &str = FONT_FAMILIES[FONT_FAMILIES.len() - 1];
     let configured = font.family.as_str();
     for family in std::iter::once(configured).chain(FONT_FAMILIES) {
@@ -987,7 +987,7 @@ impl Renderer {
         };
         let res = unsafe { self.target.Resize(&size) };
         if res.is_err() {
-            eprintln!("rusttyterm: Direct2D resize failed");
+            eprintln!("rustty: Direct2D resize failed");
         }
         self.pixel_size = size;
         self.atlas = None;
@@ -1015,7 +1015,7 @@ impl Renderer {
                 .CreateHwndRenderTarget(&self.target_props, &hwnd_props)
         } {
             Ok(target) => self.target = target,
-            Err(e) => eprintln!("rusttyterm: Direct2D target recreation failed: {e}"),
+            Err(e) => eprintln!("rustty: Direct2D target recreation failed: {e}"),
         }
         // A fresh swap chain shows nothing, so the next frame is a full
         // repaint, not a damage repaint.
@@ -1156,7 +1156,7 @@ impl Renderer {
             }
             Err(e) => {
                 self.atlas_failed = true;
-                eprintln!("rusttyterm: glyph atlas unavailable: {e}");
+                eprintln!("rustty: glyph atlas unavailable: {e}");
                 false
             }
         }
@@ -1434,7 +1434,7 @@ impl Renderer {
         // resources (atlas, brushes) go with it and are recreated.
         let end = unsafe { self.target.EndDraw(None, None) };
         if let Err(e) = end {
-            eprintln!("rusttyterm: Direct2D EndDraw failed: {e}");
+            eprintln!("rustty: Direct2D EndDraw failed: {e}");
             self.damage.painted = false;
             self.pane_damage.clear();
             self.atlas = None;
@@ -2407,7 +2407,7 @@ impl Renderer {
             Err(_) => {
                 // Brush failure must not stop the frame (NFR-216): the
                 // affected rectangles/text are simply skipped.
-                eprintln!("rusttyterm: Direct2D brush creation failed");
+                eprintln!("rustty: Direct2D brush creation failed");
                 None
             }
         }

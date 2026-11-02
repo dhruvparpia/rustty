@@ -1,6 +1,6 @@
 //! Console attach frontend (issue #47, docs/design-session-attach.md).
 //!
-//! `rusttyterm --attach <n>` renders the managed PTY in the *caller's*
+//! `rustty --attach <n>` renders the managed PTY in the *caller's*
 //! console: the console translates keystrokes to VT bytes
 //! (`ENABLE_VIRTUAL_TERMINAL_INPUT`), so Unicode, control keys, IME
 //! text-as-keys and paste arrive already encoded — no keymap here.
@@ -86,8 +86,8 @@ pub fn run(alias: u32, read_only: bool, take_control: bool, prefix: u8) -> io::R
         ));
     }
     // Self-attach feedback loop (attach ADR): a host-managed shell has
-    // RUSTTYTERM_SESSION set to its own alias.
-    if std::env::var("RUSTTYTERM_SESSION").is_ok_and(|v| v == alias.to_string()) {
+    // RUSTTY_SESSION set to its own alias.
+    if std::env::var("RUSTTY_SESSION").is_ok_and(|v| v == alias.to_string()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("refusing to attach session {alias} to the shell that runs inside it"),
@@ -504,7 +504,7 @@ fn follow_size(out_h: HANDLE, cols: u64, rows: u64) {
 }
 
 fn fail(code: u8, msg: &str) -> u8 {
-    eprintln!("rusttyterm: {msg}");
+    eprintln!("rustty: {msg}");
     code
 }
 

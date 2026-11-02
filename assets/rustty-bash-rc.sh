@@ -1,4 +1,4 @@
-# rusttyterm bash integration (SHELLINT-013, issue #38).
+# rustty bash integration (SHELLINT-013, issue #38).
 # Loaded with `bash --rcfile <this file>`: it loads the user's own .bashrc
 # first, then adds the OSC 133 markers and OSC 7 cwd reports.
 [ -f ~/.bashrc ] && . ~/.bashrc

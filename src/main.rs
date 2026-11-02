@@ -1,19 +1,19 @@
-//! `rusttyterm` CLI entry point: load config, probe a shell, open the
+//! `rustty` CLI entry point: load config, probe a shell, open the
 //! terminal window (spec §32, window milestone).
 
-// Console subsystem (issue #47): `rusttyterm --attach <n>` must run in
+// Console subsystem (issue #47): `rustty --attach <n>` must run in
 // the caller's console in the foreground (PowerShell only waits for
 // console-subsystem processes), which a GUI-subsystem exe cannot do.
 // A GUI launch closes the allocated console window right away.
 
 use std::process::ExitCode;
 
-use rusttyterm::config::Config;
-use rusttyterm::theme;
+use rustty::config::Config;
+use rustty::theme;
 
 #[cfg(windows)]
 fn main() -> ExitCode {
-    let cli = rusttyterm::cli::parse(std::env::args_os().skip(1));
+    let cli = rustty::cli::parse(std::env::args_os().skip(1));
     let is_session_verb = cli.list_sessions
         || cli.new_session
         || cli.session_info.is_some()
@@ -24,27 +24,27 @@ fn main() -> ExitCode {
         // the console subsystem allocated a window; attach to the
         // calling console so output prints where it was typed, keeping
         // any redirection intact. From a real console this is a no-op.
-        rusttyterm::cli::attach_parent_console();
+        rustty::cli::attach_parent_console();
     } else {
         // GUI launch: close the console window the subsystem allocated.
         // shortcut: it flashes briefly on double-click; a GUI-subsystem
         // launcher stub hides it if that ever matters.
-        rusttyterm::cli::free_console();
+        rustty::cli::free_console();
     }
     for unknown in &cli.unknown {
-        eprintln!("rusttyterm: ignoring unknown argument {unknown:?}");
+        eprintln!("rustty: ignoring unknown argument {unknown:?}");
     }
     if cli.help {
-        println!("{}", rusttyterm::cli::usage());
+        println!("{}", rustty::cli::usage());
         return ExitCode::SUCCESS;
     }
     if cli.version {
-        println!("rusttyterm {}", env!("CARGO_PKG_VERSION"));
+        println!("rustty {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
     if cli.workspaces {
         // WORKSPACE-004: print the template names, one per line.
-        for name in rusttyterm::workspace::names() {
+        for name in rustty::workspace::names() {
             println!("{name}");
         }
         return ExitCode::SUCCESS;
@@ -52,7 +52,7 @@ fn main() -> ExitCode {
     let mut cfg = match Config::load() {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("rusttyterm: {e}");
+            eprintln!("rustty: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -70,7 +70,7 @@ fn main() -> ExitCode {
     // config, then the [theme] colour overrides. Problems are reported and
     // the nearest working theme is used. `--theme` beats the config.
     let theme_dir =
-        rusttyterm::config::config_path().and_then(|p| p.parent().map(|dir| dir.join("themes")));
+        rustty::config::config_path().and_then(|p| p.parent().map(|dir| dir.join("themes")));
     // THEME-010: an empty theme name follows the system dark/light setting.
     let theme_name: &str = match &cli.theme {
         Some(name) => name,
@@ -80,41 +80,41 @@ fn main() -> ExitCode {
     let (theme, problems) =
         theme::resolve_configured(theme_name, &cfg.theme.overrides(), theme_dir.as_deref());
     for problem in &problems {
-        eprintln!("rusttyterm: {problem}");
+        eprintln!("rustty: {problem}");
     }
-    let mut spawn = rusttyterm::shell::probe_shell(&cfg);
+    let mut spawn = rustty::shell::probe_shell(&cfg);
     // Issue #40: a positional directory ("Open terminal here" from
-    // Explorer, or a plain `rusttyterm C:\dir`) sets the first tab's
+    // Explorer, or a plain `rustty C:\dir`) sets the first tab's
     // working directory. Not a directory: report and open as usual.
     if let Some(dir) = cli.directory {
         if std::path::Path::new(&dir).is_dir() {
             spawn.cwd = Some(dir);
         } else {
-            eprintln!("rusttyterm: {dir:?} is not a directory; opening in the default location");
+            eprintln!("rustty: {dir:?} is not a directory; opening in the default location");
         }
     }
-    match rusttyterm::window::run(&cfg, theme, spawn, cli.workspace.as_deref()) {
+    match rustty::window::run(&cfg, theme, spawn, cli.workspace.as_deref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("rusttyterm: {e}");
+            eprintln!("rustty: {e}");
             ExitCode::FAILURE
         }
     }
 }
 
-/// Session host verbs (issue #46): talk to the per-user `rusttyhost`
+/// Session host verbs (issue #46): talk to the per-user `rustty-host`
 /// and print its answer. Stable exit codes per the attach contract:
 /// 2 usage, 3 not found, 5 host unavailable, 6 protocol incompatible;
 /// a failing verb never opens a window.
 #[cfg(windows)]
-fn session_verb(cli: &rusttyterm::cli::Cli) -> ExitCode {
+fn session_verb(cli: &rustty::cli::Cli) -> ExitCode {
     use std::process::ExitCode;
 
-    use rusttyterm::host::{EXIT_NOT_FOUND, EXIT_PROTOCOL, EXIT_USAGE, client};
+    use rustty::host::{EXIT_NOT_FOUND, EXIT_PROTOCOL, EXIT_USAGE, client};
     use serde_json::json;
 
     if cli.new_session && cli.session_name.as_deref().is_some_and(|s| s.is_empty()) {
-        eprintln!("rusttyterm: --name needs a value");
+        eprintln!("rustty: --name needs a value");
         return ExitCode::from(EXIT_USAGE);
     }
     // Console attach (issue #47). Parsed in cli.rs so a malformed verb
@@ -122,18 +122,18 @@ fn session_verb(cli: &rusttyterm::cli::Cli) -> ExitCode {
     // (docs/design-session-attach.md). Attaching with --profile is an
     // error: attach never replaces the session's original profile.
     if cli.attach.is_some() && cli.profile.is_some() {
-        eprintln!("rusttyterm: --attach does not accept --profile");
+        eprintln!("rustty: --attach does not accept --profile");
         return ExitCode::from(EXIT_USAGE);
     }
     let want_alias = cli.attach.or(cli.session_info).or(cli.terminate_session);
     if want_alias.is_some() && want_alias == Some(0) {
         // A malformed alias (not a positive number) is a usage error.
-        eprintln!("rusttyterm: session alias must be a positive number");
+        eprintln!("rustty: session alias must be a positive number");
         return ExitCode::from(EXIT_USAGE);
     }
     if let Some(alias) = cli.attach {
         if cli.read_only && cli.take_control {
-            eprintln!("rusttyterm: --read-only and --take-control are mutually exclusive");
+            eprintln!("rustty: --read-only and --take-control are mutually exclusive");
             return ExitCode::from(EXIT_USAGE);
         }
         // The detach prefix comes from the config; a broken config
@@ -141,18 +141,18 @@ fn session_verb(cli: &rusttyterm::cli::Cli) -> ExitCode {
         let cfg = match Config::load() {
             Ok(cfg) => cfg,
             Err(e) => {
-                eprintln!("rusttyterm: {e}; using defaults");
+                eprintln!("rustty: {e}; using defaults");
                 Config::default()
             }
         };
-        let prefix = match rusttyterm::attach::parse_prefix(&cfg.detach_prefix) {
+        let prefix = match rustty::attach::parse_prefix(&cfg.detach_prefix) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("rusttyterm: {e}");
+                eprintln!("rustty: {e}");
                 return ExitCode::from(EXIT_USAGE);
             }
         };
-        return match rusttyterm::attach::run(alias, cli.read_only, cli.take_control, prefix) {
+        return match rustty::attach::run(alias, cli.read_only, cli.take_control, prefix) {
             Ok(code) => ExitCode::from(code),
             Err(e)
                 if matches!(
@@ -161,12 +161,12 @@ fn session_verb(cli: &rusttyterm::cli::Cli) -> ExitCode {
                 ) =>
             {
                 // Not a TTY, or a self-attach: usage-class failures.
-                eprintln!("rusttyterm: {e}");
+                eprintln!("rustty: {e}");
                 ExitCode::from(EXIT_USAGE)
             }
             Err(e) => {
-                eprintln!("rusttyterm: {e}");
-                ExitCode::from(rusttyterm::host::EXIT_HOST_UNAVAILABLE)
+                eprintln!("rustty: {e}");
+                ExitCode::from(rustty::host::EXIT_HOST_UNAVAILABLE)
             }
         };
     }
@@ -188,9 +188,9 @@ fn session_verb(cli: &rusttyterm::cli::Cli) -> ExitCode {
             let code = if e.kind() == std::io::ErrorKind::ConnectionRefused {
                 EXIT_PROTOCOL
             } else {
-                rusttyterm::host::EXIT_HOST_UNAVAILABLE
+                rustty::host::EXIT_HOST_UNAVAILABLE
             };
-            eprintln!("rusttyterm: {e}");
+            eprintln!("rustty: {e}");
             return ExitCode::from(code);
         }
     };
@@ -221,8 +221,8 @@ fn session_verb(cli: &rusttyterm::cli::Cli) -> ExitCode {
     let resp = match c.call(method, params) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("rusttyterm: {e}");
-            return ExitCode::from(rusttyterm::host::EXIT_HOST_UNAVAILABLE);
+            eprintln!("rustty: {e}");
+            return ExitCode::from(rustty::host::EXIT_HOST_UNAVAILABLE);
         }
     };
     if let Some(err) = resp.get("error") {
@@ -234,7 +234,7 @@ fn session_verb(cli: &rusttyterm::cli::Cli) -> ExitCode {
             .get("message")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        eprintln!("rusttyterm: {code}: {message}");
+        eprintln!("rustty: {code}: {message}");
         return ExitCode::from(if code == "target-stale" {
             EXIT_NOT_FOUND
         } else {
@@ -329,21 +329,21 @@ fn session_verb(cli: &rusttyterm::cli::Cli) -> ExitCode {
 
 #[cfg(not(windows))]
 fn main() -> ExitCode {
-    let cli = rusttyterm::cli::parse(std::env::args_os().skip(1));
+    let cli = rustty::cli::parse(std::env::args_os().skip(1));
     for unknown in &cli.unknown {
-        eprintln!("rusttyterm: ignoring unknown argument {unknown:?}");
+        eprintln!("rustty: ignoring unknown argument {unknown:?}");
     }
     if cli.help {
-        println!("{}", rusttyterm::cli::usage());
+        println!("{}", rustty::cli::usage());
         return ExitCode::SUCCESS;
     }
     if cli.version {
-        println!("rusttyterm {}", env!("CARGO_PKG_VERSION"));
+        println!("rustty {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
     if cli.workspaces {
         // WORKSPACE-004: print the template names, one per line.
-        for name in rusttyterm::workspace::names() {
+        for name in rustty::workspace::names() {
             println!("{name}");
         }
         return ExitCode::SUCCESS;
@@ -351,7 +351,7 @@ fn main() -> ExitCode {
     match Config::load() {
         Ok(cfg) => {
             println!(
-                "rusttyterm v{} (no window on this platform): config ok, {}x{} grid, theme {}",
+                "rustty v{} (no window on this platform): config ok, {}x{} grid, theme {}",
                 env!("CARGO_PKG_VERSION"),
                 cfg.window.cols,
                 cfg.window.rows,
@@ -366,7 +366,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("rusttyterm: {e}");
+            eprintln!("rustty: {e}");
             ExitCode::FAILURE
         }
     }

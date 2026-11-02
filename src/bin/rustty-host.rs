@@ -1,9 +1,9 @@
-//! `rusttyhost.exe` (issue #46, docs/design-session-host.md): the
+//! `rustty-host.exe` (issue #46, docs/design-session-host.md): the
 //! per-user persistent session host. One instance at a time, bound by
 //! creating the named pipe: a second instance probes the pipe, finds a
-//! live host, and exits 0. Clients (`rusttyterm` session verbs, the
+//! live host, and exits 0. Clients (`rustty` session verbs, the
 //! automation API later) connect, speak framed JSON (see
-//! `rusttyterm::host`), and their death never kills a host-owned shell
+//! `rustty::host`), and their death never kills a host-owned shell
 //! (every session lives in its own kill-on-close job object).
 
 // GUI subsystem: the host must never flash a console window.
@@ -13,7 +13,7 @@
 use std::io;
 
 #[cfg(windows)]
-use rusttyterm::host::server::{App, PipeSecurity};
+use rustty::host::server::{App, PipeSecurity};
 
 fn main() -> std::process::ExitCode {
     serve()
@@ -27,18 +27,18 @@ fn serve() -> std::process::ExitCode {
 
 #[cfg(windows)]
 fn serve() -> std::process::ExitCode {
-    use rusttyterm::host::pipe_name;
+    use rustty::host::pipe_name;
 
     // A console only exists when the user started the host by hand;
     // when spawned by a client, the client's redirected handles (if
     // any) must survive so host diagnostics land where the launcher
     // pointed them.
-    rusttyterm::cli::attach_parent_console();
+    rustty::cli::attach_parent_console();
 
     let app = match App::new() {
         Ok(app) => std::sync::Arc::new(std::sync::Mutex::new(app)),
         Err(e) => {
-            eprintln!("rusttyhost: {e}");
+            eprintln!("rustty-host: {e}");
             return std::process::ExitCode::FAILURE;
         }
     };
@@ -46,7 +46,7 @@ fn serve() -> std::process::ExitCode {
     let mut security = match PipeSecurity::for_current_user() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("rusttyhost: cannot build pipe security: {e}");
+            eprintln!("rustty-host: cannot build pipe security: {e}");
             return std::process::ExitCode::FAILURE;
         }
     };
@@ -55,7 +55,7 @@ fn serve() -> std::process::ExitCode {
         Ok(first) => serve_loop(&app, &mut security, &name, first),
         Err(HostExit::Taken) => std::process::ExitCode::SUCCESS,
         Err(HostExit::Failed(e)) => {
-            eprintln!("rusttyhost: {e}");
+            eprintln!("rustty-host: {e}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -76,7 +76,7 @@ fn serve_loop(
 ) -> std::process::ExitCode {
     use std::sync::atomic::Ordering;
 
-    use rusttyterm::host::IDLE_EXIT_SECS;
+    use rustty::host::IDLE_EXIT_SECS;
 
     let mut current = first;
     loop {
@@ -106,12 +106,12 @@ fn serve_loop(
                             .stack_size(4 << 20)
                             .spawn(move || {
                                 // Per-connection attach identity (issue #47).
-                                let token = rusttyterm::host::server::new_token();
+                                let token = rustty::host::server::new_token();
                                 client_thread(&thread_app, current, token);
                                 // Release is idempotent: client_thread already
                                 // cleared this token before joining its pump.
                                 // Now drop the client count, then the ephemeral rule.
-                                rusttyterm::host::server::detach_token(&thread_app, token);
+                                rustty::host::server::detach_token(&thread_app, token);
                                 state(&thread_app)
                                     .clients
                                     .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -130,7 +130,7 @@ fn serve_loop(
                 // listening; loop re-checks the idle budget.
             }
             Err(e) => {
-                eprintln!("rusttyhost: connect failed ({e}); replacing instance");
+                eprintln!("rustty-host: connect failed ({e}); replacing instance");
                 drop(current);
             }
         }
@@ -138,7 +138,7 @@ fn serve_loop(
         current = match create_instance(name, security) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("rusttyhost: {e}");
+                eprintln!("rustty-host: {e}");
                 return std::process::ExitCode::FAILURE;
             }
         };
@@ -333,8 +333,8 @@ fn create_instance(name: &str, security: &mut PipeSecurity) -> io::Result<Client
 /// budget).
 #[cfg(windows)]
 fn client_thread(app: &std::sync::Arc<std::sync::Mutex<App>>, client: ClientPipe, token: u64) {
-    use rusttyterm::host::MAX_REQUEST_BYTES;
-    use rusttyterm::host::server::{Conn, handle, new_pump};
+    use rustty::host::MAX_REQUEST_BYTES;
+    use rustty::host::server::{Conn, handle, new_pump};
 
     // Single writer: every frame (responses + streams) goes out through
     // the pump, preserving frame order. The read thread only reads.
@@ -347,7 +347,7 @@ fn client_thread(app: &std::sync::Arc<std::sync::Mutex<App>>, client: ClientPipe
         handle: client.raw(),
         _owner: client,
     };
-    while let Ok(req) = rusttyterm::host::read_frame(&mut pipe, MAX_REQUEST_BYTES) {
+    while let Ok(req) = rustty::host::read_frame(&mut pipe, MAX_REQUEST_BYTES) {
         {
             let g = state(app);
             if let Ok(mut t) = g.last_activity.lock() {
@@ -366,7 +366,7 @@ fn client_thread(app: &std::sync::Arc<std::sync::Mutex<App>>, client: ClientPipe
     // them (join first would deadlock).
     drop(pipe);
     drop(wt);
-    rusttyterm::host::server::detach_token(app, token);
+    rustty::host::server::detach_token(app, token);
     let _ = pump.join();
 }
 
@@ -438,7 +438,7 @@ impl io::Read for PipeStream {
 #[cfg(windows)]
 impl io::Write for PipeStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        rusttyterm::host::overlapped_write(self.handle, buf)
+        rustty::host::overlapped_write(self.handle, buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {

@@ -522,15 +522,15 @@ mod tests {
     #[test]
     fn profile_env_replaces_inherited_and_terminates_the_block() {
         let mut env = BTreeMap::new();
-        env.insert("rusttyterm_test_var".to_string(), "profile".to_string());
+        env.insert("rustty_test_var".to_string(), "profile".to_string());
         let block = wide_environment(&env);
         let text: String = String::from_utf16_lossy(&block);
         let pairs: Vec<&str> = text.split('\0').collect();
         let hits: Vec<&&str> = pairs
             .iter()
-            .filter(|p| p.to_ascii_lowercase().starts_with("rusttyterm_test_var="))
+            .filter(|p| p.to_ascii_lowercase().starts_with("rustty_test_var="))
             .collect();
-        assert_eq!(hits, vec![&"rusttyterm_test_var=profile"]);
+        assert_eq!(hits, vec![&"rustty_test_var=profile"]);
         assert!(text.ends_with("\0\0"), "block must end with an empty pair");
     }
 }

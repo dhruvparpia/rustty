@@ -129,7 +129,7 @@ pub fn load() -> Option<Session> {
         Ok(session) if !session.tabs.is_empty() && session.tabs.len() <= MAX_TABS => Some(session),
         Ok(_) => None,
         Err(e) => {
-            eprintln!("rusttyterm: session file ignored: {e}");
+            eprintln!("rustty: session file ignored: {e}");
             None
         }
     }

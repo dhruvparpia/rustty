@@ -1,4 +1,4 @@
-# Rules for AI agents and contributors working on rusttyghost (rusttyterm)
+# Rules for AI agents and contributors working on RusTTY (rustty)
 
 Read `docs/SPEC.md` before changing behaviour. The spec is the product contract;
 `ROADMAP.md` is the release plan.

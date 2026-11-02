@@ -1,9 +1,9 @@
 # Build the portable ZIP artifact (SPEC PKG-001..004, NFR-305).
 #
 # ZIP layout (FR-103: extract the folder, run the exe, no install, no admin):
-#   rusttyterm-<version>-win-x64/
-#     rusttyterm.exe
-#     rusttyterm.portable      <- selects local config (CONFIG-020, PKG-004)
+#   rustty-<version>-win-x64/
+#     rustty.exe
+#     rustty.portable      <- selects local config (CONFIG-020, PKG-004)
 #     config.example.toml
 #     LICENSE                  <- MIT, in the package (OSS-003)
 #     README.md
@@ -11,7 +11,7 @@
 # Run from the repo root:
 #   powershell -ExecutionPolicy Bypass -File packaging\build-portable.ps1
 #   powershell -ExecutionPolicy Bypass -File packaging\build-portable.ps1 -Arch arm64
-# Output: dist\rusttyterm-<version>-win-x64.zip (+ -win-arm64) + SHA-256.
+# Output: dist\rustty-<version>-win-x64.zip (+ -win-arm64) + SHA-256.
 
 param(
     # 'x64' (default) or 'arm64' (roadmap v0.5 Windows ARM64).
@@ -44,7 +44,7 @@ $ErrorActionPreference = 'Stop'
 
 # Version comes from Cargo.toml, the single source of truth.
 $version = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-$name = "rusttyterm-$version-win-$Arch"
+$name = "rustty-$version-win-$Arch"
 $stage = Join-Path $root "dist\$name"
 $zip = Join-Path $root "dist\$name.zip"
 
@@ -52,9 +52,9 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 if (Test-Path $zip) { Remove-Item -Force $zip }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-Copy-Item "$bindir\rusttyterm.exe" $stage
+Copy-Item "$bindir\rustty.exe" $stage
 Copy-Item LICENSE, README.md, config.example.toml $stage
-New-Item -ItemType File -Path (Join-Path $stage 'rusttyterm.portable') | Out-Null
+New-Item -ItemType File -Path (Join-Path $stage 'rustty.portable') | Out-Null
 
 Compress-Archive -Path $stage -DestinationPath $zip
 

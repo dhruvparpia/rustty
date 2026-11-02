@@ -110,10 +110,10 @@ use crate::theme::{self, Theme};
 use crate::uia::{DipRect, Provider};
 
 /// Window class name.
-const CLASS_NAME: &str = "rusttyterm";
+const CLASS_NAME: &str = "rustty";
 
 /// App display name used in the window caption.
-const APP_NAME: &str = "rusttyterm";
+const APP_NAME: &str = "rustty";
 
 /// Shell-output poll period in milliseconds.
 const POLL_MS: u32 = 33;
@@ -126,7 +126,7 @@ const BLINK_TIMER: usize = 2;
 
 /// The AUMID that owns our toasts (PKG-002: Windows attributes them to the app).
 fn aumid() -> windows::core::HSTRING {
-    windows::core::HSTRING::from("com.dhruv.rusttyterm")
+    windows::core::HSTRING::from("com.dhruv.rustty")
 }
 /// BELL-003/004: how long one visual-bell flash lasts.
 const BELL_MS: u32 = 300;
@@ -366,7 +366,7 @@ fn build_menu(profiles: &[ProfileSpec], theme_names: &[String]) -> Result<HMENU>
         append_menu_submenu(menu, "&Window", window)?;
 
         let help = CreatePopupMenu()?;
-        append_menu_item(help, "&About rusttyterm", MENU_ABOUT)?;
+        append_menu_item(help, "&About rustty", MENU_ABOUT)?;
         append_menu_submenu(menu, "&Help", help)?;
 
         Ok(menu)
@@ -723,7 +723,7 @@ fn set_theme(hwnd: HWND, idx: usize) {
         let (theme, problems) =
             theme::resolve_configured(&name, &theme::ThemeFile::default(), s.theme_dir.as_deref());
         for problem in problems {
-            eprintln!("rusttyterm: {problem}");
+            eprintln!("rustty: {problem}");
         }
         s.theme = theme;
     }
@@ -749,7 +749,7 @@ fn open_preferences(hwnd: HWND) {
         let _ = std::fs::create_dir_all(parent);
     }
     if !path.exists() {
-        let _ = std::fs::write(&path, b"# rusttyterm config\n");
+        let _ = std::fs::write(&path, b"# rustty config\n");
     }
     let op = wstr("open");
     let file: Vec<u16> = path
@@ -771,10 +771,10 @@ fn open_preferences(hwnd: HWND) {
 
 fn show_about(hwnd: HWND) {
     let text = wstr(&format!(
-        "rusttyterm {}\n\nA native Windows terminal emulator.\nMIT licensed. No telemetry.",
+        "rustty {}\n\nA native Windows terminal emulator.\nMIT licensed. No telemetry.",
         env!("CARGO_PKG_VERSION")
     ));
-    let caption = wstr("About rusttyterm");
+    let caption = wstr("About rustty");
     unsafe {
         let _ = MessageBoxW(
             Some(hwnd),
@@ -794,7 +794,7 @@ fn ws_menu_label(name: &str) -> String {
 
 fn ws_report(hwnd: HWND, text: &str) {
     let text = wstr(text);
-    let caption = wstr("rusttyterm");
+    let caption = wstr("rustty");
     unsafe {
         let _ = MessageBoxW(
             Some(hwnd),
@@ -1485,7 +1485,7 @@ unsafe extern "system" fn wnd_proc(
                 if let Some(r) = &mut s.renderer {
                     let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
                     if s.app.resize_active(cols, rows).is_err() {
-                        eprintln!("rusttyterm: ConPTY resize failed");
+                        eprintln!("rustty: ConPTY resize failed");
                     }
                 }
             }
@@ -1725,7 +1725,7 @@ unsafe extern "system" fn wnd_proc(
             }
             // WINDOW-014: quitting asks first when the profile wants it.
             let ask = state_ref(hwnd).is_some_and(|s| s.app.tab_confirm_close());
-            if ask && !confirm_yes_no(hwnd, "Quit rusttyterm?") {
+            if ask && !confirm_yes_no(hwnd, "Quit rustty?") {
                 return LRESULT(0);
             }
             let _ = unsafe { DestroyWindow(hwnd) };
@@ -1748,7 +1748,7 @@ unsafe extern "system" fn wnd_proc(
                     if state.cfg.session_restore {
                         let session = snapshot_session(&state, hwnd);
                         if let Err(e) = crate::session::save(&session) {
-                            eprintln!("rusttyterm: session save failed: {e}");
+                            eprintln!("rustty: session save failed: {e}");
                         }
                     }
                     // The quick window rides along with the app.
@@ -1815,7 +1815,7 @@ fn init_window(hwnd: HWND) {
     let metrics = match measure_cells(dpi, &font) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("rusttyterm: font measurement failed: {e}");
+            eprintln!("rustty: font measurement failed: {e}");
             return;
         }
     };
@@ -1826,7 +1826,7 @@ fn init_window(hwnd: HWND) {
         Ok(r) => Some(r),
         Err(e) => {
             // NFR-216: the app degrades to a live-but-blind terminal.
-            eprintln!("rusttyterm: Direct2D renderer unavailable: {e}");
+            eprintln!("rustty: Direct2D renderer unavailable: {e}");
             None
         }
     };
@@ -1864,10 +1864,10 @@ fn init_window(hwnd: HWND) {
                 s.app
                     .spawn_active(&spec_opts(&spec, cols, rows, s.cfg.shell_integration))
             {
-                eprintln!("rusttyterm: shell spawn failed: {e}");
+                eprintln!("rustty: shell spawn failed: {e}");
             }
             if let Err(e) = s.app.resize_active(cols, rows) {
-                eprintln!("rusttyterm: initial resize failed: {e}");
+                eprintln!("rustty: initial resize failed: {e}");
             }
         }
     }
@@ -1995,7 +1995,7 @@ fn create_quick_window() {
     let metrics = match measure_cells(dpi, &font) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("rusttyterm: quick terminal font measurement failed: {e}");
+            eprintln!("rustty: quick terminal font measurement failed: {e}");
             return;
         }
     };
@@ -2042,7 +2042,7 @@ fn create_quick_window() {
     let hinstance = match unsafe { GetModuleHandleW(None) } {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("rusttyterm: quick terminal skipped: {e}");
+            eprintln!("rustty: quick terminal skipped: {e}");
             unsafe { drop(Box::from_raw(state_param as *mut WindowState)) };
             return;
         }
@@ -2070,7 +2070,7 @@ fn create_quick_window() {
         Err(e) => {
             // The window never existed to reclaim the box; free it here.
             unsafe { drop(Box::from_raw(state_param as *mut WindowState)) };
-            eprintln!("rusttyterm: quick terminal window failed: {e}");
+            eprintln!("rustty: quick terminal window failed: {e}");
         }
     }
 }
@@ -2247,7 +2247,7 @@ fn spawn_restored(s: &mut WindowState) {
         .map_or((s.spawn.cols, s.spawn.rows), |r| r.grid_size());
     let (cols, rows) = (cols.max(MIN_COLS), rows.max(MIN_ROWS));
     if let Err(e) = s.app.resize_all_tabs(cols, rows) {
-        eprintln!("rusttyterm: restored tab resize failed: {e}");
+        eprintln!("rustty: restored tab resize failed: {e}");
     }
     for (i, st) in session.tabs.iter().enumerate() {
         let spec = profile_spec_named(s, &st.profile);
@@ -2261,7 +2261,7 @@ fn spawn_restored(s: &mut WindowState) {
         if let Some(tab) = s.app.tab_at_mut(i)
             && let Err(e) = tab.spawn_panes_cmds(&opts, &cwds, cmds)
         {
-            eprintln!("rusttyterm: shell spawn failed: {e}");
+            eprintln!("rustty: shell spawn failed: {e}");
         }
     }
 }
@@ -2329,7 +2329,7 @@ fn resize_window(hwnd: HWND, width_px: u32, height_px: u32) {
     if !s.drag_resize {
         let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
         if s.app.resize_active(cols, rows).is_err() {
-            eprintln!("rusttyterm: ConPTY resize failed");
+            eprintln!("rustty: ConPTY resize failed");
         }
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -2361,7 +2361,7 @@ fn sync_tab_bar(hwnd: HWND) {
     r.set_tab_bar_height(bar);
     let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
     if s.app.resize_active(cols, rows).is_err() {
-        eprintln!("rusttyterm: ConPTY resize failed");
+        eprintln!("rustty: ConPTY resize failed");
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -4017,7 +4017,7 @@ fn xml_escape(text: &str) -> String {
     out
 }
 
-/// BELL-005: a Windows toast, attributed to rusttyterm by the AUMID.
+/// BELL-005: a Windows toast, attributed to rustty by the AUMID.
 fn show_toast(title: &str, body: &str) {
     let xml = format!(
         "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
@@ -4159,7 +4159,7 @@ fn split_pane(hwnd: HWND, dir: Dir) {
     let opts = profile_opts(s, cols.max(MIN_COLS), rows.max(MIN_ROWS));
     // `spawn_active` clamps cols/rows to the focused pane's own box.
     if let Err(e) = s.app.spawn_active(&opts) {
-        eprintln!("rusttyterm: split shell spawn failed: {e}");
+        eprintln!("rustty: split shell spawn failed: {e}");
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -4172,7 +4172,7 @@ fn split_pane(hwnd: HWND, dir: Dir) {
 /// stray Enter keeps the shells alive.
 fn confirm_yes_no(hwnd: HWND, text: &str) -> bool {
     let text = wstr(text);
-    let caption = wstr("rusttyterm");
+    let caption = wstr("rustty");
     let answer = unsafe {
         MessageBoxW(
             Some(hwnd),
@@ -4206,7 +4206,7 @@ fn close_pane_or_tab(hwnd: HWND) {
         let text = if busy {
             "A command is running in this tab. Close it and kill the shell?"
         } else {
-            "Close this tab? It is the last one, so rusttyterm will quit."
+            "Close this tab? It is the last one, so rustty will quit."
         };
         if !confirm_yes_no(hwnd, text) {
             return;
@@ -4277,7 +4277,7 @@ fn new_tab_with_profile(hwnd: HWND, spec: ProfileSpec) {
     }
     let opts = spec_opts(&spec, cols, rows, s.cfg.shell_integration);
     if let Err(e) = s.app.spawn_active(&opts) {
-        eprintln!("rusttyterm: shell spawn failed: {e}");
+        eprintln!("rustty: shell spawn failed: {e}");
     }
     set_title(hwnd, &s.app);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -4336,7 +4336,7 @@ fn reload_config(s: &mut WindowState, hwnd: HWND) {
     let cfg = match Config::load() {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("rusttyterm: config reload failed: {e}");
+            eprintln!("rustty: config reload failed: {e}");
             return;
         }
     };
@@ -4350,7 +4350,7 @@ fn reload_config(s: &mut WindowState, hwnd: HWND) {
     let (new_theme, problems) =
         theme::resolve_configured(name, &cfg.theme.overrides(), s.theme_dir.as_deref());
     for problem in &problems {
-        eprintln!("rusttyterm: {problem}");
+        eprintln!("rustty: {problem}");
     }
     let font = cfg.font();
     let font_changed = font != s.font;
@@ -4393,7 +4393,7 @@ fn reload_config(s: &mut WindowState, hwnd: HWND) {
             r.resize(rect.right.max(0) as u32, rect.bottom.max(0) as u32);
             let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
             if s.app.resize_all_tabs(cols, rows).is_err() {
-                eprintln!("rusttyterm: ConPTY resize failed after a config reload");
+                eprintln!("rustty: ConPTY resize failed after a config reload");
             }
         }
         let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -4428,7 +4428,7 @@ fn apply_profile_font(s: &mut WindowState, spec: &ProfileSpec) {
     s.font = font;
     let (cols, rows) = renderer.grid_size().max((MIN_COLS, MIN_ROWS));
     if s.app.resize_all_tabs(cols, rows).is_err() {
-        eprintln!("rusttyterm: ConPTY resize failed after a profile font change");
+        eprintln!("rustty: ConPTY resize failed after a profile font change");
     }
 }
 
@@ -4461,7 +4461,7 @@ fn zoom_font(hwnd: HWND, step: Option<f32>) {
     s.font = font;
     let (cols, rows) = renderer.grid_size().max((MIN_COLS, MIN_ROWS));
     if s.app.resize_all_tabs(cols, rows).is_err() {
-        eprintln!("rusttyterm: ConPTY resize failed after a font zoom");
+        eprintln!("rustty: ConPTY resize failed after a font zoom");
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -4475,7 +4475,7 @@ fn apply_profile_theme(s: &mut WindowState, spec: &ProfileSpec) {
     let (theme, problems) =
         theme::resolve_configured(name, &theme::ThemeFile::default(), s.theme_dir.as_deref());
     for problem in &problems {
-        eprintln!("rusttyterm: {problem}");
+        eprintln!("rustty: {problem}");
     }
     s.theme = theme;
 }
@@ -4723,7 +4723,7 @@ fn copy_last_command(hwnd: HWND) {
         return;
     };
     if !clipboard::set_text(&text) {
-        eprintln!("rusttyterm: clipboard copy failed");
+        eprintln!("rustty: clipboard copy failed");
     }
 }
 
@@ -4796,7 +4796,7 @@ fn copy_screen(hwnd: HWND) {
         .selection_text()
         .unwrap_or_else(|| Renderer::visible_text(tab.pane().grid()));
     if !text.is_empty() && !clipboard::set_text(&text) {
-        eprintln!("rusttyterm: clipboard copy failed");
+        eprintln!("rustty: clipboard copy failed");
     }
 }
 
@@ -5011,10 +5011,10 @@ fn rebuild_jumplist(names: &[String]) {
             if let Err(e) = res
                 && !dev_build
             {
-                eprintln!("rusttyterm: jump list failed: {e}");
+                eprintln!("rustty: jump list failed: {e}");
             }
         }
-        Err(e) => eprintln!("rusttyterm: jump list skipped: {e}"),
+        Err(e) => eprintln!("rustty: jump list skipped: {e}"),
     }
 }
 
@@ -5199,9 +5199,7 @@ pub fn run(
         lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
     };
     if unsafe { RegisterClassW(&class) } == 0 {
-        return Err(anyhow::anyhow!(
-            "rusttyterm: window class registration failed"
-        ));
+        return Err(anyhow::anyhow!("rustty: window class registration failed"));
     }
 
     let title = wstr(APP_NAME);
@@ -5224,14 +5222,14 @@ pub fn run(
     if let Err(e) = created {
         // The window never existed to reclaim the box; free it here.
         unsafe { drop(Box::from_raw(state_param as *mut WindowState)) };
-        return Err(anyhow::anyhow!("rusttyterm: window creation failed: {e}"));
+        return Err(anyhow::anyhow!("rustty: window creation failed: {e}"));
     }
     if let Some(name) = ws_miss {
         // WORKSPACE-007: a missing template opens a plain window and says why.
         let msg = wstr(&format!(
-            "rusttyterm: no workspace template named {name:?}.\n\nA plain window opened instead."
+            "rustty: no workspace template named {name:?}.\n\nA plain window opened instead."
         ));
-        let caption = wstr("rusttyterm");
+        let caption = wstr("rustty");
         if let Ok(main) = created {
             unsafe {
                 let _ = MessageBoxW(
@@ -5253,7 +5251,7 @@ pub fn run(
             && register_hotkey(main, &cfg.quick_terminal).is_err()
         {
             eprintln!(
-                "rusttyterm: quick-terminal hotkey `{}` is taken by another app; the quick terminal stays off",
+                "rustty: quick-terminal hotkey `{}` is taken by another app; the quick terminal stays off",
                 cfg.quick_terminal.key
             );
         }

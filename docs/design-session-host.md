@@ -8,12 +8,12 @@ capability list, not a second control surface.
 
 ## 1. Host lifetime, launch race, idle policy, namespace
 
-- The host is a separate executable, `rusttyhost.exe`, installed beside
-  `rusttyterm.exe` (same directory: portable namespace travels with the
+- The host is a separate executable, `rustty-host.exe`, installed beside
+  `rustty.exe` (same directory: portable namespace travels with the
   app; no registry, no services, no scheduled tasks).
 - Any client that needs a host tries to connect first, then spawns
-  `rusttyhost.exe --serve` once. The single-instance race is settled by
-  the pipe name: the listener that binds `\\.\pipe\rusttyhost.<user>` wins;
+  `rustty-host.exe --serve` once. The single-instance race is settled by
+  the pipe name: the listener that binds `\\.\pipe\rustty-host.<user>` wins;
   every loser (process and client) exits 0 immediately. There is exactly
   one host per user per session, by construction.
 - Ready handshake: client polls the pipe (50 ms interval, 5 s budget) and
@@ -77,16 +77,16 @@ capability list, not a second control surface.
   and **the client never starts, replaces, signals or kills a host it
   cannot speak to** (the spawn-race in item 1 binds: a losing client
   process exits before it can harm an old host).
-- `rusttyterm --session-info <n> --json` exposes the live host's protocol
+- `rustty --session-info <n> --json` exposes the live host's protocol
   version, so a mismatched user gets a visible "restart the host after
   updating" instruction; a host with live sessions is never auto-replaced.
 
 ## Consequences for the slices
 
-- #46 builds `rusttyhost.exe`: pipe listener, envelope, identity/alias
+- #46 builds `rustty-host.exe`: pipe listener, envelope, identity/alias
   allocator (u64 ids, never reused, same rule as the automation ADR;
   numeric alias allocated atomically in the host namespace, persisted
-  under `%APPDATA%\rusttyterm\host\`), headless ConPTY creation in its
+  under `%APPDATA%\rustty\host\`), headless ConPTY creation in its
   own job, `--list-sessions`/`--session-info`, and the client-death
   demonstration.
 - #47 adds the console frontend over the same frames; #48 adds

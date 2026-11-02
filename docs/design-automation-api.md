@@ -23,8 +23,8 @@ transport; this ADR answers its three open questions.
 
 ## 2. Transport and authorization
 
-- Per-window named pipe `\\.\pipe\rusttyterm.<user>.<process-id>.<window-seq>`.
-  Discovery: a per-user directory `%APPDATA%\rusttyterm\ipc\` holding one
+- Per-window named pipe `\\.\pipe\rustty.<user>.<process-id>.<window-seq>`.
+  Discovery: a per-user directory `%APPDATA%\rustty\ipc\` holding one
   small JSON file per live window (id, pipe name, pid, start time); files are
   deleted on clean exit and pruned when the pid is dead.
 - Authorization is Windows-native: the server impersonates the client and
