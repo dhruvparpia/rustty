@@ -457,3 +457,57 @@ fn damage_frames_cover_only_the_dirty_rows() {
     );
     let _ = unsafe { DestroyWindow(hwnd) };
 }
+
+/// Issue #27: after device loss the renderer rebuilds the target, atlas
+/// and brushes, schedules a full repaint, and keeps drawing. Direct2D has
+/// no HRESULT-injection API, so this drives the recovery entry point
+/// (`recreate_target`, the branch the EndDraw failure takes) and verifies
+/// the frame that follows paints on the new target with a rebuilt atlas.
+#[test]
+#[ignore = "needs a desktop session: cargo test --release -- --ignored"]
+fn device_loss_recovery_repaints() {
+    let _guard = bench_lock();
+    let (hwnd, mut renderer) = bench_target(80, 24);
+    let (cols, rows) = renderer.grid_size();
+    let mut app = App::with_size(cols, rows, 1_000);
+    let theme = Theme::predawn();
+    app.feed_active(lines(0, rows).as_bytes());
+    let _ = app.take_dirty();
+    renderer.paint_damage(&app, &theme, None, None);
+    let warm = renderer.atlas_stats();
+    assert!(
+        warm.tiles > 0,
+        "bench: priming frame built no atlas tiles ({warm:?})"
+    );
+
+    renderer.recreate_target();
+    assert_eq!(
+        renderer.atlas_stats().tiles,
+        0,
+        "bench: recreation left the dead-target atlas in place"
+    );
+
+    app.feed_active("after recovery\r\n".as_bytes());
+    let _ = app.take_dirty();
+    let before = renderer.glyph_draw_counts();
+    renderer.paint_damage(&app, &theme, None, None);
+    // Recovery schedules a full repaint (a fresh swap chain shows nothing)
+    // and the new target paints through a rebuilt atlas.
+    assert_eq!(
+        renderer.last_mask_rows(),
+        rows,
+        "bench: the frame after recreation was not a full repaint"
+    );
+    let after = renderer.glyph_draw_counts();
+    assert!(
+        after.0 > before.0,
+        "bench: the frame after recreation drew {} cached glyphs with DrawBitmap \
+         (expected blits on the rebuilt target)",
+        after.0 - before.0,
+    );
+    assert!(
+        renderer.atlas_stats().tiles > 0,
+        "bench: the atlas was not rebuilt after recreation"
+    );
+    let _ = unsafe { DestroyWindow(hwnd) };
+}

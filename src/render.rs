@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
@@ -67,6 +67,18 @@ const FONT_FAMILIES: [&str; 3] = ["Cascadia Mono", "Cascadia Code", "Consolas"];
 
 /// GHSA-25q6: brush cache bound; a full cache is dropped, not grown.
 const MAX_BRUSHES: usize = 1024;
+
+/// Issue #18: without RETAIN_CONTENTS the swap chain drops the last frame,
+/// so a damaged-only repaint shows garbage. D2D1_PRESENT_OPTIONS_RETAIN_
+/// CONTENTS (0x2): windows-rs 0.62 exposes only NONE as a free constant.
+const PRESENT_OPTIONS: D2D1_PRESENT_OPTIONS = D2D1_PRESENT_OPTIONS(0x2);
+
+/// Issue #27: `EndDraw` documents this one HRESULT as "discard the render
+/// target and all its resources and create a new render target". Every
+/// other failure drops only the frame.
+fn is_recreate_target(err: &windows::core::Error) -> bool {
+    err.code() == D2DERR_RECREATE_TARGET
+}
 
 /// Cell geometry derived from the font, in DIPs.
 #[derive(Debug, Clone, Copy)]
@@ -380,6 +392,12 @@ fn layout_height(
 /// A Direct2D render target bound to a terminal window.
 pub struct Renderer {
     target: ID2D1HwndRenderTarget,
+    /// Issue #27: D2DERR_RECREATE_TARGET discards `target`; the factory,
+    /// window, properties and last pixel size rebuild it in place.
+    factory: ID2D1Factory,
+    hwnd: HWND,
+    target_props: D2D1_RENDER_TARGET_PROPERTIES,
+    pixel_size: D2D_SIZE_U,
     dwrite: IDWriteFactory,
     typography: Option<IDWriteTypography>,
     formats: [IDWriteTextFormat; 4],
@@ -657,17 +675,17 @@ impl Renderer {
         let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
             hwnd,
             pixelSize: D2D_SIZE_U { width, height },
-            // Issue #18: without RETAIN_CONTENTS the swap chain drops
-            // the last frame, so a damaged-only repaint shows garbage.
-            // D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS (0x2): windows-rs 0.62 exposes
-            // only NONE as a free constant (issue #18).
-            presentOptions: D2D1_PRESENT_OPTIONS(0x2),
+            presentOptions: PRESENT_OPTIONS,
         };
         let target = unsafe { factory.CreateHwndRenderTarget(&props, &hwnd_props) }?;
         let wic: IWICImagingFactory =
             unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }?;
         Ok(Self {
             target,
+            factory,
+            hwnd,
+            target_props: props,
+            pixel_size: D2D_SIZE_U { width, height },
             dwrite,
             typography,
             formats,
@@ -958,6 +976,38 @@ impl Renderer {
         if res.is_err() {
             eprintln!("rusttyterm: Direct2D resize failed");
         }
+        self.pixel_size = size;
+        self.atlas = None;
+        self.atlas_failed = false;
+        self.brushes.clear();
+    }
+
+    /// Rebuild the HWND render target after device loss (issue #27).
+    ///
+    /// `EndDraw` answers `D2DERR_RECREATE_TARGET` when the display driver,
+    /// RDP session or sleep transition invalidates the target; every
+    /// resource created from it (the target itself, the glyph atlas, the
+    /// brushes) is dead and must be rebuilt on the factory. Grid and
+    /// session state live in the `App`, so a full repaint scheduled by the
+    /// caller restores the screen. A creation failure (window gone) keeps
+    /// the renderer degraded; the next paint retries.
+    pub(crate) fn recreate_target(&mut self) {
+        let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
+            hwnd: self.hwnd,
+            pixelSize: self.pixel_size,
+            presentOptions: PRESENT_OPTIONS,
+        };
+        match unsafe {
+            self.factory
+                .CreateHwndRenderTarget(&self.target_props, &hwnd_props)
+        } {
+            Ok(target) => self.target = target,
+            Err(e) => eprintln!("rusttyterm: Direct2D target recreation failed: {e}"),
+        }
+        // A fresh swap chain shows nothing, so the next frame is a full
+        // repaint, not a damage repaint.
+        self.damage.painted = false;
+        self.pane_damage.clear();
         self.atlas = None;
         self.atlas_failed = false;
         self.brushes.clear();
@@ -1353,13 +1403,20 @@ impl Renderer {
         // (NFR-216): log it, keep the damage flags set, and let the next
         // paint start from a full repaint. The target's device-dependent
         // resources (atlas, brushes) go with it and are recreated.
-        if unsafe { self.target.EndDraw(None, None) }.is_err() {
-            eprintln!("rusttyterm: Direct2D EndDraw failed");
+        let end = unsafe { self.target.EndDraw(None, None) };
+        if let Err(e) = end {
+            eprintln!("rusttyterm: Direct2D EndDraw failed: {e}");
             self.damage.painted = false;
             self.pane_damage.clear();
             self.atlas = None;
             self.atlas_failed = false;
             self.brushes.clear();
+            // Issue #27: D2DERR_RECREATE_TARGET means the target itself is
+            // dead (driver reset, RDP transition); rebuild it. No other
+            // HRESULT proves device loss, so none triggers a rebuild.
+            if is_recreate_target(&e) {
+                self.recreate_target();
+            }
             return;
         }
         self.commit_damage(app);
@@ -2226,7 +2283,21 @@ fn format_index(attrs: CellAttribute) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pane, cursor_cell, parse_font_features};
+    use super::{
+        D2DERR_RECREATE_TARGET, Pane, cursor_cell, is_recreate_target, parse_font_features,
+    };
+
+    #[test]
+    fn only_recreate_target_counts_as_device_loss() {
+        // Issue #27: rebuilding the target is reserved for the one HRESULT
+        // the EndDraw contract documents; other failures drop the frame.
+        let lost = windows::core::Error::from_hresult(D2DERR_RECREATE_TARGET);
+        assert!(is_recreate_target(&lost));
+        // D2DERR_WRONG_STATE (0x88990001): real failure, not device loss.
+        let other =
+            windows::core::Error::from_hresult(windows::core::HRESULT(0x88990001_u32 as i32));
+        assert!(!is_recreate_target(&other));
+    }
 
     #[test]
     fn cursor_move_without_text_moves_the_painted_cell() {
