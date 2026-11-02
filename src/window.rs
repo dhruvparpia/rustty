@@ -43,6 +43,10 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
     SetProcessDpiAwarenessContext,
 };
+use windows::Win32::UI::Input::Ime::{
+    CFS_POINT, COMPOSITIONFORM, CPS_COMPLETE, GCS_RESULTSTR, ImmGetCompositionStringW,
+    ImmGetContext, ImmNotifyIME, ImmReleaseContext, ImmSetCompositionWindow, NI_COMPOSITIONSTR,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, GetKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
     ReleaseCapture, SetCapture, SetFocus, UnregisterHotKey, VK_CONTROL, VK_MENU, VK_SHIFT,
@@ -62,7 +66,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetLayeredWindowAttributes, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
     ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_CHAR,
     WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE,
     WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN,
     WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
@@ -79,7 +84,7 @@ use crate::config::{
 use crate::keyboard::{self, Modifiers};
 use crate::pane::Pane;
 use crate::parser::{MouseProtocol, bracketed_paste_bytes, mouse_report_bytes};
-use crate::render::{CellMetrics, Renderer, measure_cells, px_to_dips};
+use crate::render::{CellMetrics, Renderer, dips_to_px, measure_cells, px_to_dips};
 use crate::search::SearchState;
 use crate::selection::{Pos, Selection};
 use crate::shell::SpawnOptions;
@@ -926,6 +931,24 @@ unsafe extern "system" fn wnd_proc(
             handle_char(hwnd, wparam.0 as u32, true);
             LRESULT(0)
         }
+        WM_IME_STARTCOMPOSITION => {
+            position_ime_window(hwnd);
+            LRESULT(0)
+        }
+        WM_IME_COMPOSITION => {
+            handle_ime_composition(hwnd, lparam);
+            LRESULT(0)
+        }
+        WM_IME_CHAR => {
+            // Fallback path for IMEs that deliver committed characters
+            // directly instead of through GCS_RESULTSTR.
+            if take_suppressed_char(hwnd) {
+                return LRESULT(0);
+            }
+            handle_char(hwnd, wparam.0 as u32, false);
+            LRESULT(0)
+        }
+        WM_IME_ENDCOMPOSITION => LRESULT(0),
         WM_MOUSEWHEEL => {
             handle_wheel(hwnd, wparam, lparam);
             LRESULT(0)
@@ -1795,6 +1818,93 @@ fn handle_char(hwnd: HWND, code: u32, sys: bool) {
     }
     let bytes = keyboard::encode_char(ch, mods);
     let _ = s.app.send_input_active(&bytes);
+}
+
+/// WIN-006: WM_IME_STARTCOMPOSITION — move the IME's composition window to
+/// the caret so CJK text appears where the user is typing. The composition
+/// string itself is shown by the IME's own UI, not drawn in-grid.
+/// shortcut: if the system suppresses the IME UI, the in-progress string is
+/// invisible; add in-grid underlining if that is ever reported.
+fn position_ime_window(hwnd: HWND) {
+    let himc = unsafe { ImmGetContext(hwnd) };
+    if himc.0.is_null() {
+        return;
+    }
+    if let Some(s) = state_ref(hwnd)
+        && let Some(renderer) = &s.renderer
+        && let Some((x, y)) = renderer.cursor_dip_position(&s.app)
+    {
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+        let form = COMPOSITIONFORM {
+            dwStyle: CFS_POINT,
+            ptCurrentPos: POINT {
+                x: dips_to_px(x, dpi) as i32,
+                y: dips_to_px(y, dpi) as i32,
+            },
+            rcArea: RECT::default(),
+        };
+        let _ = unsafe { ImmSetCompositionWindow(himc, &form) };
+    }
+    let _ = unsafe { ImmReleaseContext(hwnd, himc) };
+}
+
+/// WIN-006: WM_IME_COMPOSITION — commit the string the IME finalised
+/// (`GCS_RESULTSTR`) and tell the IME the composition string was consumed.
+fn handle_ime_composition(hwnd: HWND, lparam: LPARAM) {
+    if (lparam.0 as u32) & GCS_RESULTSTR.0 == 0 {
+        return;
+    }
+    let himc = unsafe { ImmGetContext(hwnd) };
+    if himc.0.is_null() {
+        return;
+    }
+    // Two-call pattern: ask for the byte length, then read the UTF-16 units.
+    let len = unsafe { ImmGetCompositionStringW(himc, GCS_RESULTSTR, None, 0) };
+    if len > 0 {
+        let mut buf = vec![0u16; (len as usize).div_ceil(2)];
+        let got = unsafe {
+            ImmGetCompositionStringW(
+                himc,
+                GCS_RESULTSTR,
+                Some(buf.as_mut_ptr().cast()),
+                u32::try_from(buf.len() * 2).unwrap_or(u32::MAX),
+            )
+        };
+        if got > 0 {
+            commit_text(hwnd, &keyboard::utf16_to_chars(&buf[..got as usize / 2]));
+        }
+    }
+    let _ = unsafe { ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_COMPLETE, 0) };
+    let _ = unsafe { ImmReleaseContext(hwnd, himc) };
+}
+
+/// Send an IME-committed string where typed text goes (WIN-006): the rename
+/// buffer, the search query, or the PTY as UTF-8. Modifier state is not
+/// applied: the IME produced the characters, not the physical keys.
+fn commit_text(hwnd: HWND, chars: &[char]) {
+    if chars.is_empty() {
+        return;
+    }
+    if let Some(s) = state_mut(hwnd) {
+        if let Some((_, buf)) = &mut s.renaming {
+            buf.extend(chars.iter().copied().filter(|c| !c.is_control()));
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            return;
+        }
+        if let Some(search) = &mut s.search {
+            search
+                .query
+                .extend(chars.iter().copied().filter(|c| !c.is_control()));
+            let tab = s.app.active_tab();
+            search.refresh(tab);
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            return;
+        }
+        for &ch in chars {
+            let bytes = keyboard::encode_char(ch, Modifiers::default());
+            let _ = s.app.send_input_active(&bytes);
+        }
+    }
 }
 
 /// Ctrl+F: open the search overlay, or close it when already open

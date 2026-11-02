@@ -162,6 +162,35 @@ pub fn encode_char(ch: char, mods: Modifiers) -> Vec<u8> {
     out
 }
 
+/// Decode UTF-16 code units (an IME composition string, WIN-006) to
+/// characters. A high surrogate pairs with the next low surrogate; unpaired
+/// surrogates are dropped, so a partial string never sends garbage.
+#[must_use]
+pub fn utf16_to_chars(units: &[u16]) -> Vec<char> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < units.len() {
+        let unit = units[i];
+        if (0xD800..0xDC00).contains(&unit)
+            && i + 1 < units.len()
+            && (0xDC00..0xE000).contains(&units[i + 1])
+        {
+            let combined = u32::from(unit) - 0xD800;
+            let low = u32::from(units[i + 1]) - 0xDC00;
+            if let Some(ch) = char::from_u32(0x1_0000 + (combined << 10) + low) {
+                out.push(ch);
+            }
+            i += 2;
+        } else if let Some(ch) = char::from_u32(u32::from(unit)) {
+            out.push(ch);
+            i += 1;
+        } else {
+            i += 1; // unpaired surrogate
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +202,16 @@ mod tests {
     #[test]
     fn plain_arrows_use_csi() {
         assert_eq!(encode_key(VK_UP, Modifiers::default(), false), b"\x1b[A");
+    }
+
+    #[test]
+    fn ime_utf16_decodes_pairs_and_drops_lone_surrogates() {
+        // U+3053 (hiragana ko), a valid astral pair (U+20BB7), then a high
+        // surrogate followed by a BMP unit and a trailing lone low surrogate:
+        // both halves are dropped.
+        let units = [0x3053u16, 0xD842, 0xDFB7, 0xD800, 0x3053, 0xDC00];
+        assert_eq!(utf16_to_chars(&units), vec!['こ', '\u{20BB7}', 'こ']);
+        assert_eq!(utf16_to_chars(&[]), Vec::<char>::new());
     }
 
     #[test]

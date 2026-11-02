@@ -131,6 +131,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   A theme file that fails to parse is reported and falls back to predawn.
 - Documented skip: per-pane Gaussian background blur (the "acrylic" style)
   is not on the v0.2 roadmap; `opacity` (WINDOW-010) covers translucency.
+- IME composition (WIN-006, KEY-026, roadmap v0.4): the IME composition
+  window is positioned at the caret (`ImmSetCompositionWindow`), the
+  committed string is read from `GCS_RESULTSTR` and sent to the shell, the
+  rename buffer, or the search query, `ImmNotifyIME` completes the
+  composition, and `WM_IME_CHAR` is handled as a fallback commit path.
+  UTF-16 surrogate pairs decode to astral characters; unpaired surrogates
+  are dropped, so a partial string never sends garbage (no shell
+  corruption).
 
 ### Fixed
 

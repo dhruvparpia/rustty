@@ -742,6 +742,37 @@ impl Renderer {
         self.layout.clone()
     }
 
+    /// Caret tip (top-left of the focused pane's cursor cell) in client DIPs,
+    /// used to place the IME composition window at the caret (WIN-006).
+    /// `None` when the focused pane's cursor is scrolled away.
+    #[must_use]
+    pub fn cursor_dip_position(&self, app: &App) -> Option<(f32, f32)> {
+        let tab = app.active_tab()?;
+        let focused = tab.focused_index()?;
+        let mut found = None;
+        let mut idx = 0usize;
+        tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
+            if idx == focused {
+                let parser = pane.parser();
+                found = Some((
+                    parser.cursor_row,
+                    parser.cursor_col,
+                    pane.grid().scroll_offset(),
+                    rect,
+                ));
+            }
+            idx += 1;
+        });
+        let (row, col, scroll, rect) = found?;
+        if scroll != 0 || row >= rect.rows || col >= rect.cols {
+            return None;
+        }
+        let pad = self.split_padding;
+        let x = self.grid_left() + (rect.col + col) as f32 * self.metrics.cell_width + pad;
+        let y = self.grid_top() + (rect.row + row) as f32 * self.metrics.cell_height + pad;
+        Some((x, y))
+    }
+
     /// Rows the last frame painted, for the damage-only benchmark
     /// ([`crate::perf_bench`]). Not API: the row count of `self.mask`.
     #[doc(hidden)]
