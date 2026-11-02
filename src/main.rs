@@ -59,10 +59,11 @@ fn probe_shell(cfg: &Config) -> SpawnOptions {
 #[cfg(windows)]
 fn main() -> ExitCode {
     let cli = rusttyterm::cli::parse(std::env::args_os().skip(1));
-    if cli.help || cli.version {
+    if cli.help || cli.version || cli.workspaces {
         // The binary is a GUI-subsystem exe, so no console is attached at
-        // startup; attach to the calling console so --help/--version print
-        // where they were typed (fails harmlessly when there is none).
+        // startup; attach to the calling console so --help/--version/
+        // --workspaces print where they were typed (fails harmlessly when
+        // there is none).
         // SAFETY: FFI boundary (NFR-401).
         use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
         let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
@@ -76,6 +77,13 @@ fn main() -> ExitCode {
     }
     if cli.version {
         println!("rusttyterm {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    if cli.workspaces {
+        // WORKSPACE-004: print the template names, one per line.
+        for name in rusttyterm::workspace::names() {
+            println!("{name}");
+        }
         return ExitCode::SUCCESS;
     }
     let mut cfg = match Config::load() {
@@ -107,7 +115,7 @@ fn main() -> ExitCode {
         eprintln!("rusttyterm: {problem}");
     }
     let spawn = probe_shell(&cfg);
-    match rusttyterm::window::run(&cfg, theme, spawn) {
+    match rusttyterm::window::run(&cfg, theme, spawn, cli.workspace.as_deref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("rusttyterm: {e}");
@@ -128,6 +136,13 @@ fn main() -> ExitCode {
     }
     if cli.version {
         println!("rusttyterm {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    if cli.workspaces {
+        // WORKSPACE-004: print the template names, one per line.
+        for name in rusttyterm::workspace::names() {
+            println!("{name}");
+        }
         return ExitCode::SUCCESS;
     }
     match Config::load() {

@@ -1150,6 +1150,26 @@ COLORTERM
 
 ---
 
+## 9.27 Workspace requirements
+
+Named workspaces are reusable launch templates (#37, roadmap Stage 1). They
+are stored independently of last-session restore; the schema and migration
+policy are in [docs/design-workspaces.md](design-workspaces.md).
+
+| ID | Requirement | Priority |
+|---|---|---|
+| WORKSPACE-001 | The terminal shall support named workspaces that preserve tab/pane layout, profiles, working directories and focus. | P2 |
+| WORKSPACE-002 | Workspace templates shall be stored independently of last-session restore; launching or closing a session shall never overwrite a template. | P2 |
+| WORKSPACE-003 | The user shall create/update/rename/delete/open workspaces through the native menu. | P2 |
+| WORKSPACE-004 | The CLI shall open a named workspace (`--workspace <name>`) and list names (`--workspaces`); create/update/rename/delete run through the UI and the documented hand-editable file. | P2 |
+| WORKSPACE-005 | Named workspaces shall appear as Jump List tasks. | P2 |
+| WORKSPACE-006 | A pane may carry an explicit startup command (argv) configured in the template; ordinary saved session output shall never become a startup command. | P2 |
+| WORKSPACE-007 | A missing profile/directory/executable at open time shall produce a useful error and leave unaffected panes opening. | P2 |
+| WORKSPACE-008 | Workspace names, directories and commands shall round-trip Unicode, spaces, WSL profiles, nested splits and repeated launches. | P2 |
+| WORKSPACE-009 | The storage schema shall be versioned; a newer file version shall be reported and left untouched, never silently rewritten. | P2 |
+
+---
+
 # 10. Non-Functional Requirements
 
 ## NFR-1: Performance

@@ -89,6 +89,8 @@ pub mod uia;
     reason = "THEME-010: the system theme check is a Win32 registry FFI boundary"
 )]
 pub mod theme;
+/// Workspace templates (WORKSPACE-001..009): pure Rust store + schema.
+pub mod workspace;
 // Win32 window + message loop FFI boundary (spec WIN-001, WIN-005).
 #[cfg(windows)]
 #[allow(

@@ -12,6 +12,10 @@ pub struct Cli {
     pub profile: Option<String>,
     /// `--theme <name>`: theme preset or `themes/<name>.toml`.
     pub theme: Option<String>,
+    /// `--workspace <name>`: open this workspace template (WORKSPACE-004).
+    pub workspace: Option<String>,
+    /// `--workspaces`: print the template names and exit.
+    pub workspaces: bool,
     /// `-h`/`--help` was given.
     pub help: bool,
     /// `--version` was given.
@@ -31,6 +35,10 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Cli {
         match arg.as_str() {
             "--profile" => cli.profile = args.next().map(|v| v.to_string_lossy().into_owned()),
             "--theme" => cli.theme = args.next().map(|v| v.to_string_lossy().into_owned()),
+            "--workspace" => {
+                cli.workspace = args.next().map(|v| v.to_string_lossy().into_owned());
+            }
+            "--workspaces" => cli.workspaces = true,
             "-h" | "--help" => cli.help = true,
             "--version" => cli.version = true,
             _ => cli.unknown.push(arg),
@@ -42,7 +50,7 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Cli {
 /// One-line usage for `--help`.
 #[must_use]
 pub const fn usage() -> &'static str {
-    "usage: rusttyterm [--profile <name>] [--theme <name>] [--version] [-h|--help]"
+    "usage: rusttyterm [--profile <name>] [--theme <name>] [--workspace <name> | --workspaces] [--version] [-h|--help]"
 }
 
 #[cfg(test)]
@@ -72,6 +80,15 @@ mod tests {
         let cli = parse(os(&["--profile"]));
         assert_eq!(cli.profile, None);
         assert!(cli.unknown.is_empty());
+    }
+
+    #[test]
+    fn workspace_flags() {
+        let cli = parse(os(&["--workspace", "Web App"]));
+        assert_eq!(cli.workspace.as_deref(), Some("Web App"));
+        assert!(!cli.workspaces);
+        assert!(parse(os(&["--workspaces"])).workspaces);
+        assert_eq!(parse(os(&["--workspace"])).workspace, None);
     }
 
     #[test]

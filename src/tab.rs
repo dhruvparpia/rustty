@@ -457,6 +457,18 @@ impl Tab {
         opts: &SpawnOptions,
         cwds: &[Option<String>],
     ) -> Result<(), ShellError> {
+        self.spawn_panes_cmds(opts, cwds, &[])
+    }
+
+    /// Like [`Tab::spawn_panes_at`], and where `cmds[i]` (flatten order)
+    /// is `Some(argv)`, spawn that argv instead of the profile's program:
+    /// `argv[0]` is the program, the rest are arguments (WORKSPACE-006).
+    pub fn spawn_panes_cmds(
+        &mut self,
+        opts: &SpawnOptions,
+        cwds: &[Option<String>],
+        cmds: &[Option<Vec<String>>],
+    ) -> Result<(), ShellError> {
         let mut first_error = None;
         let mut idx = 0_usize;
         self.for_each_pane(|pane, rect| {
@@ -466,6 +478,12 @@ impl Tab {
                 opts.rows = rect.rows;
                 if let Some(Some(cwd)) = cwds.get(idx) {
                     opts.cwd = Some(cwd.clone());
+                }
+                if let Some(Some(argv)) = cmds.get(idx)
+                    && let Some((program, rest)) = argv.split_first()
+                {
+                    opts.program = program.clone();
+                    opts.args = rest.to_vec();
                 }
                 if let Err(e) = pane.spawn_shell(&opts) {
                     first_error.get_or_insert(e);

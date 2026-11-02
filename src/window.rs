@@ -57,13 +57,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{SetCurrentProcessExplicitAppUserModelID, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRect, AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
-    GetClientRect, GetCursorPos, GetForegroundWindow, GetMenu, GetMessageW, GetSubMenu,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, HICON, HMENU, HTCLIENT, HWND_TOPMOST,
-    IDC_ARROW, IDC_IBEAM, IDYES, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA,
-    LoadCursorW, MB_DEFBUTTON2, MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND,
+    AdjustWindowRect, AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW,
+    DLGPROC, DLGTEMPLATE, DS_MODALFRAME, DefWindowProcW, DeleteMenu, DestroyMenu, DestroyWindow,
+    DialogBoxIndirectParamW, DispatchMessageW, EnableMenuItem, EndDialog, GW_CHILD, GW_HWNDNEXT,
+    GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClientRect, GetCursorPos, GetForegroundWindow,
+    GetMenu, GetMenuItemCount, GetMessageW, GetSubMenu, GetWindow, GetWindowLongPtrW,
+    GetWindowRect, GetWindowTextW, HICON, HMENU, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM,
+    IDCANCEL, IDOK, IDYES, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW,
+    MB_DEFBUTTON2, MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_BYPOSITION,
     MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
     MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_HIDE,
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
@@ -72,11 +74,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE,
     WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_GETMINMAXINFO,
     WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
-    WM_IME_STARTCOMPOSITION, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT,
-    WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR,
-    WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    WM_IME_STARTCOMPOSITION, WM_INITDIALOG, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NULL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
+    WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_LAYERED,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE,
 };
 use windows::core::{ComObject, PCWSTR, Result};
 
@@ -173,6 +176,14 @@ const MENU_TAB_RIGHT: usize = 0xE838;
 const MENU_ABOUT: usize = 0xE841;
 const MENU_THEME_BASE: usize = 0xF000;
 const MENU_PROFILE_BASE: usize = 0xF100;
+const MENU_WS_SAVE_AS: usize = 0xE851;
+const MENU_WS_OVERWRITE: usize = 0xE852;
+const MENU_WS_RENAME: usize = 0xE853;
+/// Workspaces submenu: "Open <name>" items (WORKSPACE-003), one per
+/// template, capped by the store's own 64-template limit.
+const MENU_WS_OPEN_BASE: usize = 0xF200;
+/// Workspaces submenu: "Delete <name>" items, one per template.
+const MENU_WS_DEL_BASE: usize = 0xF300;
 
 /// NUL-terminated UTF-16 for `PCWSTR` parameters.
 fn wstr(s: &str) -> Vec<u16> {
@@ -287,6 +298,11 @@ fn build_menu(profiles: &[ProfileSpec], theme_names: &[String]) -> Result<HMENU>
             )?;
         }
         append_menu_submenu(file, "&Profiles", profile_menu)?;
+        append_menu_separator(file)?;
+        // WORKSPACE-003: rebuilt from workspaces.toml every time it opens
+        // (update_menu_checks); starts empty.
+        let ws_menu = CreatePopupMenu()?;
+        append_menu_submenu(file, "W&orkspaces", ws_menu)?;
         append_menu_separator(file)?;
         append_menu_item(file, "&Preferences", MENU_PREFERENCES)?;
         append_menu_separator(file)?;
@@ -491,6 +507,9 @@ fn update_menu_checks(hwnd: HWND, wparam: WPARAM) {
                 check_menu_item(profiles, MENU_PROFILE_BASE + idx, state.profile == idx);
             }
         }
+        if let Some(ws) = submenu_of(file, 8) {
+            rebuild_workspaces_menu(ws, state);
+        }
     }
 
     if let Some(view) = submenu_of(menu, 2)
@@ -517,7 +536,39 @@ fn update_menu_checks(hwnd: HWND, wparam: WPARAM) {
 
 fn handle_command(hwnd: HWND, wparam: WPARAM) {
     let id = wparam.0 & 0xFFFF;
-    // Profiles first: theme_command is unbounded (id - 0xF000), so profile
+    // WORKSPACE-003: template ids route first — theme_command is
+    // unbounded (id - 0xF000) and would swallow 0xF200+/0xF300+, and
+    // profile ids share the 0xF1xx neighbourhood.
+    if let Some(idx) = id
+        .checked_sub(MENU_WS_OPEN_BASE)
+        .filter(|idx| *idx < crate::workspace::MAX_WORKSPACES)
+    {
+        open_workspace_by_index(hwnd, idx);
+        return;
+    }
+    if let Some(idx) = id
+        .checked_sub(MENU_WS_DEL_BASE)
+        .filter(|idx| *idx < crate::workspace::MAX_WORKSPACES)
+    {
+        delete_workspace_by_index(hwnd, idx);
+        return;
+    }
+    match id {
+        MENU_WS_SAVE_AS => {
+            save_workspace_as(hwnd);
+            return;
+        }
+        MENU_WS_OVERWRITE => {
+            overwrite_workspace(hwnd);
+            return;
+        }
+        MENU_WS_RENAME => {
+            rename_workspace(hwnd);
+            return;
+        }
+        _ => {}
+    }
+    // Profiles next: theme_command is unbounded (id - 0xF000), so profile
     // ids (0xF100+) would otherwise be swallowed as out-of-range themes.
     if let Some(idx) = state_ref(hwnd).and_then(|s| profile_command(s, id)) {
         open_profile_tab(hwnd, idx);
@@ -635,6 +686,364 @@ fn show_about(hwnd: HWND) {
     }
 }
 
+// ---- workspace templates (WORKSPACE-003..008) ---------------------------
+
+/// Menu labels eat `&` as mnemonics: template names carry them literally.
+fn ws_menu_label(name: &str) -> String {
+    name.replace('&', "&&")
+}
+
+fn ws_report(hwnd: HWND, text: &str) {
+    let text = wstr(text);
+    let caption = wstr("rusttyterm");
+    unsafe {
+        let _ = MessageBoxW(
+            Some(hwnd),
+            PCWSTR(text.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_OK | MB_ICONWARNING,
+        );
+    }
+}
+
+fn ws_confirm(hwnd: HWND, text: &str, caption: &str) -> bool {
+    let text = wstr(text);
+    let caption = wstr(caption);
+    unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            PCWSTR(text.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_YESNO | MB_DEFBUTTON2,
+        ) == IDYES
+    }
+}
+
+/// WORKSPACE-003: rebuild the Workspaces submenu every time it opens:
+/// one "Open" per template, the save/overwrite/rename commands, and a
+/// per-template Delete submenu. The store is re-read, so hand edits show
+/// up immediately.
+fn rebuild_workspaces_menu(ws: HMENU, state: &WindowState) {
+    let names = crate::workspace::names();
+    unsafe {
+        while GetMenuItemCount(Some(ws)) > 0 {
+            let _ = DeleteMenu(ws, 0, MF_BYPOSITION);
+        }
+        for (i, name) in names.iter().enumerate() {
+            let _ = append_menu_item(
+                ws,
+                &format!("&Open \"{}\"", ws_menu_label(name)),
+                MENU_WS_OPEN_BASE + i,
+            );
+        }
+        if !names.is_empty() {
+            let _ = append_menu_separator(ws);
+        }
+        let _ = append_menu_item(ws, "Save Workspace &As...", MENU_WS_SAVE_AS);
+        let current = state.ws_source.as_deref().unwrap_or("");
+        let _ = append_menu_item(
+            ws,
+            &format!("&Overwrite \"{}\"", ws_menu_label(current)),
+            MENU_WS_OVERWRITE,
+        );
+        enable_menu_item(ws, MENU_WS_OVERWRITE, state.ws_source.is_some());
+        let _ = append_menu_item(ws, "Re&name Workspace...", MENU_WS_RENAME);
+        enable_menu_item(ws, MENU_WS_RENAME, state.ws_source.is_some());
+        if !names.is_empty() {
+            let _ = append_menu_separator(ws);
+            if let Ok(del) = CreatePopupMenu() {
+                for (i, name) in names.iter().enumerate() {
+                    let _ = append_menu_item(del, &ws_menu_label(name), MENU_WS_DEL_BASE + i);
+                }
+                let _ = append_menu_submenu(ws, "&Delete Workspace", del);
+            }
+        }
+    }
+}
+
+fn open_workspace_by_index(hwnd: HWND, idx: usize) {
+    let Some(name) = crate::workspace::names().get(idx).cloned() else {
+        return;
+    };
+    open_workspace_named(hwnd, &name);
+}
+
+/// WORKSPACE-008: opening a template replaces this window's tabs (with a
+/// confirm, since every running shell is closed).
+fn open_workspace_named(hwnd: HWND, name: &str) {
+    let Some(path) = crate::workspace::store_path() else {
+        return;
+    };
+    let Some(ws) = crate::workspace::workspace_at(&path, name) else {
+        ws_report(hwnd, &format!("No workspace template named {name:?}."));
+        return;
+    };
+    let question = format!(
+        "Open workspace {:?}?\n\nEvery open tab in this window will be closed.",
+        ws.name
+    );
+    if !ws_confirm(hwnd, &question, "Open workspace") {
+        return;
+    }
+    {
+        let Some(s) = state_mut(hwnd) else {
+            return;
+        };
+        while s.app.tab_count() > 0 {
+            s.app.close_tab(0);
+        }
+        s.ws_source = Some(ws.name.clone());
+        s.ws_pending = Some(ws_leaf_cmds(&ws));
+        s.restore = Some(ws.as_session());
+    }
+    let Some(s) = state_mut(hwnd) else {
+        return;
+    };
+    restore_tabs(s);
+    sync_tab_bar(hwnd);
+    if let Some(s) = state_mut(hwnd) {
+        spawn_restored(s);
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+fn save_workspace_as(hwnd: HWND) {
+    let Some(path) = crate::workspace::store_path() else {
+        return;
+    };
+    let initial = state_ref(hwnd)
+        .and_then(|s| s.ws_source.clone())
+        .unwrap_or_default();
+    let Some(name) = prompt_workspace_name(hwnd, "Save workspace as", &initial) else {
+        return;
+    };
+    let Some(s) = state_ref(hwnd) else {
+        return;
+    };
+    // WORKSPACE-006: the UI captures layout, directories, titles and
+    // focus — never the commands panes happen to be running.
+    let session = snapshot_session(s, hwnd);
+    let ws = crate::workspace::Workspace::from_session(&name, &session);
+    match crate::workspace::save_ws(&path, &ws) {
+        Ok(()) => {
+            if let Some(s) = state_mut(hwnd) {
+                s.ws_source = Some(ws.name);
+            }
+        }
+        Err(e) => ws_report(hwnd, &format!("Could not save workspace: {e}")),
+    }
+}
+
+fn overwrite_workspace(hwnd: HWND) {
+    let Some(path) = crate::workspace::store_path() else {
+        return;
+    };
+    let Some(s) = state_ref(hwnd) else {
+        return;
+    };
+    let Some(name) = s.ws_source.clone() else {
+        return;
+    };
+    let session = snapshot_session(s, hwnd);
+    let ws = crate::workspace::Workspace::from_session(&name, &session);
+    if let Err(e) = crate::workspace::save_ws(&path, &ws) {
+        ws_report(hwnd, &format!("Could not overwrite {name:?}: {e}"));
+    }
+}
+
+fn rename_workspace(hwnd: HWND) {
+    let Some(path) = crate::workspace::store_path() else {
+        return;
+    };
+    let Some(old) = state_ref(hwnd).and_then(|s| s.ws_source.clone()) else {
+        return;
+    };
+    let Some(new) = prompt_workspace_name(hwnd, "Rename workspace", &old) else {
+        return;
+    };
+    match crate::workspace::rename_ws(&path, &old, &new) {
+        Ok(()) => {
+            if let Some(s) = state_mut(hwnd) {
+                s.ws_source = Some(new);
+            }
+        }
+        Err(e) => ws_report(hwnd, &format!("Could not rename workspace: {e}")),
+    }
+}
+
+fn delete_workspace_by_index(hwnd: HWND, idx: usize) {
+    let Some(name) = crate::workspace::names().get(idx).cloned() else {
+        return;
+    };
+    let Some(path) = crate::workspace::store_path() else {
+        return;
+    };
+    let question = format!("Delete workspace {:?} from workspaces.toml?", name);
+    if !ws_confirm(hwnd, &question, "Delete workspace") {
+        return;
+    }
+    if let Err(e) = crate::workspace::delete_ws(&path, &name) {
+        ws_report(hwnd, &format!("Could not delete workspace: {e}"));
+    }
+}
+
+/// WORKSPACE-007: modal name prompt built from an in-memory dialog
+/// template (no .rc resource): a label, an edit seeded with `initial`,
+/// OK and Cancel. Returns the typed name on OK, `None` on Cancel.
+fn prompt_workspace_name(parent: HWND, title: &str, initial: &str) -> Option<String> {
+    let mut answer = initial.to_owned();
+    let template = ws_name_dialog_template(title);
+    let hinstance = unsafe { GetModuleHandleW(None) }.ok()?;
+    let dlg: DLGPROC = Some(ws_name_dlgproc);
+    let res = unsafe {
+        DialogBoxIndirectParamW(
+            Some(hinstance.into()),
+            template.as_ptr().cast::<DLGTEMPLATE>(),
+            Some(parent),
+            dlg,
+            LPARAM(&mut answer as *mut String as isize),
+        )
+    };
+    (res == IDOK.0 as isize).then_some(answer)
+}
+
+/// Pack a UTF-16 word stream into the DWORD-aligned buffer a dialog
+/// template pointer must be.
+fn pack_words(words: Vec<u16>) -> Vec<u32> {
+    words
+        .chunks(2)
+        .map(|c| u32::from(c[0]) | c.get(1).map_or(0, |w| u32::from(*w) << 16))
+        .collect()
+}
+
+fn dlg_push_str(words: &mut Vec<u16>, s: &str) {
+    words.extend(s.encode_utf16());
+    words.push(0);
+    if words.len() % 2 == 1 {
+        words.push(0);
+    }
+}
+
+fn dlg_push_atom(words: &mut Vec<u16>, atom: u16) {
+    words.extend([0xFFFF, atom]);
+}
+
+fn dlg_item(words: &mut Vec<u16>, style: u32, id: u16, class: u16, rect: [i16; 4], text: &str) {
+    let [x, y, cx, cy] = rect;
+    words.extend([
+        (style & 0xFFFF) as u16,
+        (style >> 16) as u16,
+        0,
+        0,
+        x as u16,
+        y as u16,
+        cx as u16,
+        cy as u16,
+        id,
+    ]);
+    dlg_push_atom(words, class);
+    dlg_push_str(words, text);
+}
+
+/// The name prompt layout: label, edit, OK, Cancel (dialog units).
+/// Built to the documented DLGTEMPLATE layout: dialog header, then four
+/// DLGITEMTEMPLATE records (style, extended style, x/y/cx/cy, id, class
+/// atom, text), every field WORD-aligned.
+fn ws_name_dialog_template(title: &str) -> Vec<u32> {
+    const WS_STATIC: u32 = WS_CHILD.0 | WS_VISIBLE.0; // SS_LEFT is 0
+    const WS_EDIT: u32 = WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | WS_BORDER.0;
+    const WS_BTN: u32 = WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0;
+    const ID_EDIT: u16 = 1000;
+    const ID_OK: u16 = 1; // IDOK
+    const ID_CANCEL: u16 = 2; // IDCANCEL
+    let style = WS_POPUP.0 | DS_MODALFRAME as u32 | WS_CAPTION.0 | WS_SYSMENU.0;
+    let mut w: Vec<u16> = vec![
+        (style & 0xFFFF) as u16,
+        (style >> 16) as u16,
+        0,
+        0,
+        4, // item count
+        0,
+        0,
+        220,
+        42, // dialog size in dialog units
+        0,
+        0, // menu: none
+        0,
+        0, // window class: default
+    ];
+    dlg_push_str(&mut w, title);
+    dlg_item(
+        &mut w,
+        WS_STATIC,
+        1001,
+        0x0082,
+        [10, 8, 200, 10],
+        "Workspace name:",
+    );
+    dlg_item(&mut w, WS_EDIT, ID_EDIT, 0x0081, [10, 20, 200, 12], "");
+    dlg_item(
+        &mut w,
+        WS_BTN | BS_DEFPUSHBUTTON as u32,
+        ID_OK,
+        0x0080,
+        [90, 35, 50, 14],
+        "OK",
+    );
+    dlg_item(
+        &mut w,
+        WS_BTN | BS_PUSHBUTTON as u32,
+        ID_CANCEL,
+        0x0080,
+        [145, 35, 50, 14],
+        "Cancel",
+    );
+    pack_words(w)
+}
+
+unsafe extern "system" fn ws_name_dlgproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> isize {
+    // The edit is the second template control (after the label), which is
+    // its child-window order.
+    let edit = || -> Option<HWND> {
+        let first = unsafe { GetWindow(hwnd, GW_CHILD) }.ok()?;
+        unsafe { GetWindow(first, GW_HWNDNEXT) }.ok()
+    };
+    match msg {
+        WM_INITDIALOG => {
+            let seed = unsafe { &*(lparam.0 as *const String) };
+            if let Some(edit) = edit() {
+                let text = wstr(seed);
+                let _ = unsafe { SetWindowTextW(edit, PCWSTR(text.as_ptr())) };
+                let _ = unsafe { SetFocus(Some(edit)) };
+            }
+            1
+        }
+        WM_COMMAND => {
+            if wparam.0 as u32 == IDOK.0 as u32 {
+                let answer = unsafe { &mut *(lparam.0 as *mut String) };
+                if let Some(edit) = edit() {
+                    let mut buf = [0u16; 512];
+                    let n = unsafe { GetWindowTextW(edit, &mut buf) };
+                    *answer = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+                }
+                let _ = unsafe { EndDialog(hwnd, IDOK.0 as isize) };
+                1
+            } else if wparam.0 as u32 == IDCANCEL.0 as u32 {
+                let _ = unsafe { EndDialog(hwnd, IDCANCEL.0 as isize) };
+                1
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
 /// Per-window state, boxed onto the heap and pointed at by
 /// `GWLP_USERDATA` (created in `WM_CREATE`, reclaimed in `WM_DESTROY`).
 struct WindowState {
@@ -698,6 +1107,14 @@ struct WindowState {
     /// Roadmap v0.2: this is the quick (drop-down) window. It hides instead
     /// of closing, skips the session file, and never quits the app.
     quick: bool,
+    /// WORKSPACE-003: name of the workspace template this window was
+    /// opened from (native UI or `--workspace`). "Overwrite workspace"
+    /// writes the current layout back to it; `None` when the window was
+    /// not opened from a template.
+    ws_source: Option<String>,
+    /// WORKSPACE-006: per-tab leaf commands of the template being opened,
+    /// flatten order, consumed by `spawn_restored`.
+    ws_pending: Option<Vec<Vec<Option<Vec<String>>>>>,
 }
 
 impl WindowState {
@@ -1375,6 +1792,8 @@ fn create_quick_window() {
     };
     let state = Box::new(WindowState {
         restore: None,
+        ws_source: None,
+        ws_pending: None,
         app: {
             let mut app = App::with_size(spawn.cols, spawn.rows, cfg.scrollback);
             app.set_show_cwd(cfg.tab_bar.show_cwd);
@@ -1586,12 +2005,28 @@ fn restore_tabs(s: &mut WindowState) {
     apply_profile_font(s, &spec);
 }
 
+/// WORKSPACE-006: per-tab leaf commands of a template, flatten order,
+/// the same order as the cwds `spawn_restored` collects.
+fn ws_leaf_cmds(ws: &crate::workspace::Workspace) -> Vec<Vec<Option<Vec<String>>>> {
+    ws.tab
+        .iter()
+        .map(|t| {
+            let mut cmds = Vec::new();
+            t.shape.leaf_commands(&mut cmds);
+            cmds
+        })
+        .collect()
+}
+
 /// TAB-026: resize every restored tab to the current grid and respawn
 /// each pane's shell in its saved directory. Consumes the session.
+/// WORKSPACE-006: a workspace template's per-leaf commands override the
+/// profile's program where set.
 fn spawn_restored(s: &mut WindowState) {
     let Some(session) = s.restore.take() else {
         return;
     };
+    let ws_cmds = s.ws_pending.take();
     let (cols, rows) = s
         .renderer
         .as_ref()
@@ -1605,8 +2040,12 @@ fn spawn_restored(s: &mut WindowState) {
         let mut cwds = Vec::new();
         st.shape.leaf_cwds(&mut cwds);
         let opts = spec_opts(&spec, cols, rows);
+        let cmds: &[Option<Vec<String>>] = ws_cmds
+            .as_deref()
+            .and_then(|tabs| tabs.get(i))
+            .map_or(&[], Vec::as_slice);
         if let Some(tab) = s.app.tab_at_mut(i)
-            && let Err(e) = tab.spawn_panes_at(&opts, &cwds)
+            && let Err(e) = tab.spawn_panes_cmds(&opts, &cwds, cmds)
         {
             eprintln!("rusttyterm: shell spawn failed: {e}");
         }
@@ -3727,12 +4166,19 @@ pub(crate) fn uia_geometry(hwnd: HWND) -> Option<(DipRect, (f32, f32))> {
 
 /// Open the terminal window and run the message loop until the last tab
 /// closes (spec WIN-001: this is the UI thread that owns ConPTY).
+/// `workspace` (WORKSPACE-004): open this template instead of reading
+/// `session.toml`.
 ///
 /// # Errors
 ///
 /// Fails when the window class cannot be registered or the window cannot
 /// be created.
-pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()> {
+pub fn run(
+    cfg: &Config,
+    theme: Theme,
+    spawn: SpawnOptions,
+    workspace: Option<&str>,
+) -> anyhow::Result<()> {
     // Per-monitor DPI v2 before any window metrics exist (WIN-002).
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     // Roadmap v0.2 "Windows Jump List": taskbar right-click gets a plain
@@ -3742,7 +4188,7 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
     let names: Vec<String> = merge_profiles(cfg).into_iter().map(|p| p.name).collect();
     match std::env::current_exe() {
         Ok(exe) => {
-            let tasks = crate::jumplist::tasks_for(&names);
+            let tasks = crate::jumplist::tasks_for(&names, &crate::workspace::names());
             let res =
                 crate::jumplist::build(&aumid().to_string(), &exe.display().to_string(), &tasks);
             // shortcut: Windows rejects user tasks for unpackaged exes with
@@ -3785,10 +4231,23 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
     // `init_window` and the window frame here. A saved position only
     // applies when its top-left point is on a live monitor (a
     // disconnected screen must not park the window off-screen).
-    let session = if cfg.session_restore {
-        crate::session::load()
-    } else {
-        None
+    // WORKSPACE-004: `--workspace <name>` replaces the session file
+    // entirely: the template defines the tabs, the window frame is the
+    // configured default.
+    let (session, ws_source, ws_pending) = match workspace {
+        Some(name) => {
+            let found = crate::workspace::store_path()
+                .and_then(|p| crate::workspace::workspace_at(&p, name));
+            match found {
+                Some(ws) => {
+                    let pending = ws_leaf_cmds(&ws);
+                    (Some(ws.as_session()), Some(ws.name), Some(pending))
+                }
+                None => (None, None, None),
+            }
+        }
+        None if cfg.session_restore => (crate::session::load(), None, None),
+        None => (None, None, None),
     };
     let (x, y, width, height) = session
         .as_ref()
@@ -3816,8 +4275,14 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         *spec = Some((cfg.clone(), theme.clone(), spawn.clone()));
     }
 
+    // WORKSPACE-007: `--workspace <name>` with no matching template —
+    // `ws_source` moves into the state below, so record the miss here.
+    let ws_miss = workspace.filter(|_| ws_source.is_none());
+
     let state = Box::new(WindowState {
         restore: session,
+        ws_source,
+        ws_pending,
         app: {
             let mut app = App::with_size(cols, rows, cfg.scrollback);
             // TAB-025: tab titles fall back to the pane's OSC 7 cwd.
@@ -3900,6 +4365,23 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         // The window never existed to reclaim the box; free it here.
         unsafe { drop(Box::from_raw(state_param as *mut WindowState)) };
         return Err(anyhow::anyhow!("rusttyterm: window creation failed: {e}"));
+    }
+    if let Some(name) = ws_miss {
+        // WORKSPACE-007: a missing template opens a plain window and says why.
+        let msg = wstr(&format!(
+            "rusttyterm: no workspace template named {name:?}.\n\nA plain window opened instead."
+        ));
+        let caption = wstr("rusttyterm");
+        if let Ok(main) = created {
+            unsafe {
+                let _ = MessageBoxW(
+                    Some(main),
+                    PCWSTR(msg.as_ptr()),
+                    PCWSTR(caption.as_ptr()),
+                    MB_OK | MB_ICONWARNING,
+                );
+            }
+        }
     }
 
     // Roadmap v0.2 "Hotkey summon from screen edge": the quick terminal is

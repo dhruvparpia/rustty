@@ -29,11 +29,12 @@ pub struct JumpTask {
     pub arguments: String,
 }
 
-/// Build the task list: a plain "New window" task, then one
-/// `--profile <name>` task per profile. Duplicate names (case-insensitive)
-/// collapse to one task, matching how profiles merge by name.
+/// Build the task list: a plain "New window" task, one `--profile <name>`
+/// task per profile, then one `--workspace <name>` task per workspace
+/// template (WORKSPACE-005). Duplicate names (case-insensitive) collapse
+/// to one task, matching how profiles merge by name.
 #[must_use]
-pub fn tasks_for(profiles: &[String]) -> Vec<JumpTask> {
+pub fn tasks_for(profiles: &[String], workspaces: &[String]) -> Vec<JumpTask> {
     let mut tasks = vec![JumpTask {
         title: String::from("New window"),
         arguments: String::new(),
@@ -44,6 +45,14 @@ pub fn tasks_for(profiles: &[String]) -> Vec<JumpTask> {
             tasks.push(JumpTask {
                 title: format!("New {name} window"),
                 arguments: format!("--profile \"{name}\""),
+            });
+        }
+    }
+    for name in workspaces {
+        if seen.insert(name.to_lowercase()) {
+            tasks.push(JumpTask {
+                title: format!("Open {name}"),
+                arguments: format!("--workspace \"{name}\""),
             });
         }
     }
@@ -107,7 +116,7 @@ mod tests {
 
     #[test]
     fn tasks_start_with_a_plain_new_window() {
-        let tasks = tasks_for(&[String::from("pwsh"), String::from("Git Bash")]);
+        let tasks = tasks_for(&[String::from("pwsh"), String::from("Git Bash")], &[]);
         assert_eq!(tasks[0].title, "New window");
         assert!(tasks[0].arguments.is_empty());
         assert_eq!(tasks[1].title, "New pwsh window");
@@ -117,7 +126,15 @@ mod tests {
 
     #[test]
     fn duplicate_profile_names_collapse() {
-        let tasks = tasks_for(&[String::from("pwsh"), String::from("PWSH")]);
+        let tasks = tasks_for(&[String::from("pwsh"), String::from("PWSH")], &[]);
         assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn workspace_tasks_launch_with_the_workspace_flag() {
+        let tasks = tasks_for(&["pwsh".into()], &["Web App".into(), "web app".into()]);
+        assert_eq!(tasks[2].title, "Open Web App");
+        assert_eq!(tasks[2].arguments, "--workspace \"Web App\"");
+        assert_eq!(tasks.len(), 3, "case-insensitive duplicate collapses");
     }
 }
