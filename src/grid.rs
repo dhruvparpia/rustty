@@ -166,11 +166,19 @@ impl Grid {
     pub fn with_size(cols: usize, rows: usize, scrollback: usize) -> Self {
         let rows = rows.max(1);
         let capacity = rows + scrollback;
+        // Only the viewport rows are materialised. Slots at virtual index
+        // >= total are unreachable (every accessor gates on `total`) and
+        // stay empty until a write fills them, so a big scrollback costs
+        // one Vec of small `Line` structs, not one cell Vec per slot
+        // (issue #15).
+        let mut lines = Vec::with_capacity(capacity);
+        lines.resize(rows, Line::blank(cols));
+        lines.resize(capacity, Line::default());
         Self {
             cols,
             rows,
             scrollback,
-            lines: (0..capacity).map(|_| Line::blank(cols)).collect(),
+            lines,
             head: 0,
             total: rows,
             evicted: 0,
@@ -497,18 +505,19 @@ impl Grid {
             line.is_dirty = true;
             line
         }));
-        while lines.len() < new_capacity {
-            lines.push(Line::blank(cols));
-        }
 
         self.cols = cols;
         self.rows = rows;
-        self.lines = lines;
-        self.head = 0;
         // The viewport must always have `rows` backing lines: when the
         // buffer holds fewer lines than the new viewport (a fresh grow),
-        // the extra bottom slots come back blank.
+        // the extra bottom slots come back blank. Slots beyond `total`
+        // stay empty: they are unreadable, and materialising them is the
+        // O(capacity) resize cost this issue measured (issue #15).
         self.total = keep.max(rows);
+        lines.resize(self.total, Line::blank(cols));
+        lines.resize(new_capacity, Line::default());
+        self.lines = lines;
+        self.head = 0;
         // The lines we dropped are gone forever: keep absolute ids monotonic.
         self.evicted += start;
         self.clamp_scroll();
@@ -892,6 +901,42 @@ mod tests {
         // total is 60 now, max offset = 60 - 10 = 50; 40 fits, viewport at top
         assert_eq!(grid.scroll_offset(), 40);
         assert_eq!(row_text(&grid, 0), "line 1");
+    }
+
+    #[test]
+    fn resize_does_not_materialise_dead_slots() {
+        // Issue #15: resize cost scales with retained content, not capacity.
+        let mut grid = Grid::with_size(80, 24, 100_000);
+        grid.resize(120, 30);
+        assert_eq!(grid.capacity(), 100_030);
+        assert_eq!(grid.total_lines(), 30);
+        for r in 0..30 {
+            assert_eq!(grid.row(r).unwrap().cells.len(), 120);
+        }
+        assert!(grid.lines[30..].iter().all(|l| l.cells.is_empty()));
+        // Filling the dead slots through the live edge keeps them full width,
+        // and scrolling back over them reads complete lines.
+        append_lines(&mut grid, 5);
+        grid.scroll_up(5);
+        for r in 0..30 {
+            assert_eq!(grid.row(r).unwrap().cells.len(), 120);
+        }
+    }
+
+    #[test]
+    fn resize_at_100k_scrollback_stays_fast() {
+        // Issue #15 measured a 27.8 ms median resize at this capacity before
+        // the fix; the loose bound is load headroom, not the target.
+        let mut grid = Grid::with_size(80, 24, 100_000);
+        let start = std::time::Instant::now();
+        for cols in [120, 80] {
+            grid.resize(cols, 24);
+        }
+        let per_resize = start.elapsed() / 2;
+        assert!(
+            per_resize < std::time::Duration::from_millis(5),
+            "resize took {per_resize:?}"
+        );
     }
 
     #[test]
