@@ -259,8 +259,10 @@ mod tests {
         let p = vs_profile(r"C:\VS\2022\Community");
         assert_eq!(p.name, "Developer PowerShell");
         assert_eq!(p.program, "powershell.exe");
+        // Path::join uses host separators; this test checks script quoting
+        // and must also run in the portable core suite on Unix hosts.
         assert_eq!(
-            p.args[2],
+            p.args[2].replace('/', "\\"),
             r"& 'C:\VS\2022\Community\Common7\Tools\Launch-VsDevShell.ps1'; Set-Location $HOME"
         );
     }

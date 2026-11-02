@@ -1,5 +1,7 @@
 # rusttyterm
 
+<img src="assets/rustty-icon.png" alt="Rustty copper crab terminal icon" width="160" height="160">
+
 A fast, native-feeling terminal emulator for Windows, written in Rust, released under the MIT license.
 
 `rusttyterm` is a from-scratch implementation. It borrows ideas and default values
