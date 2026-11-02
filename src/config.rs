@@ -551,6 +551,12 @@ pub enum KeyAction {
     ReloadConfig,
     /// Clear the screen: send Ctrl-L (TTY-016).
     ClearScreen,
+    /// Scroll to the previous command boundary (SHELLINT-015, issue #38).
+    PrevCommand,
+    /// Scroll to the next command boundary (SHELLINT-015, issue #38).
+    NextCommand,
+    /// Copy the output of the last finished command (SHELLINT-016).
+    CopyLastCommand,
 }
 
 impl KeyAction {
@@ -590,6 +596,9 @@ impl KeyAction {
             "reset-font-size" => Self::ResetFontSize,
             "reload-config" => Self::ReloadConfig,
             "clear-screen" => Self::ClearScreen,
+            "prev-command" | "previous-command" => Self::PrevCommand,
+            "next-command" => Self::NextCommand,
+            "copy-last-command" | "copy-command-output" => Self::CopyLastCommand,
             _ => return None,
         })
     }
@@ -776,6 +785,16 @@ pub struct Config {
     /// startup (TAB-026, WINDOW-015/016).
     #[serde(rename = "session-restore", default = "default_true")]
     pub session_restore: bool,
+    /// SHELLINT-013/014: launch known shells (Git Bash, PowerShell, WSL
+    /// bash) with the rusttyterm integration script, and enable per-command
+    /// tracking, navigation and completion notices. Explicit opt-in.
+    #[serde(rename = "shell-integration", default)]
+    pub shell_integration: bool,
+    /// SHELLINT-019: a finished command at least this many milliseconds
+    /// long earns a completion toast while the window is in the background;
+    /// 0 disables the toasts.
+    #[serde(rename = "command-notify-ms", default = "default_notify_ms")]
+    pub command_notify_ms: u64,
     /// Profile used for the first tab.
     #[serde(rename = "starting-profile", default)]
     pub starting_profile: String,
@@ -816,6 +835,8 @@ impl Default for Config {
             copy_on_select: false,
             bell: BellMode::default(),
             session_restore: true,
+            shell_integration: false,
+            command_notify_ms: default_notify_ms(),
             starting_profile: String::new(),
             window: WindowConfig::default(),
             split: SplitConfig::default(),
@@ -845,6 +866,8 @@ impl PartialEq for Config {
             && self.cursor_blink == other.cursor_blink
             && self.copy_on_select == other.copy_on_select
             && self.session_restore == other.session_restore
+            && self.shell_integration == other.shell_integration
+            && self.command_notify_ms == other.command_notify_ms
             && self.starting_profile == other.starting_profile
             && self.window == other.window
             && self.split == other.split
@@ -881,6 +904,10 @@ fn default_scrollback() -> usize {
 
 fn default_opacity() -> u8 {
     100
+}
+
+fn default_notify_ms() -> u64 {
+    10_000
 }
 
 fn validate_keybindings(map: &BTreeMap<String, String>) -> anyhow::Result<()> {

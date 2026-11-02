@@ -93,6 +93,87 @@ impl SpawnOptions {
             env: BTreeMap::new(),
         }
     }
+
+    /// SHELLINT-013/014 (issue #38): when `shell-integration` is on, launch
+    /// known shells (Git Bash, WSL bash, PowerShell) with the embedded
+    /// rusttyterm integration script. Unknown shells, and shells whose args
+    /// already reference an rcfile/profile, are left untouched.
+    pub fn apply_shell_integration(&mut self) {
+        if self
+            .args
+            .iter()
+            .any(|a| a.contains("rcfile") || a.contains("rusttyterm"))
+        {
+            return;
+        }
+        let base = self
+            .program
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let dir = crate::config::config_path().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let Some(dir) = dir else { return };
+        if base == "bash" || base == "bash.exe" {
+            // Git Bash / MSYS2: source the script as the rcfile.
+            let Some(path) = write_integration_script(
+                &dir,
+                "rusttyterm-bash-rc.sh",
+                include_str!("../assets/rusttyterm-bash-rc.sh"),
+            ) else {
+                return;
+            };
+            self.args.push("--rcfile".to_string());
+            self.args.push(path.to_string_lossy().into_owned());
+        } else if base == "wsl" || base == "wsl.exe" {
+            let Some(path) = write_integration_script(
+                &dir,
+                "rusttyterm-bash-rc.sh",
+                include_str!("../assets/rusttyterm-bash-rc.sh"),
+            ) else {
+                return;
+            };
+            let Some(unix) = wsl_path(&path) else { return };
+            self.args.extend([
+                "--".to_string(),
+                "bash".to_string(),
+                "--rcfile".to_string(),
+                unix,
+            ]);
+        } else if base.starts_with("pwsh") || base.starts_with("powershell") {
+            let Some(path) = write_integration_script(
+                &dir,
+                "rusttyterm-profile.ps1",
+                include_str!("../assets/rusttyterm-profile.ps1"),
+            ) else {
+                return;
+            };
+            self.args.extend([
+                "-NoExit".to_string(),
+                "-Command".to_string(),
+                format!(". '{}'", path.to_string_lossy()),
+            ]);
+        }
+    }
+}
+
+/// Write an embedded integration script into the config directory (kept
+/// fresh on every spawn). `None` when the directory is not writable.
+fn write_integration_script(
+    dir: &std::path::Path,
+    name: &str,
+    body: &str,
+) -> Option<std::path::PathBuf> {
+    let path = dir.join(name);
+    std::fs::write(&path, body).ok()?;
+    Some(path)
+}
+
+/// `C:\dir\file` as the WSL mount path `/mnt/c/dir/file`.
+fn wsl_path(path: &std::path::Path) -> Option<String> {
+    let s = path.to_string_lossy().replace('\\', "/");
+    let drive = s.as_bytes().first()?.to_ascii_lowercase();
+    (s.as_bytes().get(1) == Some(&b':')).then(|| format!("/mnt/{}{}", drive as char, &s[2..]))
 }
 
 /// Why a shell operation failed.

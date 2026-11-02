@@ -13,6 +13,9 @@
 pub mod app;
 pub mod cli;
 pub mod color;
+/// Per-command metadata from OSC 133 transitions (SHELLINT-006/010/013-019,
+/// issue #38).
+pub mod command;
 pub mod config;
 /// Kitty graphics protocol: header parsing and base64 (pure, spec graphics
 /// protocols, roadmap v0.5).

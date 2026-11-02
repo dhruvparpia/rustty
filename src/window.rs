@@ -165,6 +165,9 @@ const MENU_COPY: usize = 0xE811;
 const MENU_PASTE: usize = 0xE812;
 const MENU_SEARCH: usize = 0xE821;
 const MENU_FULLSCREEN: usize = 0xE822;
+const MENU_PREV_COMMAND: usize = 0xE823;
+const MENU_NEXT_COMMAND: usize = 0xE824;
+const MENU_COPY_LAST_CMD: usize = 0xE825;
 const MENU_NEXT_TAB: usize = 0xE831;
 const MENU_PREV_TAB: usize = 0xE832;
 const MENU_MINIMIZE: usize = 0xE833;
@@ -317,6 +320,10 @@ fn build_menu(profiles: &[ProfileSpec], theme_names: &[String]) -> Result<HMENU>
         let view = CreatePopupMenu()?;
         append_menu_item(view, "&Search\tCtrl+F", MENU_SEARCH)?;
         append_menu_separator(view)?;
+        append_menu_item(view, "Previous Command\tCtrl+Shift+Up", MENU_PREV_COMMAND)?;
+        append_menu_item(view, "Next Command\tCtrl+Shift+Down", MENU_NEXT_COMMAND)?;
+        append_menu_item(view, "&Copy Last Command Output", MENU_COPY_LAST_CMD)?;
+        append_menu_separator(view)?;
         append_menu_item(view, "Split &Right\tCtrl+Shift+Enter", MENU_SPLIT_RIGHT)?;
         append_menu_item(view, "Split Be&low\tCtrl+Shift+-", MENU_SPLIT_DOWN)?;
         append_menu_separator(view)?;
@@ -450,14 +457,18 @@ fn active_profile(s: &WindowState) -> ProfileSpec {
 /// its starting directory and environment (SHELL-019, SHELL-021).
 fn profile_opts(s: &WindowState, cols: usize, rows: usize) -> SpawnOptions {
     let profile = active_profile(s);
-    SpawnOptions {
+    let mut opts = SpawnOptions {
         program: profile.program,
         args: profile.args,
         cols,
         rows,
         cwd: profile.cwd,
         env: profile.env,
+    };
+    if s.cfg.shell_integration {
+        opts.apply_shell_integration();
     }
+    opts
 }
 
 /// Contents of the View→Themes submenu: the built-in presets, then the
@@ -584,6 +595,9 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         MENU_SPLIT_RIGHT => split_pane(hwnd, Dir::Vertical),
         MENU_SPLIT_DOWN => split_pane(hwnd, Dir::Horizontal),
         MENU_SEARCH => toggle_search(hwnd),
+        MENU_PREV_COMMAND => command_jump(hwnd, -1),
+        MENU_NEXT_COMMAND => command_jump(hwnd, 1),
+        MENU_COPY_LAST_CMD => copy_last_command(hwnd),
         MENU_FULLSCREEN => toggle_fullscreen(hwnd),
         MENU_COPY => copy_screen(hwnd),
         MENU_PASTE => paste_clipboard(hwnd),
@@ -1115,6 +1129,10 @@ struct WindowState {
     /// WORKSPACE-006: per-tab leaf commands of the template being opened,
     /// flatten order, consumed by `spawn_restored`.
     ws_pending: Option<Vec<Vec<Option<Vec<String>>>>>,
+    /// SHELLINT-019: id of the last command whose completion this window
+    /// already acknowledged (notified, or foreground at the time), so each
+    /// command earns at most one toast.
+    cmd_notified: u64,
 }
 
 impl WindowState {
@@ -1221,6 +1239,43 @@ impl WindowState {
                 },
             );
         }
+    }
+
+    /// SHELLINT-019 (issue #38): a finished command at least
+    /// `command-notify-ms` long earns one completion toast while the
+    /// window is in the background; 0 disables the toasts.
+    fn notify_finished_command(&mut self, hwnd: HWND) {
+        let Some(tab) = self.app.active_tab() else {
+            return;
+        };
+        let pane = tab.pane();
+        let Some(last) = pane.commands().last_finished() else {
+            return;
+        };
+        let id = last.id;
+        if self.cmd_notified == id {
+            return;
+        }
+        // Acknowledge first: a foreground visit, and a command that can
+        // never notify (no exit code, disabled threshold), both retire the
+        // id so switching away later never toasts about an old command.
+        self.cmd_notified = id;
+        let Some(exit) = last.exit else { return };
+        let threshold = self.cfg.command_notify_ms;
+        if threshold == 0 || !last.duration_ms().is_some_and(|ms| ms >= threshold) {
+            return;
+        }
+        if unsafe { GetForegroundWindow() } == hwnd {
+            return;
+        }
+        let cmd = pane
+            .grid()
+            .line_text_abs(last.start_abs)
+            .unwrap_or_default();
+        show_toast(
+            tab.title(),
+            &format!("Command finished (exit {exit})\n{cmd}"),
+        );
     }
 
     fn over_tab_bar(&self, y: f32, height: f32) -> bool {
@@ -1654,7 +1709,10 @@ fn init_window(hwnd: HWND) {
             // Spawn first, then resize: a resize must reach a live ConPTY, and
             // the shell must start at the window's real grid size (NFR-216:
             // these failures are logged, never fatal).
-            if let Err(e) = s.app.spawn_active(&spec_opts(&spec, cols, rows)) {
+            if let Err(e) =
+                s.app
+                    .spawn_active(&spec_opts(&spec, cols, rows, s.cfg.shell_integration))
+            {
                 eprintln!("rusttyterm: shell spawn failed: {e}");
             }
             if let Err(e) = s.app.resize_active(cols, rows) {
@@ -1794,6 +1852,7 @@ fn create_quick_window() {
         restore: None,
         ws_source: None,
         ws_pending: None,
+        cmd_notified: 0,
         app: {
             let mut app = App::with_size(spawn.cols, spawn.rows, cfg.scrollback);
             app.set_show_cwd(cfg.tab_bar.show_cwd);
@@ -2039,7 +2098,7 @@ fn spawn_restored(s: &mut WindowState) {
         let spec = profile_spec_named(s, &st.profile);
         let mut cwds = Vec::new();
         st.shape.leaf_cwds(&mut cwds);
-        let opts = spec_opts(&spec, cols, rows);
+        let opts = spec_opts(&spec, cols, rows, s.cfg.shell_integration);
         let cmds: &[Option<Vec<String>>] = ws_cmds
             .as_deref()
             .and_then(|tabs| tabs.get(i))
@@ -2230,6 +2289,16 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
                 // Ctrl+Shift+-: split the focused pane, new pane below
                 // (SPLIT-005)
                 split_pane(hwnd, Dir::Horizontal);
+                true
+            }
+            0x26 => {
+                // Ctrl+Shift+Up: jump to the previous command (SHELLINT-015)
+                command_jump(hwnd, -1);
+                true
+            }
+            0x28 => {
+                // Ctrl+Shift+Down: jump to the next command (SHELLINT-015)
+                command_jump(hwnd, 1);
                 true
             }
             _ => false,
@@ -3309,6 +3378,7 @@ fn drain_and_cleanup(hwnd: HWND) {
         let Some(s) = state_mut(hwnd) else { return };
         s.app.drain_shells();
         s.take_bell(hwnd);
+        s.notify_finished_command(hwnd);
         s.watch_config(hwnd);
         // Repaint only when a grid actually changed (NFR-113: no idle
         // repaints), and only the rows the grid wrote: paint the damage
@@ -3524,7 +3594,7 @@ fn new_tab_with_profile(hwnd: HWND, spec: ProfileSpec) {
     if let Some(tab) = s.app.active_tab_mut() {
         let _ = tab.resize(cols, rows);
     }
-    let opts = spec_opts(&spec, cols, rows);
+    let opts = spec_opts(&spec, cols, rows, s.cfg.shell_integration);
     if let Err(e) = s.app.spawn_active(&opts) {
         eprintln!("rusttyterm: shell spawn failed: {e}");
     }
@@ -3533,15 +3603,19 @@ fn new_tab_with_profile(hwnd: HWND, spec: ProfileSpec) {
 }
 
 /// Spawn options from a profile: program, args, directory, environment.
-fn spec_opts(spec: &ProfileSpec, cols: usize, rows: usize) -> SpawnOptions {
-    SpawnOptions {
+fn spec_opts(spec: &ProfileSpec, cols: usize, rows: usize, integrate: bool) -> SpawnOptions {
+    let mut opts = SpawnOptions {
         program: spec.program.clone(),
         args: spec.args.clone(),
         cols,
         rows,
         cwd: spec.cwd.clone(),
         env: spec.env.clone(),
+    };
+    if integrate {
+        opts.apply_shell_integration();
     }
+    opts
 }
 
 /// The active tab's profile, falling back to the selector
@@ -3914,6 +3988,53 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
                 let _ = s.app.send_input_active(b"\x0c");
             }
         }
+        KeyAction::PrevCommand => command_jump(hwnd, -1),
+        KeyAction::NextCommand => command_jump(hwnd, 1),
+        KeyAction::CopyLastCommand => copy_last_command(hwnd),
+    }
+}
+
+/// SHELLINT-015 (issue #38): Ctrl+Shift+Up/Down jumps the focused pane's
+/// scroll to the previous/next command boundary. The anchor is the top
+/// visible line, so repeated presses walk the history like a jumplist.
+fn command_jump(hwnd: HWND, delta: i32) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(tab) = s.app.active_tab_mut() else {
+        return;
+    };
+    let mut pane = tab.pane_mut();
+    let anchor = pane
+        .grid()
+        .abs_of_view(0)
+        .unwrap_or_else(|| pane.grid().last_abs());
+    let target = if delta < 0 {
+        pane.commands().prev_boundary(anchor)
+    } else {
+        pane.commands().next_boundary(anchor)
+    };
+    if let Some(abs) = target {
+        pane.grid_mut().scroll_to_abs(abs);
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    }
+}
+
+/// SHELLINT-016 (issue #38): copy the last finished command's output block
+/// to the clipboard.
+fn copy_last_command(hwnd: HWND) {
+    let Some(s) = state_ref(hwnd) else { return };
+    let Some(tab) = s.app.active_tab() else {
+        return;
+    };
+    let pane = tab.pane();
+    let Some(text) = pane
+        .commands()
+        .last_finished()
+        .and_then(|c| pane.command_output_text(c.id))
+    else {
+        return;
+    };
+    if !clipboard::set_text(&text) {
+        eprintln!("rusttyterm: clipboard copy failed");
     }
 }
 
@@ -4283,6 +4404,7 @@ pub fn run(
         restore: session,
         ws_source,
         ws_pending,
+        cmd_notified: 0,
         app: {
             let mut app = App::with_size(cols, rows, cfg.scrollback);
             // TAB-025: tab titles fall back to the pane's OSC 7 cwd.

@@ -46,14 +46,18 @@ fn probe_shell(cfg: &Config) -> SpawnOptions {
             std::env::set_var("MSYS2", "enable_pcon");
         }
     }
-    SpawnOptions {
+    let mut opts = SpawnOptions {
         program,
         args,
         cols: cfg.window.cols,
         rows: cfg.window.rows,
         cwd: None,
         env: std::collections::BTreeMap::new(),
+    };
+    if cfg.shell_integration {
+        opts.apply_shell_integration();
     }
+    opts
 }
 
 #[cfg(windows)]

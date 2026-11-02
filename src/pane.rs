@@ -10,6 +10,7 @@
 //! replies go straight back to the shell. Scroll snap (returning to the
 //! live edge when new output arrives) is applied here too.
 
+use crate::command::CommandTracker;
 use crate::graphics::GraphicsAction;
 use crate::grid::Grid;
 use crate::parser::{Parser, ParserEvent};
@@ -343,6 +344,9 @@ pub struct Pane {
     command_running: bool,
     /// Exit code from the last `OSC 133;D:<code>`.
     last_exit: Option<i32>,
+    /// Per-command records built from OSC 133 transitions (SHELLINT-006/
+    /// 010/013-019, issue #38). Empty for shells that emit no OSC 133.
+    commands: CommandTracker,
     /// BEL seen and not yet handled by the window layer (BELL-001).
     bell: bool,
     /// Main screen kept while the alternate screen is active (TTY-018).
@@ -369,6 +373,7 @@ impl Pane {
             at_prompt: false,
             command_running: false,
             last_exit: None,
+            commands: CommandTracker::new(),
             bell: false,
             main_grid: None,
             in_alt: false,
@@ -391,6 +396,7 @@ impl Pane {
             at_prompt: false,
             command_running: false,
             last_exit: None,
+            commands: CommandTracker::new(),
             bell: false,
             main_grid: None,
             in_alt: false,
@@ -500,6 +506,34 @@ impl Pane {
         self.command_running
     }
 
+    /// Bounded per-command history built from OSC 133 transitions
+    /// (SHELLINT-006/010/013-019, issue #38). Empty for shells that emit
+    /// no OSC 133.
+    #[must_use]
+    pub fn commands(&self) -> &CommandTracker {
+        &self.commands
+    }
+
+    /// Text of command `id`'s output block: grid lines from its first
+    /// output line to its end (SHELLINT-016). `None` when the command is
+    /// unknown, still running, or its output has fully scrolled away.
+    #[must_use]
+    pub fn command_output_text(&self, id: u64) -> Option<String> {
+        let cmd = self.commands.iter().find(|c| c.id == id)?;
+        let end = cmd.end_abs?;
+        let mut out = String::new();
+        for abs in cmd.output_start_abs..=end {
+            if let Some(text) = self.grid.line_text_abs(abs) {
+                out.push_str(&text);
+                out.push('\n');
+            }
+        }
+        while out.ends_with('\n') {
+            out.pop();
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
     /// Turn a `file://host/path` report into a path string.
     fn record_cwd(&mut self, url: &str) {
         self.cwd = Some(cwd_from_url(url));
@@ -515,6 +549,17 @@ impl Pane {
     #[must_use]
     pub const fn cursor_visible(&self) -> bool {
         self.parser.cursor_visible
+    }
+
+    /// Absolute grid line under the cursor: where the next printed byte
+    /// lands, so OSC 133 marks record command positions relative to it
+    /// (the grid preallocates every screen row, so `last_abs` is the
+    /// bottom row, not the cursor).
+    #[must_use]
+    fn cursor_abs(&self) -> usize {
+        self.grid
+            .abs_of_view(self.parser.cursor_row)
+            .unwrap_or_else(|| self.grid.last_abs())
     }
 
     /// Feed shell output bytes: parse into the grid, then apply the events
@@ -545,18 +590,40 @@ impl Pane {
                     ParserEvent::PromptStart => {
                         self.at_prompt = true;
                         self.command_running = false;
+                        let abs = self.cursor_abs();
+                        self.commands.prompt_start(abs, CommandTracker::now_ms());
                     }
-                    ParserEvent::CommandStart | ParserEvent::CommandOutput => {
+                    ParserEvent::CommandStart => {
                         self.command_running = true;
                         self.at_prompt = false;
+                        let abs = self.cursor_abs();
+                        self.commands.command_start(
+                            abs,
+                            self.cwd.clone(),
+                            CommandTracker::now_ms(),
+                        );
+                    }
+                    ParserEvent::CommandOutput => {
+                        self.command_running = true;
+                        self.at_prompt = false;
+                        let abs = self.cursor_abs();
+                        self.commands.command_output(abs);
                     }
                     ParserEvent::PromptEnd(code) => {
                         self.at_prompt = true;
                         self.command_running = false;
                         self.last_exit = code;
+                        let abs = self.cursor_abs();
+                        self.commands
+                            .prompt_end(abs, code, CommandTracker::now_ms());
                     }
                     ParserEvent::EnterAltScreen => {
                         if !self.in_alt {
+                            // The running command's output belongs to the alt
+                            // app, not to a scrollback block (SHELLINT-017).
+                            let abs = self.cursor_abs();
+                            self.commands
+                                .interrupt_running(abs, CommandTracker::now_ms());
                             let cols = self.grid.cols;
                             let rows = self.grid.rows;
                             let fresh = Grid::with_size(cols, rows, 0);
@@ -584,6 +651,9 @@ impl Pane {
                         // scrollback, never the visible screen.
                         self.grid.clear_scrollback();
                         self.graphics.clear_all();
+                        // Commands whose block lived in the cleared history
+                        // are no longer showable (SHELLINT-017).
+                        self.commands.note_eviction(self.grid.first_abs());
                     }
                     // DSR/DA replies go straight back to the shell.
                     ParserEvent::Respond(reply) => {
@@ -600,6 +670,9 @@ impl Pane {
         }
 
         self.graphics.prune_transient(&self.grid);
+
+        // Scrollback lines evicted during this feed retire their commands.
+        self.commands.note_eviction(self.grid.first_abs());
 
         if printed {
             let above = self.grid.scroll_offset();
@@ -704,6 +777,51 @@ mod tests {
         pane.feed(b"\x1b]133;D:2\x07");
         assert!(pane.prompt_ready() && !pane.command_running());
         assert_eq!(pane.last_exit_code(), Some(2));
+    }
+
+    #[test]
+    fn osc_133_feed_records_a_command_with_its_output_block() {
+        let mut pane = Pane::with_size(20, 5, 100);
+        // Real shells emit the OSC marks in their own PTY chunks, so the
+        // stamps land on the grid position at the time of the mark.
+        pane.feed(b"prompt\r\nls\r\n");
+        pane.feed(b"\x1b]133;B\x07");
+        pane.feed(b"\x1b]133;C\x07");
+        pane.feed(b"a.txt\r\nb.txt\r\n");
+        pane.feed(b"\x1b]133;D:0\x07");
+        let cmds: Vec<_> = pane.commands().iter().collect();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].exit, Some(0));
+        assert!(!cmds[0].running);
+        let text = pane.command_output_text(cmds[0].id).expect("output text");
+        assert_eq!(text, "a.txt\nb.txt");
+    }
+
+    #[test]
+    fn alt_screen_entry_interrupts_the_running_command() {
+        let mut pane = Pane::with_size(20, 5, 100);
+        pane.feed(b"\x1b]133;B\x07vim\r\n");
+        assert!(pane.commands().running().is_some());
+        pane.feed(b"\x1b[?1049h");
+        assert!(pane.commands().running().is_none());
+        assert_eq!(pane.commands().last_finished().and_then(|c| c.exit), None);
+    }
+
+    #[test]
+    fn command_boundaries_drive_prev_and_next_navigation() {
+        let mut pane = Pane::with_size(20, 5, 100);
+        for i in 0..3u8 {
+            pane.feed(format!("prompt {i}\r\n").as_bytes());
+            pane.feed(b"\x1b]133;A\x07");
+            pane.feed(b"\x1b]133;B\x07");
+            pane.feed(b"out\r\n");
+            pane.feed(b"\x1b]133;D:0\x07");
+        }
+        assert_eq!(pane.commands().len(), 3);
+        let first = pane.commands().iter().next().expect("three commands");
+        assert_eq!(pane.commands().next_boundary(first.start_abs), Some(3));
+        let last_abs = pane.grid().last_abs();
+        assert_eq!(pane.commands().prev_boundary(last_abs), Some(5));
     }
 
     #[test]
