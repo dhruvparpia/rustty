@@ -125,6 +125,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   every dismissal. It off-lists the taskbar (`WS_EX_TOOLWINDOW`), stays
   topmost, and is off by default because a global hotkey is invasive. A hotkey
   another app grabbed is reported on stderr; the terminal still starts.
+- Theme preset browser, live switching (roadmap v0.2): the View→Themes menu
+  now lists every built-in preset *and* every theme file (`*.toml`) in the
+  theme directory, checks the active theme, and applies the pick immediately.
+  A theme file that fails to parse is reported and falls back to predawn.
 - Documented skip: per-pane Gaussian background blur (the "acrylic" style)
   is not on the v0.2 roadmap; `opacity` (WINDOW-010) covers translucency.
 

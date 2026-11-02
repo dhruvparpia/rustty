@@ -447,6 +447,31 @@ pub fn resolve_configured(
     (theme, problems)
 }
 
+/// Theme file names (the stems of `*.toml`) in a theme directory, sorted.
+/// The View→Themes menu lists these after the presets (roadmap v0.2
+/// "preset browser"). A missing directory simply contributes nothing.
+#[must_use]
+pub fn list_files(theme_dir: Option<&Path>) -> Vec<String> {
+    let Some(dir) = theme_dir else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("toml")))
+            .then(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .flatten()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Self::predawn()
@@ -590,6 +615,21 @@ mod tests {
         let (theme, problems) = resolve_configured("nope", &ThemeFile::default(), None);
         assert_eq!(theme, Theme::predawn());
         assert_eq!(problems.len(), 1, "{problems:?}");
+    }
+
+    #[test]
+    fn theme_files_are_listed_sorted_by_stem() {
+        let dir = std::env::temp_dir().join(format!("rusttyterm-theme3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+        std::fs::write(dir.join("zeta.toml"), "").unwrap();
+        std::fs::write(dir.join("alpha.toml"), "").unwrap();
+        std::fs::write(dir.join("notes.txt"), "").unwrap();
+
+        let mut names = list_files(Some(&dir));
+        names.retain(|n| n == "alpha" || n == "zeta");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(names, vec!["alpha".to_string(), "zeta".to_string()]);
+        assert_eq!(list_files(None), Vec::<String>::new());
     }
 
     trait UnwrapPreset {

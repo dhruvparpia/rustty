@@ -236,7 +236,7 @@ fn append_menu_submenu(parent: HMENU, text: &str, submenu: HMENU) -> Result<()> 
 
 /// Build the native menu bar (MENU-001..015). Menu labels carry the visible
 /// keyboard shortcut text; the app's existing keybindings execute them.
-fn build_menu(profiles: &[ProfileSpec]) -> Result<HMENU> {
+fn build_menu(profiles: &[ProfileSpec], theme_names: &[String]) -> Result<HMENU> {
     unsafe {
         let menu = CreateMenu()?;
 
@@ -276,7 +276,7 @@ fn build_menu(profiles: &[ProfileSpec]) -> Result<HMENU> {
         append_menu_item(view, "Full &Screen\tF11", MENU_FULLSCREEN)?;
         append_menu_separator(view)?;
         let themes = CreatePopupMenu()?;
-        for (idx, name) in theme::PRESETS.iter().enumerate() {
+        for (idx, name) in theme_names.iter().enumerate() {
             append_menu_item(themes, &format!("&{name}"), MENU_THEME_BASE + idx)?;
         }
         append_menu_submenu(view, "&Themes", themes)?;
@@ -413,16 +413,25 @@ fn profile_opts(s: &WindowState, cols: usize, rows: usize) -> SpawnOptions {
     }
 }
 
-fn active_theme_index(s: &WindowState) -> usize {
+/// Contents of the View→Themes submenu: the built-in presets, then the
+/// theme files in the theme directory (roadmap v0.2 "preset browser").
+fn menu_theme_names(theme_dir: Option<&std::path::Path>) -> Vec<String> {
     theme::PRESETS
         .iter()
+        .map(|name| (*name).to_string())
+        .chain(theme::list_files(theme_dir))
+        .collect()
+}
+
+fn active_theme_index(s: &WindowState) -> usize {
+    menu_theme_names(s.theme_dir.as_deref())
+        .iter()
         .position(|name| *name == s.theme.name)
-        .unwrap_or(0)
+        .unwrap_or(usize::MAX)
 }
 
 fn theme_command(id: usize) -> Option<usize> {
     id.checked_sub(MENU_THEME_BASE)
-        .filter(|idx| *idx < theme::PRESETS.len())
 }
 
 fn profile_command(s: &WindowState, id: usize) -> Option<usize> {
@@ -458,7 +467,7 @@ fn update_menu_checks(hwnd: HWND, wparam: WPARAM) {
     {
         if let Some(themes) = submenu_of(view, 7) {
             let active = active_theme_index(state);
-            for idx in 0..theme::PRESETS.len() {
+            for idx in 0..menu_theme_names(state.theme_dir.as_deref()).len() {
                 check_menu_item(themes, MENU_THEME_BASE + idx, idx == active);
             }
         }
@@ -519,11 +528,21 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
 }
 
 fn set_theme(hwnd: HWND, idx: usize) {
-    let Some(name) = theme::PRESETS.get(idx) else {
-        return;
-    };
-    if let Some(s) = state_mut(hwnd) {
-        s.theme = Theme::preset(name).unwrap_or_default();
+    {
+        let Some(s) = state_mut(hwnd) else {
+            return;
+        };
+        let Some(name) = menu_theme_names(s.theme_dir.as_deref()).get(idx).cloned() else {
+            return;
+        };
+        // Preset by name, then theme file, then predawn (THEME-014). A theme
+        // file that fails to parse is reported; the switch is not fatal.
+        let (theme, problems) =
+            theme::resolve_configured(&name, &theme::ThemeFile::default(), s.theme_dir.as_deref());
+        for problem in problems {
+            eprintln!("rusttyterm: {problem}");
+        }
+        s.theme = theme;
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -1064,7 +1083,8 @@ fn init_window(hwnd: HWND) {
     // usable, matching the no-fatal-UI-failure rule. The frameless quick
     // window has no menu, and it is not shown until the hotkey summons it.
     if !quick {
-        let menu = state_ref(hwnd).map(|s| build_menu(&s.profiles));
+        let menu = state_ref(hwnd)
+            .map(|s| build_menu(&s.profiles, &menu_theme_names(s.theme_dir.as_deref())));
         if let Some(menu) = menu.and_then(|r| r.ok()) {
             unsafe {
                 let _ = SetMenu(hwnd, Some(menu));
@@ -3329,7 +3349,7 @@ mod tests {
     #[test]
     fn menu_generated_command_ranges_stay_disjoint() {
         assert_eq!(theme_command(MENU_THEME_BASE + 1), Some(1));
-        assert_eq!(theme_command(MENU_THEME_BASE + theme::PRESETS.len()), None);
+        assert_eq!(theme_command(MENU_THEME_BASE - 1), None);
     }
 
     #[test]
