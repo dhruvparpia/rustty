@@ -317,6 +317,63 @@ impl Default for SearchConfig {
     }
 }
 
+/// Which screen edge the quick terminal docks to (roadmap v0.2 "Hotkey
+/// summon from screen edge").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuickEdge {
+    /// Drop down from the top edge (default).
+    #[default]
+    Top,
+    /// Rise from the bottom edge.
+    Bottom,
+}
+
+/// Quick terminal (`[quick-terminal]`): a drop-down shell summoned from any
+/// app by a system-wide hotkey (roadmap v0.2 "Hotkey summon from screen
+/// edge"). It is a second window that hides instead of closing.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuickTerminalConfig {
+    /// Register the global hotkey. Off by default: a system-wide hotkey
+    /// is invasive, so it is opt-in.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The summon key, e.g. `"ctrl+grave"`. Ctrl/Alt/Shift only (a system
+    /// hotkey needs a non-modifier key; Win is rejected).
+    #[serde(default = "default_quick_key")]
+    pub key: String,
+    /// Screen edge to dock to: `top` or `bottom`.
+    #[serde(default)]
+    pub edge: QuickEdge,
+    /// Grid rows when shown; the width spans the monitor's work area.
+    #[serde(default = "default_quick_height")]
+    pub height: usize,
+    /// Hide when the window loses focus.
+    #[serde(rename = "autohide", default = "default_true")]
+    pub autohide: bool,
+}
+
+fn default_quick_key() -> String {
+    String::from("ctrl+grave")
+}
+
+fn default_quick_height() -> usize {
+    10
+}
+
+impl Default for QuickTerminalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            key: default_quick_key(),
+            edge: QuickEdge::default(),
+            height: default_quick_height(),
+            autohide: true,
+        }
+    }
+}
+
 /// One configured shell profile (CONFIG-002, CONFIG-023, SHELL-012).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -475,6 +532,8 @@ pub enum KeyAction {
     MoveTabRight,
     /// Rename the active tab.
     RenameTab,
+    /// Hide the quick terminal (no effect in a normal window).
+    CloseQuick,
 }
 
 impl KeyAction {
@@ -508,6 +567,7 @@ impl KeyAction {
             "move-tab-left" | "move-tab-leftward" => Self::MoveTabLeft,
             "move-tab-right" => Self::MoveTabRight,
             "rename-tab" | "rename" => Self::RenameTab,
+            "close-quick" | "hide-quick" => Self::CloseQuick,
             _ => return None,
         })
     }
@@ -536,6 +596,79 @@ pub fn normalize_key_spec(spec: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("+")
+}
+
+/// Parse a global hotkey spec for the quick terminal (`Ctrl+Grave` ->
+/// `ctrl+grave`).
+///
+/// The spec must carry at least one of Ctrl/Alt/Shift: every system hotkey
+/// is published to every app, so a plain key (or a Win-key combo) is
+/// rejected. `grave` is the `` ` ``/`~` key.
+///
+/// # Errors
+///
+/// Names why the spec was rejected.
+pub fn parse_hotkey(spec: &str) -> Result<String, String> {
+    let normalized = normalize_key_spec(spec);
+    let parts: Vec<&str> = normalized.split('+').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return Err("a hotkey needs a modifier (ctrl, alt, shift) and a key".to_string());
+    }
+    let key = parts[parts.len() - 1];
+    let mods = &parts[..parts.len() - 1];
+    if mods.contains(&"super") {
+        return Err(format!(
+            "the hotkey `{normalized}` uses the Super/Win key, which is not allowed"
+        ));
+    }
+    if !mods.iter().any(|m| matches!(*m, "ctrl" | "alt" | "shift")) {
+        return Err(format!(
+            "the hotkey `{normalized}` needs a ctrl, alt or shift modifier"
+        ));
+    }
+    let named = matches!(
+        key,
+        "enter"
+            | "escape"
+            | "space"
+            | "tab"
+            | "backspace"
+            | "insert"
+            | "delete"
+            | "home"
+            | "end"
+            | "pageup"
+            | "pagedown"
+            | "left"
+            | "right"
+            | "up"
+            | "down"
+            | "minus"
+            | "equal"
+            | "plus"
+            | "grave"
+            | "comma"
+            | "period"
+            | "slash"
+            | "left-bracket"
+            | "right-bracket"
+            | "backslash"
+            | "semicolon"
+            | "quote"
+    ) || (key.len() == 1
+        && key
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c.is_ascii_digit()))
+        || (key.len() > 1
+            && key.starts_with('f')
+            && key[1..].parse::<u8>().is_ok_and(|n| (1..=24).contains(&n)));
+    if !named {
+        return Err(format!(
+            "the hotkey `{normalized}` ends in `{key}`, which is not a key name"
+        ));
+    }
+    Ok(normalized)
 }
 
 /// The `theme` key: a preset/theme-file name, or a `[theme]` table of colour
@@ -633,6 +766,9 @@ pub struct Config {
     /// `[search]` section.
     #[serde(default)]
     pub search: SearchConfig,
+    /// `[quick-terminal]` section (roadmap v0.2 hotkey summon).
+    #[serde(rename = "quick-terminal", default)]
+    pub quick_terminal: QuickTerminalConfig,
     /// `[keybindings]` table: normalized key string to action.
     #[serde(default)]
     pub keybindings: BTreeMap<String, String>,
@@ -662,6 +798,7 @@ impl Default for Config {
             window: WindowConfig::default(),
             split: SplitConfig::default(),
             search: SearchConfig::default(),
+            quick_terminal: QuickTerminalConfig::default(),
             keybindings: BTreeMap::new(),
             profiles: Vec::new(),
         }
@@ -690,6 +827,7 @@ impl PartialEq for Config {
             && self.window == other.window
             && self.split == other.split
             && self.search == other.search
+            && self.quick_terminal == other.quick_terminal
             && self.keybindings == other.keybindings
             && self.profiles == other.profiles
     }
@@ -841,6 +979,15 @@ impl Config {
             anyhow::bail!("split.padding: must be at most 1000 pixels");
         }
         validate_keybindings(&self.keybindings)?;
+        if self.quick_terminal.height == 0 || self.quick_terminal.height > MAX_ROWS {
+            anyhow::bail!("quick-terminal.height: must be between 1 and {MAX_ROWS}");
+        }
+        if self.quick_terminal.enabled {
+            // A disabled hotkey registers nothing, so its key is not checked;
+            // an enabled one must name a key the system will deliver.
+            parse_hotkey(&self.quick_terminal.key)
+                .map_err(|e| anyhow::anyhow!("quick-terminal.key: {e}"))?;
+        }
         for (idx, profile) in self.profiles.iter().enumerate() {
             if profile.name.trim().is_empty() {
                 anyhow::bail!("profiles[{idx}].name: must not be empty");
@@ -1048,11 +1195,70 @@ background = \"#000000\"
         assert!(Config::parse("[window]\nrows = 5000\n").is_err());
     }
 
+    #[test]
+    fn quick_terminal_defaults_to_off() {
+        let cfg = Config::parse("").expect_result();
+        assert!(!cfg.quick_terminal.enabled);
+        assert_eq!(cfg.quick_terminal.key, "ctrl+grave");
+        assert_eq!(cfg.quick_terminal.edge, QuickEdge::Top);
+        assert_eq!(cfg.quick_terminal.height, 10);
+        assert!(cfg.quick_terminal.autohide);
+    }
+
+    #[test]
+    fn quick_terminal_section_parses_and_validates() {
+        let cfg = Config::parse(
+            "[quick-terminal]\nenabled = true\nkey = \"Ctrl+Alt+J\"\nedge = \"bottom\"\nheight = 14\nautohide = false\n",
+        )
+        .expect_result();
+        assert!(cfg.quick_terminal.enabled);
+        assert_eq!(cfg.quick_terminal.edge, QuickEdge::Bottom);
+        assert_eq!(cfg.quick_terminal.height, 14);
+        assert!(!cfg.quick_terminal.autohide);
+        assert!(
+            Config::parse("[quick-terminal]\nenabled = true\nkey = \"j\"\n").is_err(),
+            "a system hotkey needs a modifier"
+        );
+        assert!(
+            Config::parse("[quick-terminal]\nenabled = true\nkey = \"win+j\"\n").is_err(),
+            "a system hotkey may not use the Win key"
+        );
+        assert!(
+            Config::parse("[quick-terminal]\nheight = 0\n").is_err(),
+            "a zero-row quick terminal is a typo"
+        );
+        // A disabled hotkey registers nothing, so its key is not validated.
+        assert!(Config::parse("[quick-terminal]\nkey = \"banana\"\n").is_ok());
+    }
+
+    #[test]
+    fn hotkey_specs_normalize_and_validate() {
+        assert_eq!(parse_hotkey("Ctrl+Grave").expect_result(), "ctrl+grave");
+        assert_eq!(
+            parse_hotkey("ctrl + shift + F2").expect_result(),
+            "ctrl+shift+f2"
+        );
+        assert!(
+            parse_hotkey("ctrl+grave+shift").is_err(),
+            "the key comes last"
+        );
+        assert!(parse_hotkey("alt+ctrl").is_err(), "two modifiers, no key");
+    }
+
     trait Expect<T> {
         fn expect_result(self) -> T;
     }
 
     impl<T> Expect<T> for Result<T, anyhow::Error> {
+        fn expect_result(self) -> T {
+            match self {
+                Ok(v) => v,
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+
+    impl<T> Expect<T> for Result<T, String> {
         fn expect_result(self) -> T {
             match self {
                 Ok(v) => v,

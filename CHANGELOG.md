@@ -115,6 +115,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   Jump List tasks launch with), `--theme <name>` overrides the configured
   theme, `-h`/`--help` prints usage, `--version` prints the version.
   Unknown arguments are reported and ignored. No new dependency.
+- Quick terminal (roadmap v0.2 "Hotkey summon from screen edge"): an opt-in
+  `[quick-terminal]` section turns a system-wide hotkey (default
+  `ctrl+grave`, registered with `RegisterHotKey`) into a frameless drop-down
+  shell. It spans the monitor's work-area width, is `height` rows tall, docks
+  flush to `edge = "top" | "bottom"`, and hides (never closes) on the hotkey
+  again, on `close-quick` (a `[keybindings]` action), and — with
+  `autohide = true` (the default) — when it loses focus. Its shell survives
+  every dismissal. It off-lists the taskbar (`WS_EX_TOOLWINDOW`), stays
+  topmost, and is off by default because a global hotkey is invasive. A hotkey
+  another app grabbed is reported on stderr; the terminal still starts.
 - Documented skip: per-pane Gaussian background blur (the "acrylic" style)
   is not on the v0.2 roadmap; `opacity` (WINDOW-010) covers translucency.
 

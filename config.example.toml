@@ -189,6 +189,23 @@ session-restore = true
 # padding = 1     # pixel gap between panes; pane content is offset by it
 
 # ---------------------------------------------------------------------------
+# Quick terminal (roadmap v0.2: hotkey summon from screen edge)
+# ---------------------------------------------------------------------------
+# A frameless drop-down shell that spans the monitor's work area, summoned
+# from any app by a system-wide hotkey. It hides instead of closing, so its
+# shell survives every dismissal. Off by default: a global hotkey is
+# invasive, so opt in.
+#
+# [quick-terminal]
+# enabled = false
+# key = "ctrl+grave"       # Ctrl/Alt/Shift + a key; the Win key is not allowed
+# edge = "top"             # top | bottom — which screen edge it docks to
+# height = 10              # grid rows; the width spans the work area
+# autohide = true          # hide when the window loses focus
+#
+# A `[keybindings]` entry `close-quick` hides it from inside the window.
+
+# ---------------------------------------------------------------------------
 # Window size (CONFIG-011, WINDOW-001, WINDOW-011)
 # ---------------------------------------------------------------------------
 #

@@ -25,14 +25,16 @@
 
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 use windows::Data::Xml::Dom::XmlDocument;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST,
-    MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT,
-    ScreenToClient,
+    MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
+    MonitorFromWindow, PAINTSTRUCT, ScreenToClient,
 };
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -42,8 +44,8 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_MENU,
-    VK_SHIFT,
+    GetDoubleClickTime, GetKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
+    ReleaseCapture, SetCapture, SetFocus, UnregisterHotKey, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{SetCurrentProcessExplicitAppUserModelID, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -51,25 +53,29 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
     GetClientRect, GetCursorPos, GetForegroundWindow, GetMenu, GetMessageW, GetSubMenu,
-    GetWindowLongPtrW, GetWindowRect, HICON, HMENU, IDC_ARROW, IDC_IBEAM, IDYES, IsZoomed,
-    LWA_ALPHA, LoadCursorW, MB_DEFBUTTON2, MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO,
-    MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOZORDER, SetCursor,
+    GetWindowLongPtrW, GetWindowRect, HICON, HMENU, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM, IDYES,
+    IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, LoadCursorW, MB_DEFBUTTON2, MB_ICONASTERISK,
+    MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, PostMessageW,
+    PostQuitMessage, RegisterClassW, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
     SetLayeredWindowAttributes, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
     ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_CHAR,
     WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN,
+    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, Result};
 
 use crate::app::{App, PaneClose};
 use crate::clipboard;
 use crate::color::Color;
-use crate::config::{self, Config, FontConfig, KeyAction, TabBar, TabBarPlacement};
+use crate::config::{
+    self, Config, FontConfig, KeyAction, QuickEdge, QuickTerminalConfig, TabBar, TabBarPlacement,
+};
 use crate::keyboard::{self, Modifiers};
 use crate::pane::Pane;
 use crate::parser::{MouseProtocol, bracketed_paste_bytes, mouse_report_bytes};
@@ -114,6 +120,19 @@ const WHEEL_LINES: usize = 3;
 const MIN_COLS: usize = 10;
 /// Smallest cell count the window can be resized to.
 const MIN_ROWS: usize = 4;
+
+/// `RegisterHotKey` id of the quick-terminal summon key (the main window
+/// owns the registration; WM_HOTKEY arrives there).
+const QUICK_HOTKEY_ID: i32 = 0xE900;
+
+/// The quick-terminal window handle (roadmap v0.2 "Hotkey summon from
+/// screen edge"), 0 when there is none. One per process; the main window
+/// owns the message loop that creates and destroys it.
+static QUICK_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// Recipe for (re)creating the quick window: config, theme and spawn
+/// options as the main window had them at startup.
+static QUICK_SPEC: Mutex<Option<(Config, theme::Theme, SpawnOptions)>> = Mutex::new(None);
 
 /// Native menu command ids (MENU-001..015). They live above the reserved
 /// system command range and below the generated profile/theme bases.
@@ -621,6 +640,9 @@ struct WindowState {
     /// `None` until the first poll tick records it, so a reload never fires on
     /// startup.
     cfg_mtime: Option<std::time::SystemTime>,
+    /// Roadmap v0.2: this is the quick (drop-down) window. It hides instead
+    /// of closing, skips the session file, and never quits the app.
+    quick: bool,
 }
 
 impl WindowState {
@@ -953,6 +975,19 @@ unsafe extern "system" fn wnd_proc(
             let _ = unsafe { SetFocus(Some(hwnd)) };
             LRESULT(0)
         }
+        WM_KILLFOCUS => {
+            // Roadmap v0.2: the quick terminal vanishes when you click away.
+            if state_ref(hwnd).is_some_and(|s| s.quick && s.cfg.quick_terminal.autohide) {
+                let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+            }
+            LRESULT(0)
+        }
+        WM_HOTKEY => {
+            if wparam.0 as i32 == QUICK_HOTKEY_ID {
+                toggle_quick();
+            }
+            LRESULT(0)
+        }
         WM_COPY => {
             copy_screen(hwnd);
             LRESULT(0)
@@ -962,6 +997,12 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CLOSE => {
+            if state_ref(hwnd).is_some_and(|s| s.quick) {
+                // Roadmap v0.2: the quick terminal hides, it never closes,
+                // so its shell survives the X, Alt+F4 and the hotkey.
+                let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+                return LRESULT(0);
+            }
             // WINDOW-014: quitting asks first when the profile wants it.
             let ask = state_ref(hwnd).is_some_and(|s| s.app.tab_confirm_close());
             if ask && !confirm_yes_no(hwnd, "Quit rusttyterm?") {
@@ -976,12 +1017,24 @@ unsafe extern "system" fn wnd_proc(
                 // going away, so take ownership back and drop the app
                 // (which closes every shell).
                 let mut state = unsafe { Box::from_raw(ptr) };
-                // TAB-026/WINDOW-015/016: save while every shell is still
-                // live (fresh OSC 7 cwds); a failed save never blocks quit.
-                if state.cfg.session_restore {
-                    let session = snapshot_session(&state, hwnd);
-                    if let Err(e) = crate::session::save(&session) {
-                        eprintln!("rusttyterm: session save failed: {e}");
+                if state.quick {
+                    // Roadmap v0.2: the quick window is leaving (the main
+                    // window is quitting, or its shell died). It owns no
+                    // session slot, so no save.
+                    QUICK_HWND.store(0, Ordering::Release);
+                } else {
+                    // TAB-026/WINDOW-015/016: save while every shell is still
+                    // live (fresh OSC 7 cwds); a failed save never blocks quit.
+                    if state.cfg.session_restore {
+                        let session = snapshot_session(&state, hwnd);
+                        if let Err(e) = crate::session::save(&session) {
+                            eprintln!("rusttyterm: session save failed: {e}");
+                        }
+                    }
+                    // The quick window rides along with the app.
+                    let quick = HWND(QUICK_HWND.load(Ordering::Acquire) as *mut c_void);
+                    if !quick.is_invalid() && unsafe { IsWindow(Some(quick)).as_bool() } {
+                        let _ = unsafe { DestroyWindow(quick) };
                     }
                 }
                 state.app.close_all_shells();
@@ -1006,15 +1059,19 @@ fn reclaim_state(hwnd: HWND) -> Option<*mut WindowState> {
 /// WM_CREATE follow-up: show the window, build the renderer, size the
 /// grid, spawn the first shell, start the output-poll timer.
 fn init_window(hwnd: HWND) {
+    let quick = state_ref(hwnd).is_some_and(|s| s.quick);
     // Native menu bar (MENU-001..005). A menu failure leaves the terminal
-    // usable, matching the no-fatal-UI-failure rule.
-    let menu = state_ref(hwnd).map(|s| build_menu(&s.profiles));
-    if let Some(menu) = menu.and_then(|r| r.ok()) {
-        unsafe {
-            let _ = SetMenu(hwnd, Some(menu));
+    // usable, matching the no-fatal-UI-failure rule. The frameless quick
+    // window has no menu, and it is not shown until the hotkey summons it.
+    if !quick {
+        let menu = state_ref(hwnd).map(|s| build_menu(&s.profiles));
+        if let Some(menu) = menu.and_then(|r| r.ok()) {
+            unsafe {
+                let _ = SetMenu(hwnd, Some(menu));
+            }
         }
+        let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
     }
-    let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
     let dpi = unsafe {
         let d = GetDpiForWindow(hwnd);
         if d == 0 { GetDpiForSystem() } else { d }
@@ -1115,6 +1172,243 @@ fn apply_opacity(hwnd: HWND) {
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Quick terminal (roadmap v0.2 "Hotkey summon from screen edge")
+// ---------------------------------------------------------------------------
+
+/// Show the quick terminal docked to its screen edge, hide it when it is
+/// already up, and (re)create it when its shell ended and the window died.
+fn toggle_quick() {
+    let Some(cfg) = QUICK_SPEC
+        .lock()
+        .ok()
+        .as_ref()
+        .and_then(|slot| slot.as_ref().map(|(cfg, ..)| cfg.clone()))
+    else {
+        return;
+    };
+    let handle = QUICK_HWND.load(Ordering::Acquire);
+    if handle == 0 {
+        create_quick_window();
+    }
+    let handle = QUICK_HWND.load(Ordering::Acquire);
+    if handle == 0 {
+        return;
+    }
+    let quick = HWND(handle as *mut c_void);
+    unsafe {
+        if IsWindowVisible(quick).as_bool() {
+            let _ = ShowWindow(quick, SW_HIDE);
+        } else {
+            dock_quick(quick, &cfg);
+            let _ = ShowWindow(quick, SW_SHOW);
+            let _ = SetForegroundWindow(quick);
+        }
+    }
+}
+
+/// Size and place the quick window: the monitor's full work-area width,
+/// `quick-terminal.height` rows tall, flush with the configured edge.
+fn dock_quick(quick: HWND, cfg: &Config) {
+    let metrics = match state_ref(quick) {
+        Some(s) => s.metrics,
+        None => return,
+    };
+    let monitor = unsafe { MonitorFromWindow(quick, MONITOR_DEFAULTTOPRIMARY) };
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return;
+    }
+    let work = info.rcWork;
+    // The window rect gets no frame (WS_POPUP), so it is pure grid.
+    let (_, height) = px_size(metrics, 1, cfg.quick_terminal.height, 0.0);
+    let y = match cfg.quick_terminal.edge {
+        QuickEdge::Top => work.top,
+        QuickEdge::Bottom => work.bottom - height,
+    };
+    unsafe {
+        let _ = SetWindowPos(
+            quick,
+            Some(HWND_TOPMOST),
+            work.left,
+            y,
+            work.right - work.left,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Build the hidden quick window from [`QUICK_SPEC`]. No menu, no frame
+/// (`WS_POPUP`), not in the taskbar (`WS_EX_TOOLWINDOW`), above everything
+/// (`WS_EX_TOPMOST`); shown by [`toggle_quick`]. A creation failure is
+/// logged, not fatal (NFR-216).
+fn create_quick_window() {
+    let Some((cfg, theme, spawn)) = QUICK_SPEC.lock().ok().and_then(|slot| slot.clone()) else {
+        return;
+    };
+    let dpi = unsafe {
+        let d = GetDpiForSystem();
+        if d == 0 { 96 } else { d }
+    };
+    let font = cfg.font();
+    let metrics = match measure_cells(dpi, &font) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("rusttyterm: quick terminal font measurement failed: {e}");
+            return;
+        }
+    };
+    let state = Box::new(WindowState {
+        restore: None,
+        app: {
+            let mut app = App::with_size(spawn.cols, spawn.rows, cfg.scrollback);
+            app.set_show_cwd(cfg.tab_bar.show_cwd);
+            app
+        },
+        theme,
+        spawn,
+        font,
+        tab_bar: cfg.tab_bar.visible,
+        bell_tabs: Vec::new(),
+        bell_flash: false,
+        cfg_mtime: None,
+        quick: true,
+        profiles: merge_profiles(&cfg),
+        cfg,
+        renaming: None,
+        tab_drag: None,
+        blink_on: true,
+        theme_dir: theme_dir_from_config(),
+        renderer: None,
+        metrics,
+        timer_id: 0,
+        drag_anchor: None,
+        last_click: None,
+        suppress_char: false,
+        fullscreen: None,
+        search: None,
+        profile: 0,
+    });
+    let state_param = Box::into_raw(state) as *const c_void;
+    let hinstance = match unsafe { GetModuleHandleW(None) } {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("rusttyterm: quick terminal skipped: {e}");
+            unsafe { drop(Box::from_raw(state_param as *mut WindowState)) };
+            return;
+        }
+    };
+    let class_name = wstr(CLASS_NAME);
+    let title = wstr(APP_NAME);
+    let created = unsafe {
+        CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_POPUP,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            None,
+            None,
+            Some(hinstance.into()),
+            Some(state_param),
+        )
+    };
+    match created {
+        Ok(hwnd) => QUICK_HWND.store(hwnd.0 as isize, Ordering::Release),
+        Err(e) => {
+            // The window never existed to reclaim the box; free it here.
+            unsafe { drop(Box::from_raw(state_param as *mut WindowState)) };
+            eprintln!("rusttyterm: quick terminal window failed: {e}");
+        }
+    }
+}
+
+/// Register the system-wide summon hotkey. The spec was validated at config
+/// load; a key another app grabbed (or a VK this layout cannot name) is
+/// reported on stderr and the quick terminal stays off.
+fn register_hotkey(main: HWND, cfg: &QuickTerminalConfig) -> std::result::Result<(), ()> {
+    let Ok(spec) = config::parse_hotkey(&cfg.key) else {
+        return Err(());
+    };
+    let name = spec.rsplit('+').next().unwrap_or("");
+    let vk = match hotkey_vk(name) {
+        Some(vk) => vk,
+        None => return Err(()),
+    };
+    let mut mods = MOD_NOREPEAT;
+    for m in spec.split('+').take_while(|p| *p != name) {
+        mods |= match m {
+            "ctrl" => MOD_CONTROL,
+            "alt" => MOD_ALT,
+            "shift" => MOD_SHIFT,
+            _ => MOD_NOREPEAT,
+        };
+    }
+    let _ = unsafe { UnregisterHotKey(Some(main), QUICK_HOTKEY_ID) };
+    unsafe { RegisterHotKey(Some(main), QUICK_HOTKEY_ID, mods, u32::from(vk)) }.map_err(|_| ())
+}
+
+/// Virtual-key code for a hotkey key name (the mirror of [`key_name`],
+/// plus the punctuation the keybinding specs accept). `plus` shares the
+/// `=` key, the same binding Windows itself shows.
+fn hotkey_vk(name: &str) -> Option<u16> {
+    let vk = match name {
+        "backspace" => 0x08,
+        "tab" => 0x09,
+        "enter" => 0x0D,
+        "escape" => 0x1B,
+        "space" => 0x20,
+        "pageup" => 0x21,
+        "pagedown" => 0x22,
+        "end" => 0x23,
+        "home" => 0x24,
+        "left" => 0x25,
+        "up" => 0x26,
+        "right" => 0x27,
+        "down" => 0x28,
+        "insert" => 0x2D,
+        "delete" => 0x2E,
+        "minus" => 0x6D,
+        "equal" | "plus" => 0xBB,
+        "grave" => 0xC0,
+        "comma" => 0xBC,
+        "period" => 0xBE,
+        "slash" => 0xBF,
+        "left-bracket" => 0xDB,
+        "right-bracket" => 0xDD,
+        "backslash" => 0xDC,
+        "semicolon" => 0xBA,
+        "quote" => 0xDE,
+        _ => 0,
+    };
+    if vk != 0 {
+        return Some(vk);
+    }
+    if name.len() == 1 {
+        let c = name.as_bytes()[0];
+        if c.is_ascii_alphabetic() {
+            return Some(u16::from(c.to_ascii_uppercase()));
+        }
+        if c.is_ascii_digit() {
+            return Some(u16::from(c));
+        }
+    }
+    if name.len() > 1 && name.starts_with('f') {
+        let n = name[1..].parse::<u16>().ok()?;
+        if (1..=24).contains(&n) {
+            return Some(0x70 + n - 1);
+        }
+    }
+    None
 }
 
 /// The profile a saved tab names, falling back to the starting profile
@@ -2706,6 +3000,12 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
         KeyAction::NextTheme => cycle_theme(hwnd, 1),
         KeyAction::PrevProfile => cycle_profile(hwnd, -1),
         KeyAction::NextProfile => cycle_profile(hwnd, 1),
+        KeyAction::CloseQuick => {
+            // Only the quick window answers this; it hides, never closes.
+            if state_ref(hwnd).is_some_and(|s| s.quick) {
+                let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+            }
+        }
     }
 }
 
@@ -2892,6 +3192,14 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
             |wr| (wr.x, wr.y, wr.w, wr.h),
         );
 
+    // Roadmap v0.2: recipe for the quick window, used to (re)create it when
+    // its shell died.
+    if cfg.quick_terminal.enabled
+        && let Ok(mut spec) = QUICK_SPEC.lock()
+    {
+        *spec = Some((cfg.clone(), theme.clone(), spawn.clone()));
+    }
+
     let state = Box::new(WindowState {
         restore: session,
         app: {
@@ -2907,6 +3215,7 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         bell_tabs: Vec::new(),
         bell_flash: false,
         cfg_mtime: None,
+        quick: false,
         profiles: merge_profiles(cfg),
         cfg: cfg.clone(),
         renaming: None,
@@ -2976,6 +3285,21 @@ pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()
         return Err(anyhow::anyhow!("rusttyterm: window creation failed: {e}"));
     }
 
+    // Roadmap v0.2 "Hotkey summon from screen edge": the quick terminal is
+    // a hidden drop-down window; the global hotkey lives on the main window
+    // so WM_HOTKEY arrives on the message loop that owns every shell.
+    if cfg.quick_terminal.enabled {
+        create_quick_window();
+        if let Ok(main) = created
+            && register_hotkey(main, &cfg.quick_terminal).is_err()
+        {
+            eprintln!(
+                "rusttyterm: quick-terminal hotkey `{}` is taken by another app; the quick terminal stays off",
+                cfg.quick_terminal.key
+            );
+        }
+    }
+
     // Message loop: quit when GetMessageW reports WM_QUIT (PostQuitMessage
     // in WM_DESTROY) or the queue fails (0 = error, not "no message").
     let mut msg = MSG::default();
@@ -3006,6 +3330,15 @@ mod tests {
     fn menu_generated_command_ranges_stay_disjoint() {
         assert_eq!(theme_command(MENU_THEME_BASE + 1), Some(1));
         assert_eq!(theme_command(MENU_THEME_BASE + theme::PRESETS.len()), None);
+    }
+
+    #[test]
+    fn hotkey_names_map_to_virtual_keys() {
+        assert_eq!(hotkey_vk("grave"), Some(0xC0));
+        assert_eq!(hotkey_vk("j"), Some(0x4A));
+        assert_eq!(hotkey_vk("f2"), Some(0x71));
+        assert_eq!(hotkey_vk("plus"), Some(0xBB));
+        assert_eq!(hotkey_vk("banana"), None);
     }
 }
 
