@@ -515,7 +515,7 @@ impl Pane {
     }
 
     /// Text of command `id`'s output block: grid lines from its first
-    /// output line to its end (SHELLINT-016). `None` when the command is
+    /// output line to its end (SHELLINT-023). `None` when the command is
     /// unknown, still running, or its output has fully scrolled away.
     #[must_use]
     pub fn command_output_text(&self, id: u64) -> Option<String> {
@@ -620,7 +620,7 @@ impl Pane {
                     ParserEvent::EnterAltScreen => {
                         if !self.in_alt {
                             // The running command's output belongs to the alt
-                            // app, not to a scrollback block (SHELLINT-017).
+                            // app, not to a scrollback block (SHELLINT-026).
                             let abs = self.cursor_abs();
                             self.commands
                                 .interrupt_running(abs, CommandTracker::now_ms());
@@ -652,7 +652,7 @@ impl Pane {
                         self.grid.clear_scrollback();
                         self.graphics.clear_all();
                         // Commands whose block lived in the cleared history
-                        // are no longer showable (SHELLINT-017).
+                        // are no longer showable (SHELLINT-021).
                         self.commands.note_eviction(self.grid.first_abs());
                     }
                     // DSR/DA replies go straight back to the shell.

@@ -929,6 +929,12 @@ theme = "one-dark"
 | SHELLINT-018 | Shell integration shall work with WSL bash. | P2 |
 | SHELLINT-019 | Shell integration shall work with PowerShell. | P2 |
 | SHELLINT-020 | Shell integration shall not break plain shells. | P0 |
+| SHELLINT-021 | The terminal shall track command blocks (bounds, cwd, exit, duration) from OSC 133 marks, in a bounded ring. | P2 |
+| SHELLINT-022 | The terminal shall navigate the scroll to the previous/next command block (keyboard, rebindable). | P2 |
+| SHELLINT-023 | The terminal shall copy the last finished command's output block to the clipboard. | P2 |
+| SHELLINT-024 | The terminal shall toast when a command longer than a configurable threshold finishes while the window is backgrounded; 0 disables. | P2 |
+| SHELLINT-025 | Each command shall earn at most one completion notification. | P2 |
+| SHELLINT-026 | Entering the alt screen shall close the running command's scrollback block. | P2 |
 
 Recommended shell integration:
 

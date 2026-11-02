@@ -551,11 +551,11 @@ pub enum KeyAction {
     ReloadConfig,
     /// Clear the screen: send Ctrl-L (TTY-016).
     ClearScreen,
-    /// Scroll to the previous command boundary (SHELLINT-015, issue #38).
+    /// Scroll to the previous command boundary (SHELLINT-022, issue #38).
     PrevCommand,
-    /// Scroll to the next command boundary (SHELLINT-015, issue #38).
+    /// Scroll to the next command boundary (SHELLINT-022, issue #38).
     NextCommand,
-    /// Copy the output of the last finished command (SHELLINT-016).
+    /// Copy the output of the last finished command (SHELLINT-023).
     CopyLastCommand,
 }
 
@@ -790,7 +790,7 @@ pub struct Config {
     /// tracking, navigation and completion notices. Explicit opt-in.
     #[serde(rename = "shell-integration", default)]
     pub shell_integration: bool,
-    /// SHELLINT-019: a finished command at least this many milliseconds
+    /// SHELLINT-024: a finished command at least this many milliseconds
     /// long earns a completion toast while the window is in the background;
     /// 0 disables the toasts.
     #[serde(rename = "command-notify-ms", default = "default_notify_ms")]

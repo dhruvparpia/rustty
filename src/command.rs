@@ -10,9 +10,9 @@
 //! command navigation, copy/export of one command's output, duration and
 //! success display, and background completion notifications.
 //!
-//! Recording is opt-in (SHELLINT-013/014): a pane only feeds this tracker
-//! when shell integration is enabled. Shells that emit no OSC 133 simply
-//! leave it empty.
+//! Recording is passive (SHELLINT-021): shells that emit OSC 133 marks
+//! (including via the opt-in integration scripts, SHELLINT-013/014) fill
+//! the ring; plain shells leave it empty.
 
 use std::collections::VecDeque;
 

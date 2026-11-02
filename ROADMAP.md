@@ -110,7 +110,7 @@ session-identity defects before building launch/navigation workflows on them.
 
 | Feature | First deliverables | Tracking |
 |---|---|---|
-| Command-aware scrollback | Opt-in OSC 7/133 integration, bounded command metadata, previous/next command, copy/search/export command output, duration/exit status and background completion notifications | [#38](https://github.com/dhruvparpia/rusttyterm/issues/38) |
+| Command-aware scrollback | Opt-in OSC 7/133 integration, bounded command metadata, previous/next command, copy command output, duration/exit status and background completion notifications (shipped in #38); search/export of one command's output fold into large-output mode below | [#38](https://github.com/dhruvparpia/rusttyterm/issues/38) |
 | Large-output mode | Incremental cancellable search with context, follow-output control, stable bookmarks and streaming export; optional disk-backed history with explicit retention and disk-full behavior | [#42](https://github.com/dhruvparpia/rusttyterm/issues/42) |
 
 Share stable history anchors between command metadata, search and bookmarks.

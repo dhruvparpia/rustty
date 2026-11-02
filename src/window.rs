@@ -1129,7 +1129,7 @@ struct WindowState {
     /// WORKSPACE-006: per-tab leaf commands of the template being opened,
     /// flatten order, consumed by `spawn_restored`.
     ws_pending: Option<Vec<Vec<Option<Vec<String>>>>>,
-    /// SHELLINT-019: id of the last command whose completion this window
+    /// SHELLINT-025: id of the last command whose completion this window
     /// already acknowledged (notified, or foreground at the time), so each
     /// command earns at most one toast.
     cmd_notified: u64,
@@ -1241,7 +1241,7 @@ impl WindowState {
         }
     }
 
-    /// SHELLINT-019 (issue #38): a finished command at least
+    /// SHELLINT-024 (issue #38): a finished command at least
     /// `command-notify-ms` long earns one completion toast while the
     /// window is in the background; 0 disables the toasts.
     fn notify_finished_command(&mut self, hwnd: HWND) {
@@ -2292,12 +2292,12 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
                 true
             }
             0x26 => {
-                // Ctrl+Shift+Up: jump to the previous command (SHELLINT-015)
+                // Ctrl+Shift+Up: jump to the previous command (SHELLINT-022)
                 command_jump(hwnd, -1);
                 true
             }
             0x28 => {
-                // Ctrl+Shift+Down: jump to the next command (SHELLINT-015)
+                // Ctrl+Shift+Down: jump to the next command (SHELLINT-022)
                 command_jump(hwnd, 1);
                 true
             }
@@ -3994,7 +3994,7 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
     }
 }
 
-/// SHELLINT-015 (issue #38): Ctrl+Shift+Up/Down jumps the focused pane's
+/// SHELLINT-022 (issue #38): Ctrl+Shift+Up/Down jumps the focused pane's
 /// scroll to the previous/next command boundary. The anchor is the top
 /// visible line, so repeated presses walk the history like a jumplist.
 fn command_jump(hwnd: HWND, delta: i32) {
@@ -4018,7 +4018,7 @@ fn command_jump(hwnd: HWND, delta: i32) {
     }
 }
 
-/// SHELLINT-016 (issue #38): copy the last finished command's output block
+/// SHELLINT-023 (issue #38): copy the last finished command's output block
 /// to the clipboard.
 fn copy_last_command(hwnd: HWND) {
     let Some(s) = state_ref(hwnd) else { return };
