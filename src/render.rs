@@ -1695,6 +1695,11 @@ impl Renderer {
             raw.push('/');
             raw.push_str(&search.matches.len().to_string());
         }
+        if search.scanning || search.truncated {
+            // Issue #42: the scan is still in flight, or stopped at the
+            // cap, so more matches may exist than the count shows.
+            raw.push('+');
+        }
         raw.push_str("  case=");
         raw.push_str(if search.options.case_sensitive {
             "on"

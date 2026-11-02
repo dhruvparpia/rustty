@@ -135,6 +135,10 @@ const BELL_TIMER: usize = 3;
 /// Signboard tab-title marquee (TAB-013 hover scroll): timer id and cadence.
 const MARQUEE_TIMER: usize = 4;
 const MARQUEE_MS: u32 = 50;
+/// Issue #42: incremental search scan timer id and cadence (a bounded
+/// scan chunk runs per tick, keeping typing and scrolling responsive).
+const SEARCH_TIMER: usize = 5;
+const SEARCH_SCAN_MS: u32 = 33;
 /// Typical terminal cursor blink period.
 const BLINK_MS: u32 = 530;
 
@@ -1650,6 +1654,8 @@ unsafe extern "system" fn wnd_proc(
                 } else {
                     let _ = unsafe { KillTimer(Some(hwnd), MARQUEE_TIMER) };
                 }
+            } else if wparam.0 == SEARCH_TIMER {
+                search_step_tick(hwnd);
             }
             drain_and_cleanup(hwnd);
             LRESULT(0)
@@ -2590,6 +2596,7 @@ fn handle_char(hwnd: HWND, code: u32, sys: bool) {
         let tab = s.app.active_tab();
         search.refresh(tab);
         let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+        search_timer_sync(hwnd);
         return;
     }
     let bytes = keyboard::encode_char(ch, mods);
@@ -2674,6 +2681,7 @@ fn commit_text(hwnd: HWND, chars: &[char]) {
             let tab = s.app.active_tab();
             search.refresh(tab);
             let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            search_timer_sync(hwnd);
             return;
         }
         if let Some(palette) = &mut s.palette {
@@ -2951,6 +2959,7 @@ fn execute_palette_current(hwnd: HWND) {
                     set_title(hwnd, &s.app);
                 }
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+                search_resync(hwnd);
             }
         }
     }
@@ -3022,21 +3031,70 @@ enum SearchToggle {
 }
 
 fn search_toggle(hwnd: HWND, kind: SearchToggle) {
-    let Some(s) = state_mut(hwnd) else { return };
-    let Some(search) = &mut s.search else { return };
-    let tab = s.app.active_tab();
-    match kind {
-        SearchToggle::Case => search.toggle_case(tab),
-        SearchToggle::Word => search.toggle_whole_word(tab),
-        SearchToggle::Regex => search.toggle_regex(tab),
+    {
+        let Some(s) = state_mut(hwnd) else { return };
+        let Some(search) = &mut s.search else { return };
+        let tab = s.app.active_tab();
+        match kind {
+            SearchToggle::Case => search.toggle_case(tab),
+            SearchToggle::Word => search.toggle_whole_word(tab),
+            SearchToggle::Regex => search.toggle_regex(tab),
+        }
     }
+    search_timer_sync(hwnd);
 }
 
 fn search_backspace(hwnd: HWND) {
+    {
+        let Some(s) = state_mut(hwnd) else { return };
+        let Some(search) = &mut s.search else { return };
+        let tab = s.app.active_tab();
+        search.backspace(tab);
+    }
+    search_timer_sync(hwnd);
+}
+
+/// Arm or disarm the scan timer (issue #42) to match `search.scanning`.
+/// Call after every `refresh`/resync so a bounded scan keeps streaming.
+fn search_timer_sync(hwnd: HWND) {
+    let scanning = state_ref(hwnd)
+        .and_then(|s| s.search.as_ref())
+        .is_some_and(|search| search.scanning);
+    if scanning {
+        let _ = unsafe { SetTimer(Some(hwnd), SEARCH_TIMER, SEARCH_SCAN_MS, None) };
+    } else {
+        let _ = unsafe { KillTimer(Some(hwnd), SEARCH_TIMER) };
+    }
+}
+
+/// WM_TIMER: run one bounded search scan chunk (issue #42), repaint only
+/// when the result changed, and disarm the timer once the scan finishes.
+fn search_step_tick(hwnd: HWND) {
     let Some(s) = state_mut(hwnd) else { return };
-    let Some(search) = &mut s.search else { return };
+    let Some(search) = &mut s.search else {
+        let _ = unsafe { KillTimer(Some(hwnd), SEARCH_TIMER) };
+        return;
+    };
     let tab = s.app.active_tab();
-    search.backspace(tab);
+    let changed = search.step(tab);
+    if !search.scanning {
+        let _ = unsafe { KillTimer(Some(hwnd), SEARCH_TIMER) };
+    }
+    if changed {
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    }
+}
+
+/// The active tab changed (issue #42): an open search re-scans the new
+/// tab so results never point at the previous tab's lines.
+fn search_resync(hwnd: HWND) {
+    {
+        let Some(s) = state_mut(hwnd) else { return };
+        let Some(search) = &mut s.search else { return };
+        let tab = s.app.active_tab();
+        search.refresh(tab);
+    }
+    search_timer_sync(hwnd);
 }
 
 /// Move to the next/previous match, focus its pane, and scroll its grid so
@@ -3062,6 +3120,7 @@ fn search_step(hwnd: HWND, delta: i32) {
         .and_then(|t| t.pane_at_mut(match_.pane))
     {
         pane.grid_mut().scroll_to_abs(match_.abs);
+        pane.update_follow();
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -3128,6 +3187,7 @@ fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         } else {
             grid.scroll_down(lines);
         }
+        pane.update_follow();
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -3496,6 +3556,7 @@ fn show_tab_menu(hwnd: HWND, idx: usize) {
     }
     sync_active_tab_geometry(hwnd);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    search_resync(hwnd);
     let mut pt = POINT::default();
     if unsafe { GetCursorPos(&mut pt) }.is_err() {
         return;
@@ -3540,6 +3601,7 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
             sync_active_tab_geometry(hwnd); // issue #9
             unsafe { SetCapture(hwnd) };
             let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            search_resync(hwnd);
             return;
         }
         Some(TabHit::Close(i)) => {
@@ -3851,6 +3913,7 @@ fn switch_tab_rel(hwnd: HWND, delta: i32) {
         set_title(hwnd, &s.app);
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    search_resync(hwnd);
 }
 
 /// F11: toggle borderless fullscreen over the nearest monitor,
@@ -3950,6 +4013,7 @@ fn show_toast(title: &str, body: &str) {
 /// behind), refresh the caption.
 fn drain_and_cleanup(hwnd: HWND) {
     // Scope the GWLP_USERDATA borrow so it ends before sync_tab_bar re-enters.
+    let mut history_scan = false;
     let changed = {
         let Some(s) = state_mut(hwnd) else { return };
         s.app.drain_shells();
@@ -3961,6 +4025,10 @@ fn drain_and_cleanup(hwnd: HWND) {
         // directly instead of invalidating the client area, so a burst of
         // shell output costs one partial frame per tick (NFR-113/114).
         if s.app.take_dirty() {
+            history_scan = s
+                .search
+                .as_mut()
+                .is_some_and(|search| search.note_history(s.app.active_tab()));
             if let Some(r) = &mut s.renderer {
                 let prompt = s
                     .renaming
@@ -4035,6 +4103,9 @@ fn drain_and_cleanup(hwnd: HWND) {
         set_title(hwnd, &s.app);
         closed
     };
+    if history_scan {
+        search_timer_sync(hwnd);
+    }
     if changed {
         // A vanished tab can hide the strip again (tab-bar = "auto").
         sync_tab_bar(hwnd);
@@ -4603,6 +4674,7 @@ fn command_jump(hwnd: HWND, delta: i32) {
     };
     if let Some(abs) = target {
         pane.grid_mut().scroll_to_abs(abs);
+        pane.update_follow();
         let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
     }
 }

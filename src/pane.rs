@@ -381,6 +381,10 @@ pub struct Pane {
     selection: Option<Selection>,
     /// Kitty graphics images and placements (roadmap v0.5).
     graphics: ImageStore,
+    /// Viewport follows new output at the live edge (issue #42). Scrolling
+    /// away pauses it so reading scrollback survives a burst of output;
+    /// returning to the live edge resumes it.
+    follow: bool,
 }
 
 impl Pane {
@@ -404,6 +408,7 @@ impl Pane {
             dirty: true,
             selection: None,
             graphics: ImageStore::default(),
+            follow: true,
         }
     }
 
@@ -428,6 +433,7 @@ impl Pane {
             dirty: true,
             selection: None,
             graphics: ImageStore::default(),
+            follow: true,
         }
     }
 
@@ -711,13 +717,26 @@ impl Pane {
         // Scrollback lines evicted during this feed retire their commands.
         self.commands.note_eviction(self.grid.first_abs());
 
-        if printed {
+        if printed && self.follow {
             let above = self.grid.scroll_offset();
             if above > 0 {
                 self.grid.scroll_down(above);
             }
         }
         self.parser.fit(&self.grid);
+    }
+
+    /// Whether the viewport follows new output at the live edge (issue #42).
+    #[must_use]
+    pub const fn follow(&self) -> bool {
+        self.follow
+    }
+
+    /// Re-derive follow from the viewport: at the live edge (scroll offset
+    /// 0) new output snaps the view; scrolled away, the reading position
+    /// holds. Call after every user scroll (issue #42).
+    pub fn update_follow(&mut self) {
+        self.follow = self.grid.scroll_offset() == 0;
     }
 
     /// Drain everything the shell reader thread reported, in order.
@@ -1047,6 +1066,35 @@ mod tests {
         let a = ImageStore::default();
         let b = ImageStore::default();
         assert_ne!(a.store_id(), b.store_id());
+    }
+
+    #[test]
+    fn feed_snaps_only_while_following() {
+        // Issue #42: scrolling away from the live edge pauses the snap, so
+        // a burst of output does not yank the reading position.
+        let mut pane = Pane::with_size(10, 4, 50);
+        pane.feed(b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\n");
+        pane.update_follow();
+        assert!(pane.follow(), "starts at the live edge");
+        pane.grid_mut().scroll_up(2);
+        pane.update_follow();
+        assert!(!pane.follow(), "scrolled away pauses following");
+        pane.feed(b"more output\r\n");
+        assert_eq!(pane.grid().scroll_offset(), 2, "reading position holds");
+    }
+
+    #[test]
+    fn returning_to_live_edge_resumes_snapping() {
+        // Issue #42: reaching the live edge (wheel down, jump) resumes.
+        let mut pane = Pane::with_size(10, 4, 50);
+        pane.feed(b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\n");
+        pane.grid_mut().scroll_up(2);
+        pane.update_follow();
+        pane.grid_mut().scroll_down(2);
+        pane.update_follow();
+        assert!(pane.follow(), "live edge resumes following");
+        pane.feed(b"more output\r\n");
+        assert_eq!(pane.grid().scroll_offset(), 0, "view follows new output");
     }
 
     #[test]

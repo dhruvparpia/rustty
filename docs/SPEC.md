@@ -1225,6 +1225,24 @@ the remaining #41 scope and will be specified with their child issues.
 
 ---
 
+## 9.31 Large-output search and reading requirements
+
+Issue #42 slice 1 (roadmap "Large-output mode"). Bookmarks, streaming
+export and optional disk-backed history are the remaining #42 scope and
+will be specified with their child issues.
+
+| ID | Requirement | Priority |
+|---|---|---|
+| SEARCH-016 | The search scan shall be incremental and cancellable: one bounded chunk of lines (2048) runs per tick on a 33 ms timer, so typing, scrolling and shell output stay responsive while a scan of megabytes of scrollback is in flight (SEARCH-013). | P1 |
+| SEARCH-017 | Each restart (query, option, tab switch, history rewind) bumps a scan generation and clears prior results; a partial result from an older generation is never shown. | P1 |
+| SEARCH-018 | While a scan is still running or stopped at the match cap, the count carries a "+" suffix so the user knows more matches may exist. | P1 |
+| SEARCH-019 | Lines the shell appends after a scan are searched incrementally (the scan resumes at the tail); when history rewinds (scrollback eviction, alt-screen swap, clear) the scan restarts, so no result points at a line that no longer exists. | P1 |
+| SEARCH-020 | Appending output keeps the results already shown, so the selected match survives new output. | P1 |
+| SEARCH-021 | A rescan (e.g. a case toggle) that finds the same match restores the user's selection to it. | P2 |
+| SEARCH-022 | Scrolling away from the live edge pauses the follow-the-output snap; the reading position survives a burst of shell output. Returning to the live edge (wheel to the bottom, search jump, command jump) resumes it. | P1 |
+
+---
+
 # 10. Non-Functional Requirements
 
 ## NFR-1: Performance
