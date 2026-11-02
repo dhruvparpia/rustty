@@ -75,14 +75,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetMenu, SetTimer,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE,
-    WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INITDIALOG, WM_INITMENUPOPUP, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION,
-    WS_CHILD, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_ENTERSIZEMOVE,
+    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR,
+    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INITDIALOG,
+    WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER,
+    WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{ComObject, PCWSTR, Result};
 
@@ -1225,6 +1225,10 @@ struct WindowState {
     /// already acknowledged (notified, or foreground at the time), so each
     /// command earns at most one toast.
     cmd_notified: u64,
+    /// A sizing drag is in progress (`WM_ENTERSIZEMOVE`..`WM_EXITSIZEMOVE`):
+    /// the render target follows live, the grid/ConPTY reflow lands once at
+    /// the end (mid-drag reflow was the visible text bounce).
+    drag_resize: bool,
 }
 
 impl WindowState {
@@ -1465,6 +1469,25 @@ unsafe extern "system" fn wnd_proc(
             if let (true, Some(s)) = (!mm.is_null(), state_ref(hwnd)) {
                 let (w, h) = px_size(s.metrics, MIN_COLS, MIN_ROWS, s.bar_height());
                 unsafe { (*mm).ptMinTrackSize = POINT { x: w, y: h } };
+            }
+            LRESULT(0)
+        }
+        WM_ENTERSIZEMOVE => {
+            if let Some(s) = state_mut(hwnd) {
+                s.drag_resize = true;
+            }
+            LRESULT(0)
+        }
+        WM_EXITSIZEMOVE => {
+            // The drag's final geometry lands here: one grid/ConPTY reflow.
+            if let Some(s) = state_mut(hwnd) {
+                s.drag_resize = false;
+                if let Some(r) = &mut s.renderer {
+                    let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
+                    if s.app.resize_active(cols, rows).is_err() {
+                        eprintln!("rusttyterm: ConPTY resize failed");
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -1981,6 +2004,7 @@ fn create_quick_window() {
         ws_source: None,
         ws_pending: None,
         cmd_notified: 0,
+        drag_resize: false,
         app: {
             let mut app = App::with_size(spawn.cols, spawn.rows, cfg.scrollback);
             app.set_show_cwd(cfg.tab_bar.show_cwd);
@@ -2300,9 +2324,13 @@ fn resize_window(hwnd: HWND, width_px: u32, height_px: u32) {
     let Some(s) = state_mut(hwnd) else { return };
     let Some(r) = &mut s.renderer else { return };
     r.resize(width_px, height_px);
-    let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
-    if s.app.resize_active(cols, rows).is_err() {
-        eprintln!("rusttyterm: ConPTY resize failed");
+    // Mid-drag the render target follows live and the grid/ConPTY reflow is
+    // deferred to WM_EXITSIZEMOVE; repeated mid-drag reflow was the bounce.
+    if !s.drag_resize {
+        let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
+        if s.app.resize_active(cols, rows).is_err() {
+            eprintln!("rusttyterm: ConPTY resize failed");
+        }
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -5096,6 +5124,7 @@ pub fn run(
         ws_source,
         ws_pending,
         cmd_notified: 0,
+        drag_resize: false,
         app: {
             let mut app = App::with_size(cols, rows, cfg.scrollback);
             // TAB-025: tab titles fall back to the pane's OSC 7 cwd.
