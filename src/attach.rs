@@ -177,6 +177,10 @@ pub fn run(alias: u32, read_only: bool, take_control: bool, prefix: u8) -> io::R
     let writer = client.writer()?;
     let saved_for_reader = saved;
     let out_for_reader = SendH(out_h);
+    // Shared control flag: the reader sees a takeover and stops the
+    // input loop from sending (issue #49).
+    let control = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(granted));
+    let control_for_reader = std::sync::Arc::clone(&control);
     std::thread::spawn(move || {
         reader_loop(
             reader,
@@ -185,10 +189,11 @@ pub fn run(alias: u32, read_only: bool, take_control: bool, prefix: u8) -> io::R
             saved_for_reader,
             alias,
             initial_rev,
+            control_for_reader,
         );
     });
 
-    let code = input_loop(&mut client, in_h, out_h, alias, granted, prefix)?;
+    let code = input_loop(&mut client, in_h, out_h, alias, &control, prefix)?;
     // Normal detach: drop the connection, restore the caller's console.
     drop(client);
     saved.restore();
@@ -202,12 +207,14 @@ fn input_loop(
     in_h: HANDLE,
     out_h: HANDLE,
     alias: u32,
-    controller: bool,
+    control: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     prefix: u8,
 ) -> io::Result<u8> {
+    use std::sync::atomic::Ordering;
     let mut recs = vec![INPUT_RECORD::default(); 32];
     let mut prefix_pending = false;
     let mut last_buttons = 0u32;
+    let mut demoted_shown = false;
     loop {
         // Safety: record buffer + out param, handle validated.
         let mut n = 0u32;
@@ -217,6 +224,11 @@ fn input_loop(
             continue;
         }
         for rec in recs.iter().take(usize::try_from(n).unwrap_or(0)) {
+            let controller = control.load(Ordering::Relaxed);
+            if !controller && !demoted_shown {
+                demoted_shown = true;
+                write_out(out_h, b"\x1b[2J\x1b[H[you no longer control this session - detach with Ctrl+] d and re-attach with --take-control]\r\n");
+            }
             if rec.EventType == WINDOW_BUFFER_SIZE_EVENT as u16 && controller {
                 let s = unsafe { rec.Event.WindowBufferSizeEvent }.dwSize;
                 let cols = u16::try_from(s.X).unwrap_or(0).max(1);
@@ -287,6 +299,7 @@ fn reader_loop(
     saved: Saved,
     alias: u32,
     initial_rev: u64,
+    control: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> ! {
     let out_h = out_h.0;
     let mut last_rev = initial_rev;
@@ -337,6 +350,17 @@ fn reader_loop(
                         }
                     }
                     Some("session.exit") => break,
+                    Some("session.control") => {
+                        // A takeover demotes us: stop the input loop
+                        // from sending (issue #49).
+                        if params
+                            .and_then(|p| p.get("controller"))
+                            .and_then(Value::as_bool)
+                            == Some(false)
+                        {
+                            control.store(false, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                     Some("session.resync") if !resyncing => {
                         request_resync(&mut wr, alias);
                         resyncing = true;
@@ -624,7 +648,7 @@ fn hex(bytes: &[u8]) -> String {
 /// fresh console running these bytes lands on the same screen the
 /// host's model describes, so the live stream after the snapshot
 /// revision continues the same state.
-fn snapshot_ansi(snap: &Value) -> Vec<u8> {
+pub(crate) fn snapshot_ansi(snap: &Value) -> Vec<u8> {
     let n = |v: Option<&Value>, d: u64| v.and_then(Value::as_u64).unwrap_or(d);
     let rows = usize::try_from(n(snap.get("rows"), 0)).unwrap_or(0);
     let mut out = String::from("\x1b[H\x1b[2J");

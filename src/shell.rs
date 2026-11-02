@@ -34,12 +34,15 @@ const MAX_QUEUED_BYTES: usize = 4 << 20;
 #[cfg(windows)]
 const DRAIN_BUDGET_BYTES: usize = 1 << 20;
 
-/// Bytes of terminal output carried by an event (exit notices carry none).
+/// Bytes of terminal output carried by an event (notices carry none).
 #[must_use]
 pub const fn event_bytes(event: &ShellEvent) -> usize {
     match event {
         ShellEvent::Chunks(chunk) => chunk.len(),
-        ShellEvent::Exited(_) => 0,
+        ShellEvent::Exited(_)
+        | ShellEvent::Resize(..)
+        | ShellEvent::ControlChanged(_)
+        | ShellEvent::Notice(_) => 0,
     }
 }
 
@@ -63,6 +66,13 @@ pub enum ShellEvent {
     Chunks(Vec<u8>),
     /// The process is gone; the code is `None` when it could not be read.
     Exited(Option<i32>),
+    /// A session view's host session was resized by its controller
+    /// (issue #49): fit the grid to this geometry, never push back.
+    Resize(u16, u16),
+    /// A session view gained or lost controller rights (issue #49).
+    ControlChanged(bool),
+    /// A one-line human notice the pane shows inline (issue #49).
+    Notice(&'static str),
 }
 
 /// What [`Shell::spawn`] needs to start a pane's process.
@@ -272,6 +282,24 @@ struct Inner {
     _tx: Sender<ShellEvent>,
 }
 
+/// A pane that renders a host session instead of a local shell
+/// (issue #49): the pump thread owns the connection's read side and
+/// forwards frames as [`ShellEvent`]s; input/resize go back as RPC
+/// frames through `frames` only while `controller` is true.
+#[cfg(windows)]
+struct ViewState {
+    alias: u32,
+    /// True while this pane holds controller rights (shared with the
+    /// pump, which clears it on a host demotion notice).
+    controller: Arc<AtomicBool>,
+    /// UI -> pump "please take control now" pings.
+    req_tx: Sender<()>,
+    /// UI -> writer-thread RPC frames (input, resize, takeover, resync).
+    frame_tx: Sender<serde_json::Value>,
+    /// The pump's read-handle cancel target, so `close` can wake it.
+    read_handle: windows::Win32::Foundation::HANDLE,
+}
+
 /// Fallback shell probe (window milestone): Git Bash, then PowerShell 7,
 /// then Windows PowerShell. Shared by the GUI's first tab and the session
 /// host's default profile (issue #46). MSYS shells get `enable_pcon` in
@@ -340,6 +368,11 @@ pub struct Shell {
     /// on the next poll so ordering is preserved (GHSA-v5c6).
     #[cfg(windows)]
     backlog: VecDeque<ShellEvent>,
+    /// Some for a session-view pane (issue #49).
+    #[cfg(windows)]
+    view: Option<ViewState>,
+    /// A session view is active (kept cross-platform for `is_view`).
+    view_notice: bool,
 }
 
 impl fmt::Debug for Shell {
@@ -370,6 +403,9 @@ impl Shell {
             stopping: Arc::new(AtomicBool::new(false)),
             #[cfg(windows)]
             backlog: VecDeque::new(),
+            #[cfg(windows)]
+            view: None,
+            view_notice: false,
         }
     }
 
@@ -486,9 +522,195 @@ impl Shell {
         Err(ShellError::Unsupported("ConPTY requires Windows"))
     }
 
-    /// Write keyboard/paste bytes to the shell (TTY-004..TTY-017).
+    /// Attach this pane as a *view* of live host session `alias`
+    /// (issue #49): subscribe to its stream, render the snapshot, keep
+    /// the snapshot current through resyncs, and — when `take_control`
+    /// — hold (or demand) controller rights. Closing the view detaches;
+    /// the host session keeps running.
+    ///
+    /// # Errors
+    /// No host, attach refusals, thread setup failures.
+    #[cfg(windows)]
+    pub fn attach_view(&mut self, alias: u32, take_control: bool) -> Result<(), String> {
+        if self.view.is_some() {
+            return Err("this pane is already a session view".to_string());
+        }
+        if self.inner.is_some() {
+            return Err("this pane already has a shell".to_string());
+        }
+        let mut client =
+            crate::host::client::Client::connect_existing().map_err(|e| e.to_string())?;
+        let resp = client
+            .call(
+                "session.attach",
+                serde_json::json!({
+                    "alias": alias,
+                    "readOnly": !take_control,
+                    "takeControl": take_control,
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+        if let Some(err) = resp.get("error") {
+            return Err(format!(
+                "{}: {}",
+                err.get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("error"),
+                err.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+            ));
+        }
+        let granted = resp
+            .get("result")
+            .and_then(|r| r.get("controlGranted"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let reader = client.reader().map_err(|e| e.to_string())?;
+        let mut writer = client.writer().map_err(|e| e.to_string())?;
+        // Keep the host connection open until the Shell drops (close
+        // detaches; the host releases our control slot then).
+        drop(client);
+        let read_handle = reader.handle();
+
+        let (tx, rx) = mpsc::channel::<ShellEvent>();
+        // The attach answer paints the canvas before live frames flow.
+        let result = resp.get("result");
+        if let Some(snap) = result
+            .and_then(|r| r.get("snapshot"))
+            .filter(|v| v.is_object())
+        {
+            let bytes = crate::attach::snapshot_ansi(snap);
+            self.queued.fetch_add(bytes.len(), Ordering::Relaxed);
+            let _ = tx.send(ShellEvent::Chunks(bytes));
+        }
+        let rev = result
+            .and_then(|r| r.get("revision"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        for d in result
+            .and_then(|r| r.get("deltas"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let hex = d.get(1).and_then(serde_json::Value::as_str).unwrap_or("");
+            if let Ok(bytes) = view_unhex(hex) {
+                self.queued.fetch_add(bytes.len(), Ordering::Relaxed);
+                let _ = tx.send(ShellEvent::Chunks(bytes));
+            }
+        }
+
+        let (frame_tx, frame_rx) = mpsc::channel::<serde_json::Value>();
+        let (req_tx, req_rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            while let Ok(frame) = frame_rx.recv() {
+                if crate::host::write_frame(&mut writer, &frame).is_err() {
+                    break; // the write side is gone; the pump ends next
+                }
+            }
+        });
+
+        let control = Arc::new(AtomicBool::new(granted));
+        let pump_control = Arc::clone(&control);
+        let pump_queued = Arc::clone(&self.queued);
+        let pump_stopping = Arc::clone(&self.stopping);
+        let pump_frame_tx = frame_tx.clone();
+        let reader = std::thread::spawn(move || {
+            let mut reader = reader;
+            view_pump(
+                &mut reader,
+                &tx,
+                req_rx,
+                pump_frame_tx,
+                alias,
+                rev,
+                &pump_control,
+                &pump_queued,
+                &pump_stopping,
+            );
+            // Connection over (or the pane closed): the session is gone
+            // for this pane; the UI converges on Exited.
+            let _ = tx.send(ShellEvent::Exited(None));
+        });
+
+        self.view = Some(ViewState {
+            alias,
+            controller: control,
+            req_tx,
+            frame_tx,
+            read_handle,
+        });
+        self.view_notice = true;
+        self.state = ShellState::Running;
+        self.rx = Some(rx);
+        self.reader = Some(reader);
+        Ok(())
+    }
+
+    /// Session views need Windows (the host is Windows-only).
+    #[cfg(not(windows))]
+    pub fn attach_view(&mut self, _alias: u32, _take_control: bool) -> Result<(), String> {
+        Err("session views require Windows".to_string())
+    }
+
+    /// Whether this pane renders a host session view (issue #49).
+    #[must_use]
+    pub const fn is_view(&self) -> bool {
+        self.view_notice
+    }
+
+    /// Host alias of this pane's session view, if any.
+    #[must_use]
+    pub fn view_alias(&self) -> Option<u32> {
+        #[cfg(windows)]
+        return self.view.as_ref().map(|v| v.alias);
+        #[cfg(not(windows))]
+        return None;
+    }
+
+    /// Whether this pane's view currently holds controller rights.
+    #[must_use]
+    pub fn view_controller(&self) -> bool {
+        #[cfg(windows)]
+        return self
+            .view
+            .as_ref()
+            .is_some_and(|v| v.controller.load(Ordering::Relaxed));
+        #[cfg(not(windows))]
+        return false;
+    }
+
+    /// Ask the pump to take controller rights now (issue #49); the
+    /// answer arrives as a `ControlChanged` event.
+    pub fn take_control(&self) {
+        #[cfg(windows)]
+        if let Some(v) = &self.view {
+            let _ = v.req_tx.send(());
+        }
+    }
+
+    /// Write keyboard/paste bytes to the shell (TTY-004..TTY-017). A
+    /// session view sends them to the host only while it holds
+    /// controller rights (issue #49).
     #[cfg(windows)]
     pub fn write_input(&self, bytes: &[u8]) -> Result<(), ShellError> {
+        if let Some(v) = &self.view {
+            if !v.controller.load(Ordering::Relaxed) {
+                return Err(ShellError::NotRunning);
+            }
+            let mut data = String::with_capacity(bytes.len() * 2);
+            for b in bytes {
+                data.push_str(&format!("{b:02x}"));
+            }
+            let frame = serde_json::json!({
+                "jsonrpc": "2.0", "method": "session.input",
+                "params": {"alias": v.alias, "data": data},
+            });
+            // shortcut: unbounded frame queue; a dead writer ends the
+            // pump, upgrade to a bounded queue if input floods a dead pipe.
+            return v.frame_tx.send(frame).map_err(|_| ShellError::NotRunning);
+        }
         self.inner
             .as_ref()
             .ok_or(ShellError::NotRunning)?
@@ -503,9 +725,22 @@ impl Shell {
         Err(ShellError::NotRunning)
     }
 
-    /// Resize the pseudo-console (TTY-003: resize must be delivered).
+    /// Resize the pseudo-console (TTY-003: resize must be delivered). A
+    /// session view pushes its size to the host only while it holds
+    /// controller rights; a watcher's grid follows the host's geometry
+    /// instead (issue #49, pane-level gating).
     #[cfg(windows)]
     pub fn resize(&self, cols: usize, rows: usize) -> Result<(), ShellError> {
+        if let Some(v) = &self.view {
+            if !v.controller.load(Ordering::Relaxed) {
+                return Err(ShellError::NotRunning);
+            }
+            let frame = serde_json::json!({
+                "jsonrpc": "2.0", "method": "session.resize",
+                "params": {"alias": v.alias, "cols": cols, "rows": rows},
+            });
+            return v.frame_tx.send(frame).map_err(|_| ShellError::NotRunning);
+        }
         self.inner
             .as_ref()
             .ok_or(ShellError::NotRunning)?
@@ -571,6 +806,7 @@ impl Shell {
     ///
     /// The exit code arrives later through [`Shell::poll_events`].
     #[cfg(windows)]
+    #[allow(unsafe_code, reason = "FFI boundary (NFR-401): CancelIoEx")]
     pub fn close(&mut self) {
         // GHSA-v5c6: a reader parked at the byte cap must wake and drain
         // so the ConPTY shutdown path is never blocked by a full queue.
@@ -578,11 +814,200 @@ impl Shell {
         if let Some(inner) = &mut self.inner {
             inner.conpty.close();
         }
+        if let Some(v) = &self.view {
+            // Wake the pump's blocking read; it ends, and dropping the
+            // Shell closes the connection (the host detaches us).
+            // Safety: FFI boundary (NFR-401); the handle outlives this call.
+            unsafe {
+                let _ = windows::Win32::System::IO::CancelIoEx(v.read_handle, None);
+            }
+        }
     }
 
     /// Close; inert on non-Windows.
     #[cfg(not(windows))]
     pub fn close(&mut self) {}
+}
+
+/// Decode host hex payloads (issue #49 view pump).
+///
+/// # Errors
+/// Odd length, non-hex digits, or a length that does not fit `usize`.
+#[cfg(windows)]
+fn view_unhex(s: &str) -> Result<Vec<u8>, String> {
+    if !s.len().is_multiple_of(2) {
+        return Err("odd hex length".to_string());
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks(2) {
+        let hi = (pair[0] as char).to_digit(16).ok_or("not hex")?;
+        let lo = (pair[1] as char).to_digit(16).ok_or("not hex")?;
+        out.push(u8::try_from(hi * 16 + lo).map_err(|_| "not hex".to_string())?);
+    }
+    Ok(out)
+}
+
+/// Send an output chunk to the UI, counting it against the pane's byte
+/// budget; a saturated channel drops the frame and the pump resyncs.
+#[cfg(windows)]
+fn view_send_chunks(tx: &Sender<ShellEvent>, queued: &Arc<AtomicUsize>, bytes: Vec<u8>) {
+    queued.fetch_add(bytes.len(), Ordering::Relaxed);
+    let _ = tx.send(ShellEvent::Chunks(bytes));
+}
+
+/// Send a host snapshot + retained deltas to the UI and return the
+/// revision they install (issue #49 view pump resync path).
+#[cfg(windows)]
+fn view_install_snapshot(
+    result: &serde_json::Value,
+    tx: &Sender<ShellEvent>,
+    queued: &Arc<AtomicUsize>,
+) -> u64 {
+    let rev = result
+        .get("revision")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if let Some(snap) = result.get("snapshot").filter(|v| v.is_object()) {
+        view_send_chunks(tx, queued, crate::attach::snapshot_ansi(snap));
+    }
+    for d in result
+        .get("deltas")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let hex = d.get(1).and_then(serde_json::Value::as_str).unwrap_or("");
+        if let Ok(bytes) = view_unhex(hex) {
+            view_send_chunks(tx, queued, bytes);
+        }
+    }
+    rev
+}
+
+/// The session-view pump (issue #49): read host frames and forward them
+/// as events; on a revision gap request a snapshot resync over the same
+/// connection; drain takeover requests from the UI. Ends on EOF, read
+/// error, `session.exit`, or a cancelled read (pane close).
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the pump is one state machine over shared view state"
+)]
+#[cfg(windows)]
+fn view_pump(
+    rd: &mut crate::host::client::DupReader,
+    tx: &Sender<ShellEvent>,
+    req_rx: Receiver<()>,
+    frame_tx: Sender<serde_json::Value>,
+    alias: u32,
+    mut last_rev: u64,
+    control: &Arc<AtomicBool>,
+    queued: &Arc<AtomicUsize>,
+    stopping: &Arc<AtomicBool>,
+) {
+    let mut resyncing = false;
+    loop {
+        // Takeover requests first: they must not wait behind output.
+        while req_rx.try_recv().is_ok() {
+            let _ = frame_tx.send(serde_json::json!({
+                "jsonrpc": "2.0", "id": "takeover", "method": "session.attach",
+                "params": {"alias": alias, "readOnly": true, "takeControl": true},
+            }));
+        }
+        let frame = match crate::host::read_frame(rd, crate::host::MAX_PAGE_BYTES) {
+            Ok(f) => f,
+            Err(_) => break, // EOF, host gone, or CancelIoEx from close
+        };
+        let method = frame.get("method").and_then(serde_json::Value::as_str);
+        let params = frame.get("params");
+        match method {
+            Some("session.output") => {
+                let Some(rev) = params
+                    .and_then(|p| p.get("revision"))
+                    .and_then(serde_json::Value::as_u64)
+                else {
+                    continue;
+                };
+                if rev <= last_rev {
+                    continue; // an echo of bytes we already applied
+                }
+                if rev > last_rev + 1 {
+                    // shortcut: gap resync uses last_rev+1, which is in
+                    // the retained window whenever frames were only
+                    // dropped by channel saturation; upgrade if a
+                    // resync ever answers with a refusal.
+                    resyncing = true;
+                    let _ = frame_tx.send(serde_json::json!({
+                        "jsonrpc": "2.0", "id": "resync", "method": "session.attach",
+                        "params": {"alias": alias, "readOnly": true, "fromRevision": rev - 1},
+                    }));
+                    last_rev = rev - 1;
+                    continue;
+                }
+                last_rev = rev;
+                if resyncing {
+                    continue; // covered by the snapshot that is on its way
+                }
+                let hex = params
+                    .and_then(|p| p.get("data"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                if let Ok(bytes) = view_unhex(hex) {
+                    view_send_chunks(tx, queued, bytes);
+                }
+            }
+            Some("session.resize") => {
+                let cols = params
+                    .and_then(|p| p.get("cols"))
+                    .and_then(serde_json::Value::as_u64);
+                let rows = params
+                    .and_then(|p| p.get("rows"))
+                    .and_then(serde_json::Value::as_u64);
+                if let (Some(c), Some(r)) = (cols, rows) {
+                    let c = u16::try_from(c).unwrap_or(0);
+                    let r = u16::try_from(r).unwrap_or(0);
+                    if c != 0 && r != 0 {
+                        let _ = tx.send(ShellEvent::Resize(c, r));
+                    }
+                }
+            }
+            Some("session.control") => {
+                if let Some(c) = params
+                    .and_then(|p| p.get("controller"))
+                    .and_then(serde_json::Value::as_bool)
+                {
+                    control.store(c, Ordering::Relaxed);
+                    let _ = tx.send(ShellEvent::ControlChanged(c));
+                }
+            }
+            Some("session.exit") => break,
+            None => {
+                let id = frame.get("id").and_then(serde_json::Value::as_str);
+                if id == Some("resync") {
+                    resyncing = false;
+                    if let Some(result) = frame.get("result") {
+                        let rev = view_install_snapshot(result, tx, queued);
+                        last_rev = last_rev.max(rev);
+                    }
+                } else if id == Some("takeover") {
+                    let granted = frame
+                        .get("result")
+                        .and_then(|r| r.get("controlGranted"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    control.store(granted, Ordering::Relaxed);
+                    let _ = tx.send(ShellEvent::ControlChanged(granted));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !stopping.load(Ordering::Relaxed) {
+        let _ = tx.send(ShellEvent::Notice("host connection lost"));
+    }
+    // Drain any requests we still hold so senders never see Disconnected.
+    while req_rx.try_recv().is_ok() {}
 }
 
 impl Default for Shell {

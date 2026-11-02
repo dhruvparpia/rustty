@@ -385,6 +385,10 @@ pub struct Pane {
     /// away pauses it so reading scrollback survives a burst of output;
     /// returning to the live edge resumes it.
     follow: bool,
+    /// Host alias when this pane is a session view (issue #49).
+    view_alias: Option<u32>,
+    /// Whether this pane's view holds controller rights (issue #49).
+    view_controller: bool,
 }
 
 impl Pane {
@@ -409,6 +413,8 @@ impl Pane {
             selection: None,
             graphics: ImageStore::default(),
             follow: true,
+            view_alias: None,
+            view_controller: false,
         }
     }
 
@@ -434,6 +440,8 @@ impl Pane {
             selection: None,
             graphics: ImageStore::default(),
             follow: true,
+            view_alias: None,
+            view_controller: false,
         }
     }
 
@@ -748,8 +756,54 @@ impl Pane {
             match event {
                 ShellEvent::Chunks(bytes) => self.feed(&bytes),
                 ShellEvent::Exited(_) => {}
+                ShellEvent::Resize(cols, rows) => {
+                    // A view's geometry is canonical from the host
+                    // (issue #49): fit the grids, never push back.
+                    self.selection = None;
+                    self.grid.resize(usize::from(cols), usize::from(rows));
+                    if let Some(main) = &mut self.main_grid {
+                        main.resize(usize::from(cols), usize::from(rows));
+                    }
+                    self.parser.fit(&self.grid);
+                    self.dirty = true;
+                }
+                ShellEvent::ControlChanged(c) => {
+                    self.view_controller = c;
+                }
+                ShellEvent::Notice(msg) => {
+                    self.feed(format!("\r\n[{msg}]\r\n").as_bytes());
+                }
             }
         }
+    }
+
+    /// Attach this pane as a view of live host session `alias`
+    /// (issue #49). Closing the view detaches; the session keeps running.
+    ///
+    /// # Errors
+    /// No host, attach refusals, thread setup failures.
+    pub fn attach_view(&mut self, alias: u32, take_control: bool) -> Result<(), String> {
+        self.shell.attach_view(alias, take_control)?;
+        self.view_alias = Some(alias);
+        self.view_controller = self.shell.view_controller();
+        Ok(())
+    }
+
+    /// Host alias when this pane is a session view (issue #49).
+    #[must_use]
+    pub const fn view_alias(&self) -> Option<u32> {
+        self.view_alias
+    }
+
+    /// Whether this pane's view holds controller rights (issue #49).
+    #[must_use]
+    pub const fn view_controller(&self) -> bool {
+        self.view_controller
+    }
+
+    /// Ask this pane's view to take controller rights (issue #49).
+    pub fn take_control(&self) {
+        self.shell.take_control();
     }
 
     /// Start the pane's shell process (TTY-001, TTY-002).
@@ -778,6 +832,13 @@ impl Pane {
     pub fn resize(&mut self, cols: usize, rows: usize) -> Result<(), ShellError> {
         self.dirty = true;
         self.selection = None;
+        if self.view_alias.is_some() {
+            // A view's geometry is canonical from the host (issue
+            // #49): the controller pushes its size, a watcher's grid
+            // follows the host's Resize events instead.
+            let _ = self.shell.resize(cols, rows);
+            return Ok(());
+        }
         self.grid.resize(cols, rows);
         if let Some(main) = &mut self.main_grid {
             main.resize(cols, rows);

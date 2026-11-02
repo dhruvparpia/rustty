@@ -1240,6 +1240,12 @@ pub mod server {
                 format!("no live session with alias {alias}"),
             )
         })?;
+        // Remember who we demote so they can be told (issue #49).
+        let demoted = if takeover && m.controller.is_some() && m.controller != Some(conn.token) {
+            m.controller
+        } else {
+            None
+        };
         if !readonly && m.controller.is_some() && m.controller != Some(conn.token) && !takeover {
             return Err(Fail::Code(
                 "session-busy",
@@ -1252,7 +1258,19 @@ pub mod server {
         let granted = if readonly {
             false
         } else {
-            // takeover silently demotes the previous controller (ADR).
+            // takeover demotes the previous controller (ADR) and tells
+            // them so their UI can stop sending (issue #49).
+            if let Some((_, tx)) = demoted.and_then(|old| m.subs.iter().find(|(t, _)| *t == old)) {
+                let _ = tx.try_send(json!({
+                    "method": "session.control",
+                    "params": {
+                        "alias": alias,
+                        "id": m.record.id,
+                        "controller": false,
+                        "schema": SCHEMA,
+                    },
+                }));
+            }
             m.controller = Some(conn.token);
             true
         };
@@ -1862,7 +1880,7 @@ pub mod client {
     /// blocking read on a synchronous handle starves a concurrent
     /// writer (see [`super::overlapped_write`]).
     #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
-    fn open_pipe() -> io::Result<DupHandle> {
+    pub fn open_pipe() -> io::Result<DupHandle> {
         use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE};
         use windows::Win32::Storage::FileSystem::{
             CreateFileW, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE,
@@ -1890,6 +1908,17 @@ pub mod client {
     }
 
     impl Client {
+        /// Connect to the live host without spawning one; error when no
+        /// host answers (palette session list, issue #49). Drop the
+        /// client to return the host's client count to its prior value.
+        ///
+        /// # Errors
+        ///
+        /// Pipe unavailability or handshake failure.
+        pub fn connect_existing() -> io::Result<Self> {
+            Self::handshake(open_pipe()?)
+        }
+
         /// Connect to the live host, spawning one when none answers;
         /// 50 ms poll, 5 s budget (ADR §1 ready handshake).
         ///
@@ -2130,6 +2159,16 @@ pub mod client {
     }
 
     #[cfg(windows)]
+    impl DupReader {
+        /// The raw pipe handle, for `CancelIoEx` so a close can wake a
+        /// blocking read (issue #49 view pump).
+        #[must_use]
+        pub fn handle(&self) -> windows::Win32::Foundation::HANDLE {
+            self.handle.0
+        }
+    }
+
+    #[cfg(windows)]
     impl io::Read for DupReader {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             overlapped_read(self.handle.0, buf)
@@ -2195,5 +2234,65 @@ mod tests {
         let mut big = (MAX_REQUEST_BYTES as u32 + 1).to_le_bytes().to_vec();
         big.extend_from_slice(b"{}");
         assert!(read_frame(&mut big.as_slice(), MAX_REQUEST_BYTES).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn takeover_demotes_the_old_controller_and_tells_them() {
+        use std::sync::mpsc::sync_channel;
+
+        use server::{App, Conn};
+
+        let app = std::sync::Arc::new(std::sync::Mutex::new(App::new().expect("app")));
+        let req = json!({"method": "session.create", "params": {"cols": 80, "rows": 24}, "id": 1});
+        let (tx, _drain) = sync_channel(8);
+        let conn = Conn { token: 1, tx: &tx };
+        let created = server::handle(&app, &req, &conn);
+        let alias = created["result"]["session"]["alias"]
+            .as_u64()
+            .expect("alias");
+
+        // token 2 takes over from token 1 (both subscribed, as in #49).
+        let (tx1, rx1) = sync_channel(64);
+        let c1 = Conn { token: 2, tx: &tx1 };
+        let v = json!({"method": "session.attach", "params": {"alias": alias}, "id": 2});
+        assert!(server::handle(&app, &v, &c1)["result"]["controlGranted"].as_bool() == Some(true));
+        let (tx2, rx2) = sync_channel(64);
+        let c2 = Conn { token: 3, tx: &tx2 };
+        let v = json!({
+            "method": "session.attach", "id": 3,
+            "params": {"alias": alias, "takeControl": true},
+        });
+        assert!(server::handle(&app, &v, &c2)["result"]["controlGranted"].as_bool() == Some(true));
+
+        // The demoted controller gets a session.control frame in its queue.
+        let mut saw_control = false;
+        while let Ok(frame) = rx1.try_recv() {
+            if frame["method"] == "session.control"
+                && frame["params"]["controller"].as_bool() == Some(false)
+            {
+                assert_eq!(frame["params"]["alias"].as_u64(), Some(alias));
+                saw_control = true;
+            }
+        }
+        assert!(saw_control, "demoted client must be notified");
+
+        // The superseded controller's input is refused; the new one's is not.
+        let v = json!({
+            "method": "session.input", "id": 4,
+            "params": {"alias": alias, "data": "78"},
+        });
+        let resp = server::handle(&app, &v, &c1);
+        assert_eq!(resp["error"]["code"].as_str(), Some("session-busy"));
+        let resp = server::handle(&app, &v, &c2);
+        assert!(
+            resp.get("result").is_some(),
+            "new controller's input accepted"
+        );
+        drop(rx2);
+
+        // Clean up the live session (kills the shell via the job).
+        let v = json!({"method": "session.terminate", "params": {"alias": alias}, "id": 5});
+        server::handle(&app, &v, &conn);
     }
 }

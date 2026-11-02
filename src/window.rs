@@ -197,6 +197,10 @@ const MENU_PALETTE: usize = 0xE854;
 /// OSC 8 link under the pointer: open / copy target (issue #41).
 const MENU_OPEN_LINK: usize = 0xE855;
 const MENU_COPY_LINK: usize = 0xE856;
+/// Session-view tab menu entries (issue #49).
+const MENU_VIEW_COPY_ATTACH: usize = 0xE860;
+const MENU_VIEW_TAKE_CONTROL: usize = 0xE861;
+const MENU_VIEW_TERMINATE: usize = 0xE862;
 /// Workspaces submenu: "Open <name>" items (WORKSPACE-003), one per
 /// template, capped by the store's own 64-template limit.
 const MENU_WS_OPEN_BASE: usize = 0xF200;
@@ -673,6 +677,9 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         MENU_PREV_COMMAND => command_jump(hwnd, -1),
         MENU_NEXT_COMMAND => command_jump(hwnd, 1),
         MENU_COPY_LAST_CMD => copy_last_command(hwnd),
+        MENU_VIEW_COPY_ATTACH => copy_attach_command(hwnd),
+        MENU_VIEW_TAKE_CONTROL => take_view_control(hwnd),
+        MENU_VIEW_TERMINATE => terminate_view_session(hwnd),
         MENU_FULLSCREEN => toggle_fullscreen(hwnd),
         MENU_COPY => copy_screen(hwnd),
         MENU_PASTE => paste_clipboard(hwnd),
@@ -2800,6 +2807,23 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             command: Command::NewTabProfile(idx),
         });
     }
+    for rec in live_sessions() {
+        let alias = rec
+            .get("alias")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let name = rec
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("session");
+        items.push(PaletteItem {
+            label: format!("View Session {alias}: {name}"),
+            group: "Sessions",
+            shortcut: None,
+            disabled_reason: None,
+            command: Command::AttachSession(u32::try_from(alias).unwrap_or(0)),
+        });
+    }
     let mut push = |label: &str, group: &'static str, action: KeyAction, disabled: Option<&str>| {
         items.push(PaletteItem {
             label: label.to_string(),
@@ -2980,6 +3004,7 @@ fn execute_palette_current(hwnd: HWND) {
     match command {
         Command::Action(action) => run_key_action(hwnd, action),
         Command::NewTabProfile(idx) => open_profile_tab(hwnd, idx),
+        Command::AttachSession(alias) => open_session_view(hwnd, alias, false),
         Command::SwitchTab(idx) => {
             if state_mut(hwnd).is_some_and(|s| s.app.select_tab(idx)) {
                 sync_active_tab_geometry(hwnd);
@@ -3594,6 +3619,16 @@ fn show_tab_menu(hwnd: HWND, idx: usize) {
             return;
         };
         let _ = append_menu_item(menu, "&Rename Tab", MENU_RENAME_TAB);
+        let is_view = state_ref(hwnd).is_some_and(|s| {
+            s.app
+                .active_tab()
+                .is_some_and(|t| t.pane().view_alias().is_some())
+        });
+        if is_view {
+            let _ = append_menu_item(menu, "Copy Attach Command\t", MENU_VIEW_COPY_ATTACH);
+            let _ = append_menu_item(menu, "Take Control", MENU_VIEW_TAKE_CONTROL);
+            let _ = append_menu_item(menu, "Terminate Session...", MENU_VIEW_TERMINATE);
+        }
         let _ = append_menu_item(menu, "Close Tab\tCtrl+Shift+W", MENU_CLOSE_TAB);
         let _ = SetForegroundWindow(hwnd);
         let sel = TrackPopupMenu(
@@ -4281,6 +4316,125 @@ fn new_tab_with_profile(hwnd: HWND, spec: ProfileSpec) {
     }
     set_title(hwnd, &s.app);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Live host sessions for the palette (issue #49). Connecting only (no
+/// spawn) keeps the palette inert when no host runs; the client drops
+/// here so listing never counts as a host connection.
+fn live_sessions() -> Vec<serde_json::Value> {
+    let Ok(mut client) = crate::host::client::Client::connect_existing() else {
+        return Vec::new();
+    };
+    let Ok(resp) = client.call("session.list", serde_json::json!({})) else {
+        return Vec::new();
+    };
+    drop(client);
+    resp.get("result")
+        .and_then(|r| r.get("sessions"))
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter(|rec| rec.get("state").and_then(serde_json::Value::as_str) == Some("live"))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Open a tab that views live host session `alias` (issue #49). Closing
+/// the tab detaches; the session keeps running.
+fn open_session_view(hwnd: HWND, alias: u32, take_control: bool) {
+    let Some(rec) = live_sessions()
+        .into_iter()
+        .find(|rec| rec.get("alias").and_then(serde_json::Value::as_u64) == Some(u64::from(alias)))
+    else {
+        let text = wstr(&format!("Session {alias} is not live."));
+        let caption = wstr("rustty");
+        unsafe {
+            let _ = MessageBoxW(
+                Some(hwnd),
+                PCWSTR::from_raw(text.as_ptr()),
+                PCWSTR::from_raw(caption.as_ptr()),
+                MB_OK | MB_ICONASTERISK,
+            );
+        }
+        return;
+    };
+    let cols = usize::try_from(
+        rec.get("cols")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(80),
+    )
+    .unwrap_or(80)
+    .max(MIN_COLS);
+    let rows = usize::try_from(
+        rec.get("rows")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(24),
+    )
+    .unwrap_or(24)
+    .max(MIN_ROWS);
+    let label = format!(
+        "Session {alias} · {}",
+        if take_control { "ctrl" } else { "watch" }
+    );
+    let Some(s) = state_mut(hwnd) else { return };
+    s.app
+        .add_tab_profile(cols, rows, s.cfg.scrollback, label, None);
+    // The view's grid starts at the session's recorded geometry; the
+    // host owns that geometry and pushes Resize events from there.
+    sync_tab_bar(hwnd);
+    let Some(s) = state_mut(hwnd) else { return };
+    if let Some(tab) = s.app.active_tab_mut() {
+        let mut pane = tab.pane_mut();
+        if let Err(e) = pane.attach_view(alias, take_control) {
+            pane.feed(format!("\r\n[attach failed: {e}]\r\n").as_bytes());
+        }
+    }
+    set_title(hwnd, &s.app);
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Copy `rustty --attach N` for this tab's session view (issue #49).
+fn copy_attach_command(hwnd: HWND) {
+    let alias =
+        state_ref(hwnd).and_then(|s| s.app.active_tab().and_then(|t| t.pane().view_alias()));
+    if let Some(alias) = alias {
+        let _ = clipboard::set_text(&format!("rustty --attach {alias}"));
+    }
+}
+
+/// Ask this tab's session view to take controller rights (issue #49).
+fn take_view_control(hwnd: HWND) {
+    if let Some(s) = state_ref(hwnd)
+        && let Some(tab) = s.app.active_tab()
+    {
+        tab.pane().take_control();
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Terminate this tab's host session after confirmation, then close the
+/// tab (issue #49).
+fn terminate_view_session(hwnd: HWND) {
+    let Some(alias) =
+        state_ref(hwnd).and_then(|s| s.app.active_tab().and_then(|t| t.pane().view_alias()))
+    else {
+        return;
+    };
+    if !confirm_yes_no(
+        hwnd,
+        &format!("Terminate session {alias}? The running program is killed."),
+    ) {
+        return;
+    }
+    if let Ok(mut client) = crate::host::client::Client::connect_existing() {
+        let _ = client.call("session.terminate", serde_json::json!({"alias": alias}));
+    }
+    let idx = state_ref(hwnd).map(|s| s.app.active_index());
+    if let Some(idx) = idx {
+        close_tab(hwnd, idx);
+    }
 }
 
 /// Spawn options from a profile: program, args, directory, environment.

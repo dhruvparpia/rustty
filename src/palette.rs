@@ -32,6 +32,8 @@ pub enum Command {
     NewTabProfile(usize),
     /// Switch to tab `n`.
     SwitchTab(usize),
+    /// Open a tab that views live host session `n` (issue #49).
+    AttachSession(u32),
 }
 
 /// One command row.
