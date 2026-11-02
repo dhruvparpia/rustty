@@ -294,6 +294,26 @@ impl ImageStore {
     }
 }
 
+/// Host component of an OSC 7 `file://host/path` URL ("" when the URL has
+/// no host, `file:///path`).
+fn host_from_url(url: &str) -> &str {
+    let rest = url.strip_prefix("file://").unwrap_or(url);
+    match rest.find('/') {
+        Some(i) => &rest[..i],
+        None => rest,
+    }
+}
+
+/// Issue #40 (IDENT-001): is an OSC 7 host this machine? "localhost", an
+/// empty host, and the local computer name all mean local. No prompt-text
+/// guessing: an unknown session simply reports nothing.
+fn host_is_local(host: &str) -> bool {
+    host.is_empty()
+        || host.eq_ignore_ascii_case("localhost")
+        || std::env::var("COMPUTERNAME")
+            .is_ok_and(|name| !name.is_empty() && name.eq_ignore_ascii_case(host))
+}
+
 /// Turn an OSC 7 `file://host/path` (percent-encoded) into a path.
 fn cwd_from_url(url: &str) -> String {
     let rest = url.strip_prefix("file://").unwrap_or(url);
@@ -338,6 +358,9 @@ pub struct Pane {
     title: Option<String>,
     /// Last working directory the shell reported (OSC 7, SHELL-001).
     cwd: Option<String>,
+    /// OSC 7 host that is not this machine: the session is remote
+    /// (IDENT-001). `None` means local or unknown; nothing is guessed.
+    shell_host: Option<String>,
     /// OSC 133;A/133;D seen: the shell is at a prompt.
     at_prompt: bool,
     /// OSC 133;B/C seen without a matching `D`: a command is running.
@@ -370,6 +393,7 @@ impl Pane {
             parser: Parser::new(),
             title: None,
             cwd: None,
+            shell_host: None,
             at_prompt: false,
             command_running: false,
             last_exit: None,
@@ -393,6 +417,7 @@ impl Pane {
             parser: Parser::new(),
             title: None,
             cwd: None,
+            shell_host: None,
             at_prompt: false,
             command_running: false,
             last_exit: None,
@@ -476,6 +501,13 @@ impl Pane {
         self.cwd.as_deref()
     }
 
+    /// OSC 7 host that is not this machine (IDENT-001): `Some` means the
+    /// session is remote. `None` means local or unknown.
+    #[must_use]
+    pub fn shell_host(&self) -> Option<&str> {
+        self.shell_host.as_deref()
+    }
+
     /// SHELL-003: is the shell sitting at a prompt (after the first prompt
     /// marker)? TAB-018, WINDOW-014 and the notification plan use this.
     #[must_use]
@@ -537,6 +569,8 @@ impl Pane {
     /// Turn a `file://host/path` report into a path string.
     fn record_cwd(&mut self, url: &str) {
         self.cwd = Some(cwd_from_url(url));
+        let host = host_from_url(url);
+        self.shell_host = (!host_is_local(host)).then(|| host.to_string());
     }
 
     /// Whether the alternate screen is active (TTY-018).
@@ -757,6 +791,23 @@ mod tests {
         assert_eq!(pane.grid().cols, 80);
         assert!(pane.title().is_none());
         assert!(!pane.in_alt_screen());
+    }
+
+    #[test]
+    fn osc_7_host_is_the_session_identity() {
+        // IDENT-001 (issue #40): remote hosts surface, local stays quiet.
+        let mut pane = Pane::with_size(20, 5, 10);
+        pane.feed(b"\x1b]7;file://db1.example/home/me\x07");
+        assert_eq!(pane.shell_host(), Some("db1.example"));
+        pane.feed(b"\x1b]7;file://localhost/C:/src\x07");
+        assert_eq!(pane.shell_host(), None);
+        pane.feed(b"\x1b]7;file:///home/me\x07");
+        assert_eq!(pane.shell_host(), None);
+        // The local computer name is local, case-insensitively.
+        if let Ok(name) = std::env::var("COMPUTERNAME") {
+            pane.feed(format!("\x1b]7;file://{name}/C:/src\x07").as_bytes());
+            assert_eq!(pane.shell_host(), None);
+        }
     }
 
     #[test]

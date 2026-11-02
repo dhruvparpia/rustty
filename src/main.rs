@@ -118,7 +118,17 @@ fn main() -> ExitCode {
     for problem in &problems {
         eprintln!("rusttyterm: {problem}");
     }
-    let spawn = probe_shell(&cfg);
+    let mut spawn = probe_shell(&cfg);
+    // Issue #40: a positional directory ("Open terminal here" from
+    // Explorer, or a plain `rusttyterm C:\dir`) sets the first tab's
+    // working directory. Not a directory: report and open as usual.
+    if let Some(dir) = cli.directory {
+        if std::path::Path::new(&dir).is_dir() {
+            spawn.cwd = Some(dir);
+        } else {
+            eprintln!("rusttyterm: {dir:?} is not a directory; opening in the default location");
+        }
+    }
     match rusttyterm::window::run(&cfg, theme, spawn, cli.workspace.as_deref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

@@ -16,6 +16,9 @@ pub struct Cli {
     pub workspace: Option<String>,
     /// `--workspaces`: print the template names and exit.
     pub workspaces: bool,
+    /// First positional argument: directory to open the terminal in
+    /// (issue #40, "Open terminal here" from Explorer).
+    pub directory: Option<String>,
     /// `-h`/`--help` was given.
     pub help: bool,
     /// `--version` was given.
@@ -41,6 +44,11 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Cli {
             "--workspaces" => cli.workspaces = true,
             "-h" | "--help" => cli.help = true,
             "--version" => cli.version = true,
+            // First positional is the working directory (Open terminal
+            // here); any later positional stays unknown.
+            _ if cli.directory.is_none() && !arg.starts_with('-') => {
+                cli.directory = Some(arg);
+            }
             _ => cli.unknown.push(arg),
         }
     }
@@ -50,7 +58,7 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Cli {
 /// One-line usage for `--help`.
 #[must_use]
 pub const fn usage() -> &'static str {
-    "usage: rusttyterm [--profile <name>] [--theme <name>] [--workspace <name> | --workspaces] [--version] [-h|--help]"
+    "usage: rusttyterm [directory] [--profile <name>] [--theme <name>] [--workspace <name> | --workspaces] [--version] [-h|--help]"
 }
 
 #[cfg(test)]
@@ -72,7 +80,21 @@ mod tests {
     #[test]
     fn unknown_arguments_are_collected_not_fatal() {
         let cli = parse(os(&["--nope", "x"]));
-        assert_eq!(cli.unknown, vec!["--nope", "x"]);
+        // The first positional is the directory; the unknown flag stands alone.
+        assert_eq!(cli.unknown, vec!["--nope"]);
+        assert_eq!(cli.directory.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn first_positional_is_the_open_directory() {
+        let cli = parse(os(&[r"C:\My Docs", "--profile", "pwsh"]));
+        assert_eq!(cli.directory.as_deref(), Some(r"C:\My Docs"));
+        assert_eq!(cli.profile.as_deref(), Some("pwsh"));
+        assert!(cli.unknown.is_empty());
+        // A second positional is not a directory.
+        let cli = parse(os(&["C:\\a", "C:\\b"]));
+        assert_eq!(cli.directory.as_deref(), Some("C:\\a"));
+        assert_eq!(cli.unknown, vec!["C:\\b"]);
     }
 
     #[test]

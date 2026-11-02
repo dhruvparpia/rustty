@@ -176,6 +176,63 @@ fn wsl_path(path: &std::path::Path) -> Option<String> {
     (s.as_bytes().get(1) == Some(&b':')).then(|| format!("/mnt/{}{}", drive as char, &s[2..]))
 }
 
+/// The quoting family of a shell program (issue #40: file drag/drop quotes
+/// for the shell that will receive the text, not for Windows in general).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellFamily {
+    /// powershell.exe / pwsh.exe
+    PowerShell,
+    /// cmd.exe
+    Cmd,
+    /// bash.exe (Git Bash, MSYS2, Cygwin)
+    Bash,
+    /// wsl.exe — the path must be mount-converted first
+    Wsl,
+    /// Anything else: paste the path unquoted.
+    Other,
+}
+
+/// Classify a program by basename (same basenames `apply_shell_integration`
+/// matches).
+#[must_use]
+pub fn shell_family(program: &str) -> ShellFamily {
+    let base = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if base.starts_with("pwsh") || base.starts_with("powershell") {
+        ShellFamily::PowerShell
+    } else if base == "cmd" || base == "cmd.exe" {
+        ShellFamily::Cmd
+    } else if base == "bash" || base == "bash.exe" || base == "sh" || base == "sh.exe" {
+        ShellFamily::Bash
+    } else if base == "wsl" || base == "wsl.exe" {
+        ShellFamily::Wsl
+    } else {
+        ShellFamily::Other
+    }
+}
+
+/// Quote `path` for a drop into the shell `family`: a leading space (so the
+/// cursor position is kept clear of the text) plus the shell-quoted path.
+/// WSL gets the `/mnt/...` mount form when the path has a drive letter; UNC
+/// and other paths paste as-is (WSL cannot mount them per-drop).
+#[must_use]
+pub fn quote_for_drop(family: ShellFamily, path: &str) -> String {
+    let quoted = match family {
+        ShellFamily::PowerShell => format!("'{}'", path.replace('\'', "''")),
+        ShellFamily::Cmd => format!("\"{path}\""),
+        ShellFamily::Bash => format!("'{}'", path.replace('\'', r"'\''")),
+        ShellFamily::Wsl => {
+            let unix = wsl_path(std::path::Path::new(path)).unwrap_or_else(|| path.to_string());
+            format!("'{}'", unix.replace('\'', r"'\''"))
+        }
+        ShellFamily::Other => path.to_string(),
+    };
+    format!(" {quoted}")
+}
+
 /// Why a shell operation failed.
 #[derive(Debug)]
 pub enum ShellError {
@@ -532,5 +589,48 @@ mod tests {
         assert!(shell.poll_events().is_empty());
         shell.close();
         assert_eq!(shell.state(), ShellState::Inactive);
+    }
+
+    #[test]
+    fn family_detection_by_program_basename() {
+        assert_eq!(shell_family(r"C:\ps\pwsh.exe"), ShellFamily::PowerShell);
+        assert_eq!(shell_family("powershell.exe"), ShellFamily::PowerShell);
+        assert_eq!(shell_family("cmd.exe"), ShellFamily::Cmd);
+        assert_eq!(
+            shell_family(r"C:\Program Files\Git\bin\bash.exe"),
+            ShellFamily::Bash
+        );
+        assert_eq!(shell_family("wsl.exe"), ShellFamily::Wsl);
+        assert_eq!(shell_family("nvim"), ShellFamily::Other);
+    }
+
+    #[test]
+    fn drop_quoting_matches_each_shell_family() {
+        // Issue #40 acceptance: Git Bash, PowerShell, CMD and WSL quoting.
+        assert_eq!(
+            quote_for_drop(ShellFamily::PowerShell, r"C:\My Docs\it's.txt"),
+            r" 'C:\My Docs\it''s.txt'"
+        );
+        assert_eq!(
+            quote_for_drop(ShellFamily::Cmd, r"C:\My Docs\file.txt"),
+            r#" "C:\My Docs\file.txt""#
+        );
+        assert_eq!(
+            quote_for_drop(ShellFamily::Bash, "/home/me/it's.txt"),
+            r" '/home/me/it'\''s.txt'"
+        );
+        assert_eq!(
+            quote_for_drop(ShellFamily::Wsl, r"C:\Projects\App"),
+            " '/mnt/c/Projects/App'"
+        );
+        // UNC has no mount form; WSL pastes it as-is.
+        assert_eq!(
+            quote_for_drop(ShellFamily::Wsl, r"\\server\share\file.txt"),
+            r" '\\server\share\file.txt'"
+        );
+        assert_eq!(
+            quote_for_drop(ShellFamily::Other, r"C:\x y\file.txt"),
+            r" C:\x y\file.txt"
+        );
     }
 }

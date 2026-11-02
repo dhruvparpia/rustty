@@ -1857,6 +1857,12 @@ impl Renderer {
                 label.push_str(" \u{b7} ");
             }
             label.push_str(tab.title());
+            // IDENT-001: OSC 7 host that is not this machine: the tab says
+            // so. Local and unknown sessions show nothing (no guessing).
+            if let Some(host) = tab.pane().shell_host() {
+                label.push_str(" @");
+                label.push_str(host);
+            }
             if self.tab_close_button {
                 label.push_str("  \u{d7}");
             }

@@ -82,6 +82,8 @@ pub struct TabInfo {
     pub profile: String,
     /// Working directory of the focused pane, when the shell reported one.
     pub cwd: Option<String>,
+    /// OSC 7 host that is not this machine (IDENT-001): remote sessions.
+    pub host: Option<String>,
     /// `true` while a bell is pending (shell activity).
     pub activity: bool,
 }
@@ -363,6 +365,9 @@ pub fn props(node: Node, s: &Snapshot) -> Vec<(i32, VARIANT)> {
             add(P_IS_SELECTED, VARIANT::from(i == s.active));
             add(P_IS_OFFSCREEN, VARIANT::from(false));
             let mut help = format!("profile: {}", t.profile);
+            if let Some(host) = &t.host {
+                help.push_str(&format!(" · host: {host}"));
+            }
             if let Some(cwd) = &t.cwd {
                 help.push_str(&format!(" · cwd: {cwd}"));
             }
@@ -608,12 +613,14 @@ mod tests {
                     title: "pwsh".into(),
                     profile: "PowerShell".into(),
                     cwd: Some("C:/src".into()),
+                    host: None,
                     activity: false,
                 },
                 TabInfo {
                     title: "htop".into(),
                     profile: "cmd".into(),
                     cwd: None,
+                    host: Some("db1.example".into()),
                     activity: true,
                 },
             ],

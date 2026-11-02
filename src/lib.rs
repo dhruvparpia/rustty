@@ -17,6 +17,9 @@ pub mod color;
 /// issue #38).
 pub mod command;
 pub mod config;
+/// Shell discovery (issue #40): WSL distros, PowerShell 7, VS developer
+/// environments, merged into the profile list.
+pub mod discovery;
 /// Kitty graphics protocol: header parsing and base64 (pure, spec graphics
 /// protocols, roadmap v0.5).
 pub mod graphics;

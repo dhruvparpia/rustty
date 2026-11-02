@@ -55,7 +55,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, SetFocus, UnregisterHotKey, VK_CONTROL, VK_LCONTROL, VK_LMENU,
     VK_RMENU, VK_SHIFT,
 };
-use windows::Win32::UI::Shell::{SetCurrentProcessExplicitAppUserModelID, ShellExecuteW};
+use windows::Win32::UI::Shell::{
+    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP,
+    SetCurrentProcessExplicitAppUserModelID, ShellExecuteW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW,
     CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW,
@@ -71,15 +74,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
     SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetMenu, SetTimer,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE,
-    WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_GETMINMAXINFO,
-    WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
-    WM_IME_STARTCOMPOSITION, WM_INITDIALOG, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NULL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
-    WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE,
+    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE,
+    WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INITDIALOG, WM_INITMENUPOPUP, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{ComObject, PCWSTR, Result};
 
@@ -89,6 +92,7 @@ use crate::color::Color;
 use crate::config::{
     self, Config, FontConfig, KeyAction, QuickEdge, QuickTerminalConfig, TabBar, TabBarPlacement,
 };
+use crate::discovery::{self, Found};
 use crate::keyboard::{self, Modifiers};
 use crate::palette::{Command, PaletteItem, PaletteState, builtin_shortcut, display_shortcut};
 use crate::pane::Pane;
@@ -99,7 +103,7 @@ use crate::render::{
 };
 use crate::search::SearchState;
 use crate::selection::{Pos, Selection};
-use crate::shell::SpawnOptions;
+use crate::shell::{ShellFamily, SpawnOptions, quote_for_drop, shell_family};
 use crate::split::{Dir, Rect, Side};
 use crate::tabbar::TAB_BAR_HEIGHT;
 use crate::theme::{self, Theme};
@@ -422,12 +426,70 @@ impl ProfileSpec {
             confirm_close: true,
         }
     }
+
+    /// Issue #40: a discovered shell becomes a plain profile entry (no theme,
+    /// colour, font or cwd overrides; a config profile can add them by name).
+    fn found(found: &Found) -> Self {
+        Self {
+            name: found.name.clone(),
+            program: found.program.clone(),
+            args: found.args.clone(),
+            cwd: None,
+            env: std::collections::BTreeMap::new(),
+            theme: None,
+            color: None,
+            scrollback: None,
+            font: None,
+            font_size: None,
+            line_height: None,
+            confirm_close: true,
+        }
+    }
 }
 
-/// Built-in shells first, then config profiles; a config profile that uses
-/// a built-in's name overrides it.
-fn merge_profiles(cfg: &Config) -> Vec<ProfileSpec> {
+/// Snapshot of the last discovery pass (the global keeps the results of the
+/// worker thread; the window merges them at startup and on WM_APP).
+fn discovered_now() -> Vec<Found> {
+    discovery::DISCOVERED
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+/// Run the discovery probes on a worker thread (DISCOVERY-006: startup never
+/// waits for them) and notify `hwnd` when results are ready. Every probe
+/// failure contributes an empty list; the window just keeps its current
+/// profiles. Refresh = Reload Config re-runs this.
+fn start_discovery(hwnd: HWND) {
+    // HWND is not Send; carry the handle as an isize and rebuild it in
+    // the worker. Posting WM_APP to a dead window is a harmless no-op.
+    let hwnd_arg = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let found = discovery::discover();
+        if let Ok(mut guard) = discovery::DISCOVERED.lock() {
+            *guard = found;
+        }
+        let target = HWND(hwnd_arg as *mut core::ffi::c_void);
+        let _ = unsafe { PostMessageW(Some(target), WM_APP, WPARAM(0), LPARAM(0)) };
+    });
+}
+
+/// Built-in shells, then discovered shells (issue #40), then config
+/// profiles: a config profile that uses an earlier name overrides it, and a
+/// discovered entry never replaces a config profile (config > discovered >
+/// builtins, so user overrides win and custom profiles are never overwritten).
+fn merge_profiles(cfg: &Config, discovered: &[discovery::Found]) -> Vec<ProfileSpec> {
     let mut merged: Vec<ProfileSpec> = PROFILES.iter().map(ProfileSpec::builtin).collect();
+    for found in discovered {
+        if cfg.profiles.iter().any(|p| p.name == found.name) {
+            continue;
+        }
+        let spec = ProfileSpec::found(found);
+        match merged.iter_mut().position(|e| e.name == spec.name) {
+            Some(idx) => merged[idx] = spec,
+            None => merged.push(spec),
+        }
+    }
     for profile in &cfg.profiles {
         let spec = ProfileSpec {
             name: profile.name.clone(),
@@ -1374,6 +1436,8 @@ unsafe extern "system" fn wnd_proc(
             let boxed = unsafe { Box::from_raw((*create).lpCreateParams as *mut WindowState) };
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(boxed) as isize) };
             init_window(hwnd);
+            // Issue #40: accept Explorer file drops.
+            unsafe { DragAcceptFiles(hwnd, true) };
             LRESULT(0)
         }
         WM_GETMINMAXINFO => {
@@ -1428,6 +1492,32 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1), // Direct2D owns the whole client area
+        WM_APP => {
+            // Issue #40: discovery finished on its worker thread; re-merge
+            // the profile list, rebuild the menu and Jump List, refresh the
+            // palette registry. An empty result leaves everything as-is.
+            let found = discovered_now();
+            if !found.is_empty()
+                && let Some(s) = state_mut(hwnd)
+            {
+                s.profiles = merge_profiles(&s.cfg, &found);
+                s.profile = s.profile.min(s.profiles.len() - 1);
+                s.palette = None;
+                if !s.quick
+                    && let Ok(menu) =
+                        build_menu(&s.profiles, &menu_theme_names(s.theme_dir.as_deref()))
+                {
+                    let _ = unsafe { SetMenu(hwnd, Some(menu)) };
+                }
+                let names: Vec<String> = s.profiles.iter().map(|p| p.name.clone()).collect();
+                rebuild_jumplist(&names);
+            }
+            LRESULT(0)
+        }
+        WM_DROPFILES => {
+            handle_drop(hwnd, HDROP(wparam.0 as *mut core::ffi::c_void));
+            LRESULT(0)
+        }
         WM_KEYDOWN => {
             handle_keydown(hwnd, (wparam.0 & 0xFFFF) as u16);
             LRESULT(0)
@@ -1882,7 +1972,7 @@ fn create_quick_window() {
         bell_flash: false,
         cfg_mtime: None,
         quick: true,
-        profiles: merge_profiles(&cfg),
+        profiles: merge_profiles(&cfg, &discovered_now()),
         cfg,
         renaming: None,
         tab_drag: None,
@@ -3046,6 +3136,80 @@ fn client_height_dips(hwnd: HWND) -> f32 {
     px_to_dips((r.bottom - r.top).max(1) as u32, dpi)
 }
 
+/// Explorer file drop (issue #40, DRAG-001..003). Dropped over the tab bar,
+/// each dropped folder opens a new tab in that folder; dropped over the
+/// grid, the paths are inserted at the shell prompt quoted for the shell
+/// family that will receive them (Git Bash, PowerShell, CMD, WSL).
+fn handle_drop(hwnd: HWND, hdrop: HDROP) {
+    // Read the drop point and every path before releasing the HDROP.
+    let mut pt = POINT::default();
+    let _ = unsafe { DragQueryPoint(hdrop, &mut pt) };
+    let count = unsafe { DragQueryFileW(hdrop, 0xFFFF_FFFF, None) };
+    let mut paths: Vec<String> = Vec::new();
+    for i in 0..count {
+        let mut buf = [0u16; 2048];
+        let len = unsafe { DragQueryFileW(hdrop, i, Some(&mut buf)) };
+        if len > 0 {
+            paths.push(String::from_utf16_lossy(&buf[..len as usize]));
+        }
+    }
+    unsafe { DragFinish(hdrop) };
+    if paths.is_empty() {
+        return;
+    }
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+    let x = px_to_dips(pt.x.max(0) as u32, dpi);
+    let y = px_to_dips(pt.y.max(0) as u32, dpi);
+    let (over_bar, pane_idx, family, base_spec) = {
+        let Some(s) = state_ref(hwnd) else { return };
+        let height = client_height_dips(hwnd);
+        let bar = s.bar_height();
+        let top = s.bar_top(height);
+        let over_bar = bar > 0.0 && y >= top && y < top + bar;
+        let pane_idx = if over_bar {
+            None
+        } else {
+            cell_at(s, x, y, height).map(|(idx, _, _)| idx)
+        };
+        // The tab's profile names the spec; the spec's program decides
+        // the quoting rules and the cwd the new tab clones.
+        let spec = s
+            .app
+            .active_tab()
+            .and_then(|t| {
+                let name = t.profile().to_string();
+                s.profiles.iter().find(|p| p.name == name).cloned()
+            })
+            .or_else(|| s.profiles.first().cloned());
+        let family = spec
+            .as_ref()
+            .map_or(ShellFamily::Other, |p| shell_family(&p.program));
+        (over_bar, pane_idx, family, spec)
+    };
+    if over_bar {
+        // Each dropped folder opens a tab at that directory (Open
+        // terminal here, same mechanism as the CLI positional arg).
+        let Some(base) = base_spec else { return };
+        for dir in paths.iter().filter(|p| std::path::Path::new(p).is_dir()) {
+            let mut spec = base.clone();
+            spec.cwd = Some(dir.clone());
+            new_tab_with_profile(hwnd, spec);
+        }
+        return;
+    }
+    let Some(idx) = pane_idx else { return };
+    // `quote_for_drop` returns one space-separated quoted path per file.
+    let text: String = paths
+        .iter()
+        .map(|p| quote_for_drop(family, p))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(s) = state_mut(hwnd) {
+        let _ = s.app.send_input_pane(idx, text.as_bytes());
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
 /// Grid cell under a client-area DIP position, addressed by pane:
 /// `(pane flatten index, viewport row, viewport col)` inside that pane;
 /// `None` for the tab bar. Clamped to the grid bounds so drags past the
@@ -3980,7 +4144,10 @@ fn reload_config(s: &mut WindowState, hwnd: HWND) {
     s.palette = None;
     s.tab_bar = s.cfg.tab_bar.visible;
     s.app.set_show_cwd(s.cfg.tab_bar.show_cwd);
-    s.profiles = merge_profiles(&s.cfg);
+    // Issue #40: re-merge with the current discovery results, then re-run
+    // the probes; the WM_APP handler re-merges when fresh results arrive.
+    s.profiles = merge_profiles(&s.cfg, &discovered_now());
+    start_discovery(hwnd);
     s.profile = s.profile.min(s.profiles.len().saturating_sub(1));
     sync_chrome(s);
     if font_changed {
@@ -4510,11 +4677,13 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
     snap.title = String::from_utf16_lossy(&caption[..n.min(caption.len())]);
     for tab in state.app.tabs() {
         let focused = tab.focused_index();
-        let mut cwd = None;
         let mut idx = 0usize;
+        let mut cwd = None;
+        let mut host = None;
         tab.for_each_pane_ref(&mut |pane: &Pane, _| {
             if Some(idx) == focused {
                 cwd = pane.cwd().map(str::to_string);
+                host = pane.shell_host().map(str::to_string);
             }
             idx += 1;
         });
@@ -4522,6 +4691,7 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
             title: tab.title().to_string(),
             profile: tab.profile().to_string(),
             cwd,
+            host,
             activity: tab.bell_pending(),
         });
     }
@@ -4607,6 +4777,29 @@ pub(crate) fn uia_geometry(hwnd: HWND) -> Option<(DipRect, (f32, f32))> {
     ))
 }
 
+/// Rebuild the taskbar Jump List (one `--profile` task per profile plus
+/// workspace tasks). Shared by startup and the discovery WM_APP (issue #40).
+fn rebuild_jumplist(names: &[String]) {
+    match std::env::current_exe() {
+        Ok(exe) => {
+            let tasks = crate::jumplist::tasks_for(names, &crate::workspace::names());
+            let res =
+                crate::jumplist::build(&aumid().to_string(), &exe.display().to_string(), &tasks);
+            // shortcut: Windows rejects user tasks for unpackaged exes with
+            // no Start Menu shortcut (E_INVALIDARG), so every cargo dev run
+            // would print this. Drop the guard when packaging installs one.
+            // (window.rs is Windows-only, so the `\target\` separator is fine.)
+            let dev_build = exe.to_string_lossy().contains(r"\target\");
+            if let Err(e) = res
+                && !dev_build
+            {
+                eprintln!("rusttyterm: jump list failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("rusttyterm: jump list skipped: {e}"),
+    }
+}
+
 /// Open the terminal window and run the message loop until the last tab
 /// closes (spec WIN-001: this is the UI thread that owns ConPTY).
 /// `workspace` (WORKSPACE-004): open this template instead of reading
@@ -4628,25 +4821,11 @@ pub fn run(
     // "New window" task plus one `--profile` task per profile. The process
     // AUMID matches the toasts (PKG-002) so Windows attributes both.
     let _ = unsafe { SetCurrentProcessExplicitAppUserModelID(&aumid()) };
-    let names: Vec<String> = merge_profiles(cfg).into_iter().map(|p| p.name).collect();
-    match std::env::current_exe() {
-        Ok(exe) => {
-            let tasks = crate::jumplist::tasks_for(&names, &crate::workspace::names());
-            let res =
-                crate::jumplist::build(&aumid().to_string(), &exe.display().to_string(), &tasks);
-            // shortcut: Windows rejects user tasks for unpackaged exes with
-            // no Start Menu shortcut (E_INVALIDARG), so every cargo dev run
-            // would print this. Drop the guard when packaging installs one.
-            // (window.rs is Windows-only, so the `\target\` separator is fine.)
-            let dev_build = exe.to_string_lossy().contains(r"\target\");
-            if let Err(e) = res
-                && !dev_build
-            {
-                eprintln!("rusttyterm: jump list failed: {e}");
-            }
-        }
-        Err(e) => eprintln!("rusttyterm: jump list skipped: {e}"),
-    }
+    let names: Vec<String> = merge_profiles(cfg, &discovered_now())
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    rebuild_jumplist(&names);
     let dpi = unsafe {
         let d = GetDpiForSystem();
         if d == 0 { 96 } else { d }
@@ -4741,7 +4920,7 @@ pub fn run(
         bell_flash: false,
         cfg_mtime: None,
         quick: false,
-        profiles: merge_profiles(cfg),
+        profiles: merge_profiles(cfg, &discovered_now()),
         cfg: cfg.clone(),
         renaming: None,
         tab_drag: None,
@@ -4760,7 +4939,7 @@ pub fn run(
         recent: Vec::new(),
         // CONFIG-013: `starting-profile` picks the initial shell.
         profile: {
-            let merged = merge_profiles(cfg);
+            let merged = merge_profiles(cfg, &discovered_now());
             merged
                 .iter()
                 .position(|p| p.name.eq_ignore_ascii_case(&cfg.starting_profile))
@@ -4845,6 +5024,13 @@ pub fn run(
         }
     }
 
+    // Issue #40: run the WSL/VS/PowerShell discovery probes on a worker
+    // thread (startup never waits, DISCOVERY-006); WM_APP re-merges the
+    // profile list when fresh results land.
+    if let Ok(main) = created {
+        start_discovery(main);
+    }
+
     // Message loop: quit when GetMessageW reports WM_QUIT (PostQuitMessage
     // in WM_DESTROY) or the queue fails (0 = error, not "no message").
     let mut msg = MSG::default();
@@ -4902,7 +5088,7 @@ mod profile_tests {
     fn a_config_profile_overrides_the_builtin_with_the_same_name() {
         let cfg = Config::parse("[[profile]]\nname = \"PowerShell\"\ncommand = \"pwsh-preview\"\n")
             .expect("parses");
-        let merged = merge_profiles(&cfg);
+        let merged = merge_profiles(&cfg, &[]);
         let ps = merged
             .iter()
             .find(|p| p.name == "PowerShell")
