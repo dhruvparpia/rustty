@@ -148,6 +148,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   the ligature features switched off. `font-features` now accepts `calt 0`,
   `calt=0` and comma lists (`calt=0,liga=0`, `calt,liga`), and is applied
   after the `ligatures` switch so a hand-written tag wins.
+- UI Automation provider (WIN-007, UIA-001..005, ACCESS-002..005): screen
+  readers see the window (name, version), the tab bar with one tab element
+  per tab (name, selected, runtime id), one grid per pane exposing the
+  visible text plus the last 500 scrollback lines, and the search strip
+  while it is open. `WM_GETOBJECT` answers `UiaRootObjectId`; the tree is
+  rebuilt live on every call, so no cached state can drift from the frames.
+- Key-binding parity (KEY-025, a11y "adjustable font size", CONFIG-018):
+  new `[keybindings]` actions `increase-font-size`, `decrease-font-size`,
+  `reset-font-size`, `reload-config` and `clear-screen` (Ghostty's own
+  spellings work too), and built-in `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0`
+  font zoom. Zoom is clamped to the configured font-size bounds and a
+  refused font leaves the window unchanged, the same rule as profile fonts.
 
 ### Fixed
 

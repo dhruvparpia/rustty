@@ -117,28 +117,24 @@ session-restore = true
 # Right, Space, Minus, Plus, Equals, comma.
 #
 # Actions:
-#   new-tab, close-tab, next-tab, prev-tab, rename-tab, move-tab-left,
-#   move-tab-right, split-vertical, split-horizontal, close-pane,
-#   focus-next-pane, focus-prev-pane, focus-pane-1..4,
-#   resize-pane-left/right/up/down, increase-font-size, decrease-font-size,
-#   reset-font-size, next-theme, prev-theme, copy, paste, copy-paste, search,
-#   clear-scrollback, toggle-fullscreen,
-#   spawn-cmd, spawn-powershell, spawn-pwsh, spawn-git-bash, spawn-wsl
+#   new-tab, close-tab, next-tab, prev-tab, move-tab-left, move-tab-right,
+#   rename-tab, split-right, split-down, focus-up, focus-down, focus-left,
+#   focus-right, resize-up, resize-down, resize-left, resize-right,
+#   increase-font-size, decrease-font-size, reset-font-size, clear-screen,
+#   reload-config, next-profile, prev-profile, next-theme, prev-theme,
+#   copy, paste, search, toggle-fullscreen, quit, close-quick
+#   (underscores and other spellings are accepted, e.g. increase_font_size)
 #
 # Built-ins:
 #   Ctrl+Shift+T=new-tab          Ctrl+Shift+W=close-tab
-#   Ctrl+Shift+Right=next-tab     Ctrl+Shift+Left=prev-tab
-#   Ctrl+Shift+D=split-vertical   Ctrl+Shift+S=split-horizontal
-#   Ctrl+Shift+E=close-pane       Ctrl+Shift+Tab=focus-next-pane
-#   Ctrl+Shift+1..4=focus-pane-1..4
-#   Ctrl+Shift+Left/Right/Up/Down=resize-pane-left/right/up/down
+#   Ctrl+Shift+]=next-tab         Ctrl+Shift+[=prev-tab
+#   Ctrl+Shift+Enter=split-right  Ctrl+Shift+-=split-down
+#   Ctrl+Alt+arrows=focus pane    Ctrl+Alt+Shift+arrows=resize pane
 #   Ctrl+Plus=increase-font-size  Ctrl+Minus=decrease-font-size
 #   Ctrl+0=reset-font-size        Ctrl+Shift+C=copy  Ctrl+Shift+V=paste
-#   Ctrl+Shift+X=copy-paste       Ctrl+K=clear-scrollback
 #   Ctrl+F=search                 F11=toggle-fullscreen
-#   Ctrl+Shift+F2=spawn-cmd       Ctrl+Shift+F3=spawn-powershell
-#   Ctrl+Shift+F4=spawn-pwsh      Ctrl+Shift+F5=spawn-git-bash
-#   Ctrl+Shift+F6=spawn-wsl       Ctrl+Shift+PageUp/Down=move-tab-left/right
+#   Ctrl+Shift+Q=quit
+#   In search: F3=next  Shift+F3=previous  Esc=close
 #
 # A binding below overrides the built-in for the same key.
 #

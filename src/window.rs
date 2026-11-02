@@ -1740,6 +1740,28 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
             return;
         }
     }
+    // Ctrl font zoom (a11y "adjustable font size", Ghostty parity). The
+    // plain keys, not the shift symbols: plus is 0xBB+shift on US layouts,
+    // and ctrl+shift+0xBD (underscore) is already the split-down binding.
+    // Outer None = not a zoom key: fall through so other Ctrl chords reach
+    // the VT encoder (Ctrl+C etc.).
+    if mods.ctrl && !mods.alt {
+        let zoom = match vk {
+            0x6B => Some(Some(1.0)),                 // numpad +
+            0xBB if mods.shift => Some(Some(1.0)),   // ctrl + shift + = (plus)
+            0x6D => Some(Some(-1.0)),                // numpad -
+            0xBD if !mods.shift => Some(Some(-1.0)), // ctrl + -
+            0x60 | 0x30 => Some(None),               // ctrl + 0 / numpad 0
+            _ => None,
+        };
+        if let Some(zoom) = zoom {
+            zoom_font(hwnd, zoom);
+            if let Some(s) = state_mut(hwnd) {
+                s.suppress_char = true;
+            }
+            return;
+        }
+    }
     // Ctrl+Alt+arrows: pane focus (SPLIT-008). Ctrl+Alt+Shift+arrows:
     // pane resize (SPLIT-009). Unsplit tabs fall through to normal VT
     // encoding so the shells keep receiving their arrow keys.
@@ -2959,6 +2981,40 @@ fn apply_profile_font(s: &mut WindowState, spec: &ProfileSpec) {
     }
 }
 
+/// Keyboard font zoom (Ghostty parity: `increase/decrease/reset_font_size`,
+/// a11y "adjustable font size"). `Some(step)` nudges the live size by
+/// `step` pt inside the config's bounds; `None` restores the configured
+/// size. A font the renderer refuses leaves the window unchanged, the same
+/// rule as profile fonts (FONT-018).
+fn zoom_font(hwnd: HWND, step: Option<f32>) {
+    let Some(s) = state_mut(hwnd) else {
+        return;
+    };
+    let mut font = s.font.clone();
+    font.size = match step {
+        Some(d) => {
+            (font.size + d).clamp(crate::config::MIN_FONT_SIZE, crate::config::MAX_FONT_SIZE)
+        }
+        None => s.cfg.font().size,
+    };
+    if font.size == s.font.size {
+        return;
+    }
+    let Some(renderer) = s.renderer.as_mut() else {
+        s.font = font;
+        return;
+    };
+    if renderer.set_font(&font).is_err() {
+        return;
+    }
+    s.font = font;
+    let (cols, rows) = renderer.grid_size().max((MIN_COLS, MIN_ROWS));
+    if s.app.resize_all_tabs(cols, rows).is_err() {
+        eprintln!("rusttyterm: ConPTY resize failed after a font zoom");
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
 /// THEME-011: a profile's theme is the window theme while its tab lives. The
 /// name may be a preset or a `themes/<name>.toml` file.
 fn apply_profile_theme(s: &mut WindowState, spec: &ProfileSpec) {
@@ -3151,6 +3207,20 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
             // Only the quick window answers this; it hides, never closes.
             if state_ref(hwnd).is_some_and(|s| s.quick) {
                 let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+            }
+        }
+        KeyAction::IncreaseFontSize => zoom_font(hwnd, Some(1.0)),
+        KeyAction::DecreaseFontSize => zoom_font(hwnd, Some(-1.0)),
+        KeyAction::ResetFontSize => zoom_font(hwnd, None),
+        KeyAction::ReloadConfig => {
+            if let Some(s) = state_mut(hwnd) {
+                reload_config(s, hwnd);
+            }
+        }
+        KeyAction::ClearScreen => {
+            // TTY-016: shells that support Ctrl-L clear their own screen.
+            if let Some(s) = state_mut(hwnd) {
+                let _ = s.app.send_input_active(b"\x0c");
             }
         }
     }

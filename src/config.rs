@@ -541,6 +541,16 @@ pub enum KeyAction {
     RenameTab,
     /// Hide the quick terminal (no effect in a normal window).
     CloseQuick,
+    /// Grow the font one step (A11Y "adjustable font size").
+    IncreaseFontSize,
+    /// Shrink the font one step.
+    DecreaseFontSize,
+    /// Return the font to the configured size.
+    ResetFontSize,
+    /// Re-read the config file now (CONFIG-018 on demand).
+    ReloadConfig,
+    /// Clear the screen: send Ctrl-L (TTY-016).
+    ClearScreen,
 }
 
 impl KeyAction {
@@ -575,6 +585,11 @@ impl KeyAction {
             "move-tab-right" => Self::MoveTabRight,
             "rename-tab" | "rename" => Self::RenameTab,
             "close-quick" | "hide-quick" => Self::CloseQuick,
+            "increase-font-size" => Self::IncreaseFontSize,
+            "decrease-font-size" => Self::DecreaseFontSize,
+            "reset-font-size" => Self::ResetFontSize,
+            "reload-config" => Self::ReloadConfig,
+            "clear-screen" => Self::ClearScreen,
             _ => return None,
         })
     }
@@ -1269,6 +1284,40 @@ background = \"#000000\"
             "the key comes last"
         );
         assert!(parse_hotkey("alt+ctrl").is_err(), "two modifiers, no key");
+    }
+
+    #[test]
+    fn key_action_strings() {
+        // The v0.4 parity actions, plus Ghostty's underscore spelling.
+        assert_eq!(
+            KeyAction::parse("increase-font-size"),
+            Some(KeyAction::IncreaseFontSize)
+        );
+        assert_eq!(
+            KeyAction::parse("increase_font_size"),
+            Some(KeyAction::IncreaseFontSize)
+        );
+        assert_eq!(
+            KeyAction::parse("decrease-font-size"),
+            Some(KeyAction::DecreaseFontSize)
+        );
+        assert_eq!(
+            KeyAction::parse("reset-font-size"),
+            Some(KeyAction::ResetFontSize)
+        );
+        assert_eq!(
+            KeyAction::parse("reload-config"),
+            Some(KeyAction::ReloadConfig)
+        );
+        assert_eq!(
+            KeyAction::parse("clear-screen"),
+            Some(KeyAction::ClearScreen)
+        );
+        assert_eq!(
+            KeyAction::parse("shrink-wrap"),
+            None,
+            "unknown actions stay None"
+        );
     }
 
     trait Expect<T> {
