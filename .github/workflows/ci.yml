@@ -17,6 +17,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: aarch64-pc-windows-msvc,x86_64-unknown-linux-gnu
 
       - name: Format
         run: cargo fmt --all --check
@@ -29,6 +30,12 @@ jobs:
 
       - name: Test
         run: cargo test --all-features
+
+      - name: Windows ARM64 cross-check
+        run: cargo check --target aarch64-pc-windows-msvc --all-targets
+
+      - name: Linux cross-check
+        run: cargo check --target x86_64-unknown-linux-gnu --all-targets
 
       - name: Portable ZIP
         run: pwsh packaging/build-portable.ps1
