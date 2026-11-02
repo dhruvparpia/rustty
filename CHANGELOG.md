@@ -106,15 +106,25 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   roadmap). The window position and size are saved too and re-applied when
   they sit on a live monitor. Opt out with `session-restore = false`. A
   session file that does not parse is reported and ignored.
+- Windows Jump List (roadmap v0.2, native taskbar API): the taskbar icon's
+  right-click menu gets "New window" plus one "New <profile> window" task per
+  configured profile. Built in memory through `ICustomDestinationList`
+  (no hand-written `.lnk` files); failures are reported on stderr and never
+  block startup.
+- Real CLI parsing: `--profile <name>` picks the starting profile (what the
+  Jump List tasks launch with), `--theme <name>` overrides the configured
+  theme, `-h`/`--help` prints usage, `--version` prints the version.
+  Unknown arguments are reported and ignored. No new dependency.
 - Documented skip: per-pane Gaussian background blur (the "acrylic" style)
   is not on the v0.2 roadmap; `opacity` (WINDOW-010) covers translucency.
 
 ### Fixed
 
-- The v0.1 "CLI stub" never parsed arguments, so no `--config`/`--theme` flag
-  existed: the config always comes from the file. CONFIG-021 (config under
-  `%APPDATA%`, or beside the exe in portable mode) and CONFIG-022 (no admin)
-  are what the spec asks for, and they work.
+- The v0.1 "CLI stub" never parsed arguments, and a later commit message
+  claimed `--theme`/`--profile` that were never implemented. Both flags now
+  exist (see Added). `--config` deliberately does not: CONFIG-021 (config
+  under `%APPDATA%`, or beside the exe in portable mode) and CONFIG-022
+  (no admin) are what the spec asks for, and they work.
 - `[[profile]]` entries in the config were rejected: the parser read them from
   a `profiles` key while `docs/SPEC.md` spells it `profile`. The spec spelling
   is now the key, and `profiles` is accepted as an alias.

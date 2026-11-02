@@ -52,23 +52,40 @@ fn probe_shell(cfg: &Config) -> SpawnOptions {
 
 #[cfg(windows)]
 fn main() -> ExitCode {
-    let cfg = match Config::load() {
+    let cli = rusttyterm::cli::parse(std::env::args_os().skip(1));
+    for unknown in &cli.unknown {
+        eprintln!("rusttyterm: ignoring unknown argument {unknown:?}");
+    }
+    if cli.help {
+        println!("{}", rusttyterm::cli::usage());
+        return ExitCode::SUCCESS;
+    }
+    if cli.version {
+        println!("rusttyterm {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    let mut cfg = match Config::load() {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("rusttyterm: {e}");
             return ExitCode::FAILURE;
         }
     };
+    // CONFIG-013: `--profile` beats the config's `starting-profile`
+    // (the Jump List's per-profile tasks launch with this flag).
+    if let Some(profile) = cli.profile {
+        cfg.starting_profile = profile;
+    }
     // THEME-009/013/014: preset name, then themes/<name>.toml next to the
     // config, then the [theme] colour overrides. Problems are reported and
-    // the nearest working theme is used.
+    // the nearest working theme is used. `--theme` beats the config.
     let theme_dir =
         rusttyterm::config::config_path().and_then(|p| p.parent().map(|dir| dir.join("themes")));
     // THEME-010: an empty theme name follows the system dark/light setting.
-    let theme_name = if cfg.theme.name().is_empty() {
-        theme::Theme::system_preset()
-    } else {
-        cfg.theme.name()
+    let theme_name: &str = match &cli.theme {
+        Some(name) => name,
+        None if cfg.theme.name().is_empty() => theme::Theme::system_preset(),
+        None => cfg.theme.name(),
     };
     let (theme, problems) =
         theme::resolve_configured(theme_name, &cfg.theme.overrides(), theme_dir.as_deref());
@@ -87,6 +104,18 @@ fn main() -> ExitCode {
 
 #[cfg(not(windows))]
 fn main() -> ExitCode {
+    let cli = rusttyterm::cli::parse(std::env::args_os().skip(1));
+    for unknown in &cli.unknown {
+        eprintln!("rusttyterm: ignoring unknown argument {unknown:?}");
+    }
+    if cli.help {
+        println!("{}", rusttyterm::cli::usage());
+        return ExitCode::SUCCESS;
+    }
+    if cli.version {
+        println!("rusttyterm {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     match Config::load() {
         Ok(cfg) => {
             println!(
@@ -94,11 +123,13 @@ fn main() -> ExitCode {
                 env!("CARGO_PKG_VERSION"),
                 cfg.window.cols,
                 cfg.window.rows,
-                if cfg.theme.name().is_empty() {
-                    theme::Theme::system_preset()
-                } else {
-                    cfg.theme.name()
-                },
+                cli.theme.unwrap_or_else(|| {
+                    if cfg.theme.name().is_empty() {
+                        theme::Theme::system_preset().to_owned()
+                    } else {
+                        cfg.theme.name().to_owned()
+                    }
+                }),
             );
             ExitCode::SUCCESS
         }

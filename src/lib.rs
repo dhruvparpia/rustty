@@ -11,6 +11,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod app;
+pub mod cli;
 pub mod color;
 pub mod config;
 pub mod grid;
@@ -34,6 +35,13 @@ pub mod conpty;
     reason = "WIN-004: the clipboard is a raw Win32 FFI boundary"
 )]
 pub mod clipboard;
+// Jump List COM boundary (roadmap v0.2: Windows Jump List).
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "roadmap v0.2: the Jump List is a raw Win32/COM FFI boundary"
+)]
+pub mod jumplist;
 /// Keyboard encoding is pure Rust (no FFI): Win32 key events in, VT bytes
 /// out (spec WIN-005).
 pub mod keyboard;

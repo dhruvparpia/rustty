@@ -2826,6 +2826,22 @@ fn px_size(metrics: CellMetrics, cols: usize, rows: usize, bar_height: f32) -> (
 pub fn run(cfg: &Config, theme: Theme, spawn: SpawnOptions) -> anyhow::Result<()> {
     // Per-monitor DPI v2 before any window metrics exist (WIN-002).
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    // Roadmap v0.2 "Windows Jump List": taskbar right-click gets a plain
+    // "New window" task plus one `--profile` task per profile. The process
+    // AUMID matches the toasts (PKG-002) so Windows attributes both.
+    let _ = unsafe { SetCurrentProcessExplicitAppUserModelID(&aumid()) };
+    let names: Vec<String> = merge_profiles(cfg).into_iter().map(|p| p.name).collect();
+    match std::env::current_exe() {
+        Ok(exe) => {
+            let tasks = crate::jumplist::tasks_for(&names);
+            if let Err(e) =
+                crate::jumplist::build(&aumid().to_string(), &exe.display().to_string(), &tasks)
+            {
+                eprintln!("rusttyterm: jump list failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("rusttyterm: jump list skipped: {e}"),
+    }
     let dpi = unsafe {
         let d = GetDpiForSystem();
         if d == 0 { 96 } else { d }
