@@ -1189,6 +1189,26 @@ same action everywhere.
 | PALETTE-004 | Typing in the palette shall never reach the PTY; while open, every keydown is consumed by the overlay. | P1 |
 | PALETTE-005 | The hit list shall be responsive and bounded (case-insensitive fuzzy subsequence scoring, capped hits and visible rows) with a bounded recently-run history. | P1 |
 
+## 9.29 Environment discovery, open-terminal-here and drag-drop requirements
+
+Discovery (#40, roadmap Stage 1) finds the shells the user has installed
+and adds them to the profile list without touching the registry
+(SEC-013): WSL distributions (`wsl.exe -l -q`), the newest installed
+PowerShell, and Visual Studio developer shells (`vswhere`).
+
+| ID | Requirement | Priority |
+|---|---|---|
+| DISCOVERY-001 | Discovery shall produce stable profile identities (e.g. "WSL: <distro>", "Developer PowerShell"); re-running discovery shall never duplicate a profile. | P1 |
+| DISCOVERY-002 | Merge priority shall be config profile > discovered > built-in; a user profile with the same name shall never be overwritten. | P1 |
+| DISCOVERY-003 | Discovery shall run off the UI thread: startup never waits on a probe, and late results merge into the live profile list and Jump List. | P1 |
+| DISCOVERY-004 | A failed probe shall be nonfatal and explainable (the profile just does not appear); "Reload Config" re-runs discovery. | P1 |
+| DISCOVERY-005 | Discovery shall never modify the registry or install shell extensions (SEC-013/NFR-308). | P0 |
+| OPENHERE-001 | A positional directory argument (`rusttyterm <dir>`, "Open terminal here") shall open the first tab in that directory; a non-directory shall be reported and the default location used. Unicode, spaces and supported UNC paths shall work. | P1 |
+| DRAG-001 | Dropping files onto the grid shall insert their paths at the shell prompt, quoted for the receiving shell family (Git Bash, PowerShell, CMD, WSL). | P1 |
+| DRAG-002 | Dropping folders onto the tab bar shall open one new tab per folder in that directory. | P1 |
+| DRAG-003 | The drop shall use the target tab's profile (quoting rules and cloned cwd), not a hard-coded shell. | P1 |
+| IDENT-001 | A session whose OSC 7 host is not this machine shall be labelled (tab title suffix " @host" and UIA tab HelpText " · host:"); local and unknown sessions shall show nothing, and the app shall never guess identity from prompt text. | P1 |
+
 ---
 
 # 10. Non-Functional Requirements
