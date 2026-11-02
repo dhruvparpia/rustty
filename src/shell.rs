@@ -6,6 +6,7 @@
 //! inert stub so `cargo test` stays cross-platform.
 
 use std::collections::BTreeMap;
+#[cfg(windows)]
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;

@@ -3,6 +3,10 @@
 Release plan derived from [`docs/SPEC.md`](docs/SPEC.md) (sections 24–27).
 Versions ship in order; features move down only by explicit decision.
 
+The owner-approved next-work sequence is recorded in
+[Post-v0.5 — Daily-driver excellence and project workflows](#post-v05--daily-driver-excellence-and-project-workflows)
+and [master backlog #45](https://github.com/dhruvparpia/rusttyterm/issues/45).
+
 ## v0.1 — MVP (target: 2026-12-31 → 2027-Q1)
 
 A native Windows terminal that developers use daily.
@@ -66,6 +70,65 @@ terminal capability parity.
 | Mobile / tablet | Design phase done: [`docs/design-mobile-tablet.md`](docs/design-mobile-tablet.md); implementation not scheduled |
 | Windows ARM64 | Done 2026-11-02: cross-check gate in CI; ARM64 release ZIP ships with the v0.5 packaging |
 | macOS backend | Open — no committed date |
+
+## Post-v0.5 — Daily-driver excellence and project workflows
+
+Approved 2026-11-02. Build an exceptional native Windows terminal for managing
+an entire development project: reliable sessions, reusable workspaces,
+command-aware output and first-class Windows integration. Preserve native UI,
+local-first operation, portable support and no telemetry.
+
+These are planned stages, not shipped features or new version/date commitments.
+[Master backlog #45](https://github.com/dhruvparpia/rusttyterm/issues/45) tracks
+execution; linked issues contain acceptance criteria and dependencies. Reconcile
+new behavior and configuration schemas with `docs/SPEC.md` before implementation.
+
+### Stage 0 — Daily-driver reliability
+
+| Work | Deliverable | Tracking |
+|---|---|---|
+| Compatibility and recovery gates | Repeatable Windows matrix for PowerShell, Git Bash, WSL, SSH, Neovim, tmux, fzf and interactive coding-agent CLIs; Unicode, IME, AltGr, clipboard, resize, mixed DPI, background exits, sleep/wake and graphics recovery | [#36](https://github.com/dhruvparpia/rusttyterm/issues/36) |
+| Correctness and responsiveness | Triage existing defects; prioritize session identity, terminal replies, content preservation, rendering and resource/lifecycle correctness; measure input latency, startup, memory/handles and sustained output | Individual bug issues, coordinated by [#36](https://github.com/dhruvparpia/rusttyterm/issues/36) |
+
+Record actual desktop results separately from portable tests and cross-compilation.
+Compare damage-only rendering against full-frame references and exercise protocol
+chunk boundaries. Security remediation remains in the private advisory workflow.
+
+### Stage 1 — Discoverability and project workflows
+
+| Feature | First deliverables | Tracking |
+|---|---|---|
+| Native command palette | Fuzzy action/profile/tab search, shortcut discovery and conflict diagnostics; shared action registry, then pane/theme/settings/workspace providers | [#39](https://github.com/dhruvparpia/rusttyterm/issues/39) |
+| Named project workspaces | Save/open reusable tab and pane layouts with profiles, directories and focus; templates independent of last-session restore; explicit startup tasks and Jump List/CLI entry points | [#37](https://github.com/dhruvparpia/rusttyterm/issues/37) |
+| Links and editor navigation | OSC 8, diagnostic file:line:column links, configured editor launch and keyboard hints; correct Unicode, quoting and cwd resolution | [#41](https://github.com/dhruvparpia/rusttyterm/issues/41) |
+| Windows development workflows | WSL/PowerShell/Visual Studio shell discovery, Open terminal here, shell-aware file drag/drop and clear Windows/WSL/remote session identity | [#40](https://github.com/dhruvparpia/rusttyterm/issues/40) |
+
+The initial palette can ship while workspace storage is designed. Fix cwd and
+session-identity defects before building launch/navigation workflows on them.
+
+### Stage 2 — Understand and navigate output
+
+| Feature | First deliverables | Tracking |
+|---|---|---|
+| Command-aware scrollback | Opt-in OSC 7/133 integration, bounded command metadata, previous/next command, copy/search/export command output, duration/exit status and background completion notifications | [#38](https://github.com/dhruvparpia/rusttyterm/issues/38) |
+| Large-output mode | Incremental cancellable search with context, follow-output control, stable bookmarks and streaming export; optional disk-backed history with explicit retention and disk-full behavior | [#42](https://github.com/dhruvparpia/rusttyterm/issues/42) |
+
+Share stable history anchors between command metadata, search and bookmarks.
+Deliver responsive in-memory navigation before adding disk-backed storage. Shell
+integration stays explicit and opt-in, consistent with the existing spec.
+
+### Stage 3 — Persistent sessions and automation
+
+| Feature | First deliverables | Tracking |
+|---|---|---|
+| Persistent running sessions | Architecture spike, then detach/reattach and UI crash recovery; explicit close-view versus terminate-session behavior and bounded detached output | [#43](https://github.com/dhruvparpia/rusttyterm/issues/43) |
+| Local automation API / CLI / MCP | Stable window/tab/pane/session IDs, versioned operations, structured lifecycle/completion events and streamed capture; MCP adapter over the same API | [#44](https://github.com/dhruvparpia/rusttyterm/issues/44) |
+
+Persistent sessions retain live processes; current session restore respawns them.
+Resolve lifecycle/backpressure behavior before implementing persistence. Design
+stable IDs early; useful local automation over live windows can ship before a
+persistent-session host. Reuse the capability model in
+[`docs/design-plugins-mcp.md`](docs/design-plugins-mcp.md).
 
 ## Performance budgets (all versions)
 
