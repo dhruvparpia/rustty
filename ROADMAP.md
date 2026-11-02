@@ -121,8 +121,8 @@ integration stays explicit and opt-in, consistent with the existing spec.
 
 | Feature | First deliverables | Tracking |
 |---|---|---|
-| Persistent running sessions / console attach | `rusttyterm --attach <n>` connects from another console to the same live PTY; session discovery, headless creation, detach/reattach, GUI views, read-only watchers, explicit control transfer and bounded recovery | [#43](https://github.com/dhruvparpia/rusttyterm/issues/43), [attach design](docs/design-session-attach.md) |
-| Local automation API / CLI / MCP | Stable window/tab/pane/session IDs, versioned operations, structured lifecycle/completion events and streamed capture; MCP adapter over the same API | [#44](https://github.com/dhruvparpia/rusttyterm/issues/44) |
+| Persistent running sessions / console attach | `rusttyterm --attach <n>` connects from another console to the same live PTY; session discovery, headless creation, detach/reattach, GUI views, read-only watchers, explicit control transfer and bounded recovery; host ADR settled in [design-session-host.md](docs/design-session-host.md) | [#43](https://github.com/dhruvparpia/rusttyterm/issues/43), [attach design](docs/design-session-attach.md) |
+| Local automation API / CLI / MCP | Stable window/tab/pane/session IDs, versioned operations, structured lifecycle/completion events and streamed capture; MCP adapter over the same API; ADR in [design-automation-api.md](docs/design-automation-api.md) | [#44](https://github.com/dhruvparpia/rusttyterm/issues/44) |
 
 Persistent sessions retain live processes; current session restore respawns them.
 Resolve lifecycle/backpressure behavior before implementing persistence. Design
