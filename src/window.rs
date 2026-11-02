@@ -190,6 +190,9 @@ const MENU_WS_OVERWRITE: usize = 0xE852;
 const MENU_WS_RENAME: usize = 0xE853;
 /// Command palette (issue #39).
 const MENU_PALETTE: usize = 0xE854;
+/// OSC 8 link under the pointer: open / copy target (issue #41).
+const MENU_OPEN_LINK: usize = 0xE855;
+const MENU_COPY_LINK: usize = 0xE856;
 /// Workspaces submenu: "Open <name>" items (WORKSPACE-003), one per
 /// template, capped by the store's own 64-template limit.
 const MENU_WS_OPEN_BASE: usize = 0xF200;
@@ -669,6 +672,16 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         MENU_FULLSCREEN => toggle_fullscreen(hwnd),
         MENU_COPY => copy_screen(hwnd),
         MENU_PASTE => paste_clipboard(hwnd),
+        MENU_OPEN_LINK => {
+            if let Some(uri) = state_mut(hwnd).and_then(|s| s.link_target.take()) {
+                open_link(hwnd, &uri);
+            }
+        }
+        MENU_COPY_LINK => {
+            if let Some(uri) = state_mut(hwnd).and_then(|s| s.link_target.take()) {
+                let _ = clipboard::set_text(&uri);
+            }
+        }
         MENU_NEXT_TAB => switch_tab_rel(hwnd, 1),
         MENU_PREV_TAB => switch_tab_rel(hwnd, -1),
         MENU_MINIMIZE => unsafe {
@@ -1164,6 +1177,9 @@ struct WindowState {
     /// detect double clicks the system does not coalesce into
     /// `WM_LBUTTONDBLCLK` (injected/synthesized input never coalesces).
     last_click: Option<(usize, usize, i64)>,
+    /// OSC 8 link URI under the pointer when the context menu was opened;
+    /// the Open/Copy Link menu items consume it (issue #41).
+    link_target: Option<String>,
     /// Set when an app key binding consumed a `WM_KEYDOWN`; the matching
     /// `WM_CHAR` Windows posts afterwards must not reach the PTY.
     suppress_char: bool,
@@ -1983,6 +1999,7 @@ fn create_quick_window() {
         timer_id: 0,
         drag_anchor: None,
         last_click: None,
+        link_target: None,
         suppress_char: false,
         pending_surrogate: None,
         fullscreen: None,
@@ -3285,6 +3302,45 @@ fn mouse_cell(hwnd: HWND, lparam: LPARAM) -> Option<(usize, usize, usize)> {
     state_ref(hwnd).and_then(|s| cell_at(s, x, y, height))
 }
 
+/// OSC 8 link target of grid cell (`view_row`, `col`) in pane `idx`
+/// (view coordinates); `None` for non-link cells and for targets
+/// evicted from the parser's bounded URI table (issue #41).
+fn link_uri_at(hwnd: HWND, idx: usize, view_row: usize, col: usize) -> Option<String> {
+    state_ref(hwnd).and_then(|s| {
+        let pane = s.app.active_tab()?.pane_at(idx)?;
+        let id = pane.grid().row(view_row)?.cells.get(col)?.link;
+        (id != 0)
+            .then(|| pane.parser().link_uri(id).map(str::to_string))
+            .flatten()
+    })
+}
+
+/// SEC-004: only `http`/`https` targets open automatically; everything
+/// else (file:, mailto:, evicted) is copy-only.
+fn openable_uri(uri: &str) -> bool {
+    uri.starts_with("http://") || uri.starts_with("https://")
+}
+
+/// SEC-003: this runs only from an explicit Ctrl+click or the context
+/// menu's Open Link, never from output.
+fn open_link(hwnd: HWND, uri: &str) {
+    if !openable_uri(uri) {
+        return;
+    }
+    let op = wstr("open");
+    let url: Vec<u16> = uri.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let _ = ShellExecuteW(
+            Some(hwnd),
+            PCWSTR(op.as_ptr()),
+            PCWSTR(url.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOW,
+        );
+    }
+}
+
 fn handle_rbutton_down(hwnd: HWND, lparam: LPARAM) {
     if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
         && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
@@ -3334,11 +3390,32 @@ fn handle_context_menu(hwnd: HWND, lparam: LPARAM) {
             _ => {}
         }
     }
+    // Issue #41: OSC 8 link under the pointer gets Open/Copy Link items.
+    let link_uri = {
+        let lp = LPARAM((((cpt.y as u32 & 0xFFFF) << 16) | (cpt.x as u32 & 0xFFFF)) as isize);
+        let (x, y) = cursor_dips(hwnd, lp);
+        state_ref(hwnd).and_then(|s| {
+            let (idx, row, col) = cell_at(s, x, y, client_height_dips(hwnd))?;
+            let pane = s.app.active_tab()?.pane_at(idx)?;
+            let id = pane.grid().row(row)?.cells.get(col)?.link;
+            if id == 0 {
+                return None;
+            }
+            pane.parser().link_uri(id).map(str::to_string)
+        })
+    };
     unsafe {
         let menu = match CreatePopupMenu() {
             Ok(m) => m,
             Err(_) => return,
         };
+        if let Some(uri) = &link_uri {
+            let _ = append_menu_item(menu, "Copy Link", MENU_COPY_LINK);
+            if openable_uri(uri) {
+                let _ = append_menu_item(menu, "Open Link	Ctrl+Click", MENU_OPEN_LINK);
+            }
+            let _ = append_menu_separator(menu);
+        }
         let _ = append_menu_item(menu, "Copy	Ctrl+Shift+C", MENU_COPY);
         let _ = append_menu_item(menu, "Paste	Ctrl+Shift+V", MENU_PASTE);
         let _ = append_menu_separator(menu);
@@ -3348,7 +3425,16 @@ fn handle_context_menu(hwnd: HWND, lparam: LPARAM) {
         let _ = append_menu_separator(menu);
         let _ = append_menu_item(menu, "New Tab	Ctrl+Shift+T", MENU_NEW_TAB);
         let _ = append_menu_item(menu, "Close Tab	Ctrl+Shift+W", MENU_CLOSE_TAB);
+        if let Some(uri) = link_uri
+            && let Some(s) = state_mut(hwnd)
+        {
+            s.link_target = Some(uri);
+        }
         let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, None, hwnd, None);
+        // Menu dismissed with no Open/Copy selection: drop the target.
+        if let Some(s) = state_mut(hwnd) {
+            s.link_target = None;
+        }
         let _ = DestroyMenu(menu);
     }
 }
@@ -3473,9 +3559,12 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
     let anchor = state_ref(hwnd).and_then(|s| {
         let (idx, row, col) = cell_at(s, x, y, height)?;
         let abs = abs_row_in_pane(s, idx, row);
-        Some((Pos { row: abs, col }, idx))
+        Some((idx, row, col, abs))
     });
-    let Some((a, idx)) = anchor else { return };
+    let Some((idx, view_row, col, abs)) = anchor else {
+        return;
+    };
+    let a = Pos { row: abs, col };
     // Clicking a pane focuses it (SPLIT-003); the keystrokes and the
     // follow-up selection drag then belong to that pane.
     if let Some(s) = state_mut(hwnd) {
@@ -3483,6 +3572,14 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
     }
     if state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off) {
         send_mouse_report(hwnd, idx, a.row, a.col, 0, false, false);
+        return;
+    }
+    // Issue #41: Ctrl+click on an OSC 8 link opens the target (SEC-003:
+    // explicit user interaction); no selection is started.
+    if unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0
+        && let Some(uri) = link_uri_at(hwnd, idx, view_row, col)
+    {
+        open_link(hwnd, &uri);
         return;
     }
     // Synthetic double-click detection: the system coalesces real mouse
@@ -3690,6 +3787,27 @@ fn handle_lbutton_up(hwnd: HWND, lparam: LPARAM) {
         send_mouse_report(hwnd, idx, row, col, 0, true, false);
     }
     let _ = unsafe { ReleaseCapture() };
+    let (x, y) = cursor_dips(hwnd, lparam);
+    let copy_link = state_ref(hwnd).and_then(|s| {
+        // Issue #41: a plain click (no drag) on an OSC 8 link copies its
+        // target. The drag anchor is still set here, so a real selection
+        // drag is excluded by the cell-equality check.
+        let _ = s.drag_anchor?; // a real click armed the drag anchor
+        let (idx, row, col) = cell_at(s, x, y, client_height_dips(hwnd))?;
+        let end = s.app.active_tab()?.pane_at(idx)?.selection()?.end;
+        if end.row != abs_row_in_pane(s, idx, row) || end.col != col {
+            return None; // a drag ended elsewhere; not a plain click
+        }
+        let pane = s.app.active_tab()?.pane_at(idx)?;
+        let id = pane.grid().row(row)?.cells.get(col)?.link;
+        if id == 0 {
+            return None;
+        }
+        pane.parser().link_uri(id).map(str::to_string)
+    });
+    if let Some(uri) = copy_link {
+        let _ = clipboard::set_text(&uri);
+    }
     if let Some(s) = state_mut(hwnd) {
         s.drag_anchor = None;
         s.tab_drag = None;
@@ -4931,6 +5049,7 @@ pub fn run(
         timer_id: 0,
         drag_anchor: None,
         last_click: None,
+        link_target: None,
         suppress_char: false,
         pending_surrogate: None,
         fullscreen: None,

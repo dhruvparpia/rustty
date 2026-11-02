@@ -21,6 +21,10 @@ pub struct Cell {
     pub bg: Option<Color>,
     /// Active SGR attributes
     pub attributes: CellAttribute,
+    /// OSC 8 hyperlink id into the parser's URI table; `0` means no link.
+    /// The id travels with the cell through scrollback, selection and
+    /// resize for free (issue #41).
+    pub link: u32,
 }
 
 impl Cell {
@@ -31,6 +35,7 @@ impl Cell {
             fg: None,
             bg: None,
             attributes: CellAttribute::empty(),
+            link: 0,
         }
     }
 }
@@ -1104,10 +1109,28 @@ mod tests {
             fg: Some(Color::rgb(255, 0, 0)),
             bg: None,
             attributes: CellAttribute::BOLD,
+            ..Cell::blank()
         };
         grid.write_cell(4, 10, cell.clone());
         let line = grid.row(4).unwrap();
         assert_eq!(line.cells[10], cell);
+    }
+
+    #[test]
+    fn test_link_id_survives_scrollback_eviction() {
+        let mut grid = Grid::with_size(8, 4, 10);
+        let linked = Cell {
+            char: 'L',
+            link: 7,
+            ..Cell::blank()
+        };
+        grid.write_cell(0, 0, linked);
+        // Push the top row into scrollback, then scroll the view up to it.
+        grid.scroll_region_up(0, 3);
+        grid.scroll_up(1);
+        let row = grid.row(0).unwrap();
+        assert_eq!(row.cells[0].char, 'L');
+        assert_eq!(row.cells[0].link, 7);
     }
 
     #[test]

@@ -35,6 +35,8 @@ pub struct Theme {
     pub split_border: Color,
     /// Border of the focused split pane (SPLIT-015).
     pub split_focus: Color,
+    /// OSC 8 hyperlink text color (issue #41, SEC-022).
+    pub link: Color,
     /// ANSI-16 palette (indices 0..=15).
     pub palette: [Color; 16],
 }
@@ -64,6 +66,7 @@ impl Theme {
             tab_active: Color::from_hex(0x3A3646),
             split_border: Color::from_hex(0x4C465C),
             split_focus: Color::from_hex(0x61C0FF),
+            link: Color::from_hex(0x61C0FF),
             palette: ansi_palette(),
         }
     }
@@ -82,6 +85,7 @@ impl Theme {
             tab_active: Color::from_hex(0xEAE3C9),
             split_border: Color::from_hex(0xEAE3C9),
             split_focus: Color::from_hex(0x268BD2),
+            link: Color::from_hex(0x268BD2),
             palette: [
                 Color::from_hex(0x93A1A1),
                 Color::from_hex(0xDC322F),
@@ -152,6 +156,7 @@ impl Theme {
             tab_active: Color::from_hex(0x313244),
             split_border: Color::from_hex(0x45475A),
             split_focus: Color::from_hex(0xF5E0DC),
+            link: Color::from_hex(0x89B4FA),
             palette: [
                 Color::from_hex(0x45475A),
                 Color::from_hex(0xF38BA8),
@@ -187,6 +192,7 @@ impl Theme {
             tab_active: Color::from_hex(0x3C3836),
             split_border: Color::from_hex(0x504945),
             split_focus: Color::from_hex(0xEBDBB2),
+            link: Color::from_hex(0x83A598),
             palette: [
                 Color::from_hex(0x282828),
                 Color::from_hex(0xCC241D),
@@ -222,6 +228,7 @@ impl Theme {
             tab_active: Color::from_hex(0x3E4451),
             split_border: Color::from_hex(0x3E4451),
             split_focus: Color::from_hex(0x528BFF),
+            link: Color::from_hex(0x61AFEF),
             palette: [
                 Color::from_hex(0x282C34),
                 Color::from_hex(0xE06C75),
@@ -257,6 +264,7 @@ impl Theme {
             tab_active: Color::from_hex(0x073642),
             split_border: Color::from_hex(0x073642),
             split_focus: Color::from_hex(0x93A1A1),
+            link: Color::from_hex(0x268BD2),
             palette: [
                 Color::from_hex(0x002B36),
                 Color::from_hex(0xDC322F),
@@ -330,6 +338,7 @@ impl Theme {
         apply("tab-active", &file.tab_active, &mut self.tab_active);
         apply("split-border", &file.split_border, &mut self.split_border);
         apply("split-focus", &file.split_focus, &mut self.split_focus);
+        apply("link", &file.link, &mut self.link);
         if let Some(palette) = &file.palette {
             // THEME-013: the palette is all-or-nothing, a short list would
             // silently repaint one ANSI color of the preset.
@@ -398,6 +407,8 @@ pub struct ThemeFile {
     pub split_border: Option<String>,
     /// Focused split pane border.
     pub split_focus: Option<String>,
+    /// OSC 8 hyperlink text color (issue #41).
+    pub link: Option<String>,
     /// ANSI-16 palette, 16 `#RRGGBB` strings.
     pub palette: Option<Vec<String>>,
 }

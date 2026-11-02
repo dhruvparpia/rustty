@@ -6,10 +6,14 @@
 //! buffered across [`Parser::advance`] calls, which is why ConPTY bytes must
 //! reach it byte-for-byte (see `conpty.rs`).
 //!
-//! Out of MVP scope (spec §4): OSC 8 hyperlinks (payload consumed, so link
-//! text is swallowed), OSC 4/10/11 palette writes, OSC 52 clipboard,
-//! soft reset (`CSI !p`). Mouse tracking is decoded for reporting modes
-//! `1000`, `1002`, `1003`, `1006`, and `1015` (MOUSE-009..012).
+//! Out of MVP scope (spec §4): OSC 4/10/11 palette writes, OSC 52
+//! clipboard, soft reset (`CSI !p`). Mouse tracking is decoded for
+//! reporting modes `1000`, `1002`, `1003`, `1006`, and `1015`
+//! (MOUSE-009..012). OSC 8 hyperlinks are supported (issue #41): the
+//! link id rides in each cell, and the URI lives in a bounded table
+//! owned by this parser.
+
+use std::collections::HashMap;
 
 use crate::color::{Color, ansi_palette};
 use crate::graphics::{GraphicsAction, parse_kitty};
@@ -33,6 +37,9 @@ pub enum ParserEvent {
     /// OSC 7: the shell reports its working directory
     /// (`file://host/path`, percent-encoded).
     Cwd(String),
+    /// OSC 8: the hyperlink pen opened (`Some(uri)`) or closed
+    /// (`None`) (issue #41, PARSER-028).
+    Hyperlink(Option<String>),
     /// OSC 133;A: the shell is sitting at a prompt.
     PromptStart,
     /// OSC 133;B: a command was accepted and is about to run.
@@ -141,8 +148,22 @@ pub struct Parser {
     pen_fg: Option<Color>,
     pen_bg: Option<Color>,
     pen_attrs: CellAttribute,
+    /// OSC 8 link pen: id into `link_uris`, `0` when no link is open.
+    pen_link: u32,
+    /// OSC 8 URI table; id = index + 1, so id `0` means "no link".
+    /// Bounded: past `LINK_CAP` new URIs get no target (their cells
+    /// render as links with nothing to open/copy); already-interned
+    /// targets keep working.
+    link_uris: Vec<String>,
+    link_ids: HashMap<String, u32>,
     wrap_pending: bool,
 }
+
+/// OSC 8 URI table size limit (issue #41). Typical panes open a handful
+/// of links; refusing new targets past this bound keeps memory flat
+/// against a hostile stream. shortcut: new links die at the cap,
+/// upgrade to LRU eviction if a real workload ever hits it.
+pub(crate) const LINK_CAP: usize = 1024;
 
 impl Parser {
     /// Create a parser with default terminal state (visible cursor,
@@ -173,6 +194,9 @@ impl Parser {
             pen_fg: None,
             pen_bg: None,
             pen_attrs: CellAttribute::empty(),
+            pen_link: 0,
+            link_uris: Vec::new(),
+            link_ids: HashMap::new(),
             wrap_pending: false,
         }
     }
@@ -442,6 +466,34 @@ impl Parser {
         *self = Self::new();
     }
 
+    /// The OSC 8 URI a cell's link id points to, `None` if the target
+    /// was evicted by the table cap (issue #41).
+    #[must_use]
+    pub fn link_uri(&self, id: u32) -> Option<&str> {
+        if id == 0 {
+            return None;
+        }
+        self.link_uris
+            .get(usize::try_from(id - 1).ok()?)
+            .map(String::as_str)
+    }
+
+    /// Intern an OSC 8 URI, returning its stable id. Empty URIs are the
+    /// caller's job (they close the link). Past the cap the id is a
+    /// sentinel with no target (SEC-004: unbounded streams stay bounded).
+    fn intern_link(&mut self, uri: &str) -> u32 {
+        if let Some(&id) = self.link_ids.get(uri) {
+            return id;
+        }
+        if self.link_uris.len() >= LINK_CAP {
+            return u32::MAX;
+        }
+        let id = u32::try_from(self.link_uris.len() + 1).unwrap_or(1);
+        self.link_uris.push(uri.to_string());
+        self.link_ids.insert(uri.to_string(), id);
+        id
+    }
+
     fn begin_csi(&mut self) {
         self.params.clear();
         self.private.clear();
@@ -515,6 +567,7 @@ impl Parser {
             fg: self.pen_fg,
             bg: self.pen_bg,
             attributes: self.pen_attrs,
+            link: self.pen_link,
         };
         grid.write_cell(self.cursor_row, self.cursor_col, cell);
         if self.cursor_col + 1 < cols {
@@ -584,6 +637,20 @@ impl Parser {
             match prefix {
                 "0" | "1" | "2" => events.push(ParserEvent::Title(rest.to_string())),
                 "7" => events.push(ParserEvent::Cwd(rest.to_string())),
+                "8" => {
+                    // OSC 8 `params;uri`; params (`id=`) are ignored. An
+                    // empty URI closes the link. The target is stored as
+                    // sent; validation happens at open time (SEC-004).
+                    let uri = rest.split_once(';').map_or("", |(_, u)| u);
+                    if uri.is_empty() {
+                        self.pen_link = 0;
+                        events.push(ParserEvent::Hyperlink(None));
+                    } else {
+                        let id = self.intern_link(uri);
+                        self.pen_link = id;
+                        events.push(ParserEvent::Hyperlink(Some(uri.to_string())));
+                    }
+                }
                 "133" => {
                     let (marker, code) = match rest.split_once(':') {
                         Some((m, c)) => (m, c.parse().ok()),
@@ -995,6 +1062,8 @@ impl Parser {
                     self.pen_fg = None;
                     self.pen_bg = None;
                     self.pen_attrs = CellAttribute::empty();
+                    // RST closes an open OSC 8 link (issue #41).
+                    self.pen_link = 0;
                 }
                 1 => self.pen_attrs = self.pen_attrs | CellAttribute::BOLD,
                 2 => self.pen_attrs = self.pen_attrs | CellAttribute::DIM,

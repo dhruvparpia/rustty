@@ -560,4 +560,117 @@ mod tests {
             }
         }
     }
+
+    // Issue #41: OSC 8 hyperlinks. `ESC ] 8 ; params ; uri ST`.
+
+    #[test]
+    fn osc8_cells_carry_link_id() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        feed(
+            &mut p,
+            &mut g,
+            "\x1b]8;;https://example.com\x1b\\click\x1b]8;;\x1b\\!",
+        );
+        assert_eq!(g.line_text(0).unwrap(), "click!");
+        for col in 0..5 {
+            let id = cell(&g, 0, col).link;
+            assert!(id != 0, "col {col} should carry a link id");
+            assert_eq!(p.link_uri(id), Some("https://example.com"));
+        }
+        assert_eq!(cell(&g, 0, 5).link, 0);
+    }
+
+    #[test]
+    fn osc8_params_ignored_empty_uri_closes() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        feed(
+            &mut p,
+            &mut g,
+            "\x1b]8;id=1;https://a\x1b\\x\x1b]8;;\x1b\\y",
+        );
+        let id = cell(&g, 0, 0).link;
+        assert_eq!(p.link_uri(id), Some("https://a"));
+        assert_eq!(cell(&g, 0, 1).link, 0);
+    }
+
+    #[test]
+    fn osc8_sgr_reset_closes_link() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        feed(&mut p, &mut g, "\x1b]8;;https://a\x1b\\\x1b[0mx");
+        assert_eq!(cell(&g, 0, 0).link, 0);
+    }
+
+    #[test]
+    fn osc8_same_uri_reuses_id() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        feed(
+            &mut p,
+            &mut g,
+            "\x1b]8;;https://a\x1b\\one\x1b]8;;\x1b\\ \x1b]8;;https://a\x1b\\two",
+        );
+        assert_eq!(cell(&g, 0, 0).link, cell(&g, 0, 5).link);
+    }
+
+    #[test]
+    fn osc8_open_close_events() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        let events = feed(&mut p, &mut g, "\x1b]8;;https://a\x1b\\x\x1b]8;;\x1b\\");
+        assert!(events.contains(&ParserEvent::Hyperlink(Some("https://a".into()))));
+        assert!(events.contains(&ParserEvent::Hyperlink(None)));
+    }
+
+    #[test]
+    fn osc8_wrapped_link_spans_rows() {
+        let mut p = Parser::new();
+        let mut g = grid(); // width 10
+        feed(&mut p, &mut g, "\x1b]8;;https://a\x1b\\0123456789ab");
+        for row in 0..2 {
+            for col in 0..10 {
+                if row == 1 && col > 1 {
+                    break;
+                }
+                assert_eq!(cell(&g, row, col).link, cell(&g, 0, 0).link);
+            }
+        }
+    }
+
+    #[test]
+    fn osc8_cap_bounds_the_table() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        // Write every `x` into the same cell (CUP first) so there is no
+        // wrap, no scroll, and exactly one id to read per round.
+        for i in 0..(LINK_CAP + 1) {
+            feed(
+                &mut p,
+                &mut g,
+                &format!("\x1b[1;1H\x1b]8;;https://u{i}\x1b\\x\x1b]8;;\x1b\\"),
+            );
+            let id = g.row(0).unwrap().cells[0].link;
+            if i < LINK_CAP {
+                assert_eq!(
+                    p.link_uri(id),
+                    Some(format!("https://u{i}").as_str()),
+                    "uri #{i}"
+                );
+            } else {
+                assert_eq!(p.link_uri(id), None, "uri past the cap has no target");
+            }
+        }
+    }
+
+    #[test]
+    fn osc8_malformed_is_harmless() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        // No URI part, and an OSC 8 inside a C1 string: text prints, no link.
+        feed(&mut p, &mut g, "\x1b]8;;\x1b\\ok");
+        assert_eq!(g.line_text(0).unwrap(), "ok");
+        assert_eq!(cell(&g, 0, 0).link, 0);
+    }
 }

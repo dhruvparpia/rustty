@@ -192,6 +192,8 @@ fn run_captured(program: &str, args: &[&str], timeout_secs: u64) -> Option<Vec<u
         .flatten()
 }
 
+/// Non-Windows: discovery is Windows-only (registry drive lookup), so
+/// this yields nothing (DISCOVERY-001).
 #[cfg(not(windows))]
 #[must_use]
 pub fn discover() -> Vec<Found> {

@@ -620,6 +620,9 @@ impl Pane {
                 match event {
                     ParserEvent::Title(title) => self.title = Some(title),
                     ParserEvent::Cwd(url) => self.record_cwd(&url),
+                    // The parser owns the link pen and the URI table; the
+                    // renderer and window layer read them on demand.
+                    ParserEvent::Hyperlink(_) => {}
                     ParserEvent::Bell => self.bell = true,
                     ParserEvent::PromptStart => {
                         self.at_prompt = true;

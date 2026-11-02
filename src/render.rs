@@ -2013,7 +2013,14 @@ impl Renderer {
     }
 
     fn effective_colors(cell: &Cell, theme: &Theme) -> (Color, Color) {
-        let fg = cell.fg.unwrap_or(theme.foreground);
+        // OSC 8 cells take the theme link colour unless the shell styled
+        // the foreground itself (issue #41, SEC-022: only real OSC 8
+        // links are painted as links).
+        let fg = match cell.fg {
+            Some(c) => c,
+            None if cell.link != 0 => theme.link,
+            None => theme.foreground,
+        };
         let bg = cell.bg.unwrap_or(theme.background);
         if cell.attributes.contains(CellAttribute::INVERSE) {
             (bg, fg)
@@ -2180,7 +2187,7 @@ impl Renderer {
             let (fg, _) = Self::effective_colors(cell, theme);
             let left = left0 + x as f32 * cw;
             let right = left + cw;
-            if cell.attributes.contains(CellAttribute::UNDERLINE) {
+            if cell.attributes.contains(CellAttribute::UNDERLINE) || cell.link != 0 {
                 let yline = top + ch - 1.0;
                 self.stroke_line(left, yline, right, yline, fg);
             }
