@@ -6,6 +6,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-02
+
+The v0.2–v0.5 features accumulated here (those milestones were tagged as
+plain commits); this is the first release whose tag and `Cargo.toml`
+version agree.
+
 ### Added
 - Repository scaffold: MIT license, README, CONTRIBUTING, SECURITY, ROADMAP, CI
   (fmt/clippy/test on `windows-latest`), full product spec in `docs/SPEC.md`.
@@ -173,6 +179,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - 6-bit SGR graphics (the block-character "sixel" look from `ls --color`
   charts and ANSI art) needed no work: SGR 256-colour cells and the Unicode
   block characters already render, so those programs just work.
+- Design-phase documents for the last v0.5 ecosystem items:
+  `docs/design-plugins-mcp.md` (plugins as out-of-process MCP servers with
+  per-capability grants) and `docs/design-mobile-tablet.md` (adaptive
+  touch input for Windows on ARM). Design only; no implementation
+  scheduled.
 
 ### Fixed
 

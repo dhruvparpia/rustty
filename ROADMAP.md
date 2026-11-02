@@ -61,10 +61,10 @@ terminal capability parity.
 
 | Feature | Status |
 |---|---|
-| Graphics protocols (kitty, 6bit SGR) | Planned |
-| Plugin system / MCP | Planned — design phase only |
-| Mobile / tablet | Planned — design phase only |
-| Windows ARM64 | Planned |
+| Graphics protocols (kitty, 6bit SGR) | Done 2026-11-02: kitty subset (transmit/put/delete/query, PNG/JPEG via WIC); 6bit SGR renders as text (SGR 256 + block chars) |
+| Plugin system / MCP | Design phase done: [`docs/design-plugins-mcp.md`](docs/design-plugins-mcp.md); implementation not scheduled |
+| Mobile / tablet | Design phase done: [`docs/design-mobile-tablet.md`](docs/design-mobile-tablet.md); implementation not scheduled |
+| Windows ARM64 | Done 2026-11-02: cross-check gate in CI; ARM64 release ZIP ships with the v0.5 packaging |
 | macOS backend | Open — no committed date |
 
 ## Performance budgets (all versions)

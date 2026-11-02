@@ -3,6 +3,8 @@
 | File | Purpose |
 |---|---|
 | [`SPEC.md`](SPEC.md) | The full product specification / SRS (source of truth) |
+| [`design-plugins-mcp.md`](design-plugins-mcp.md) | Plugin system / MCP design (roadmap v0.5, design phase only) |
+| [`design-mobile-tablet.md`](design-mobile-tablet.md) | Mobile / tablet design (roadmap v0.5, design phase only) |
 
 Conventions (spec §31):
 
