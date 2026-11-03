@@ -4,16 +4,20 @@ All notable changes to `rusttyterm` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.1] - 2026-11-03
-
-Compatible repair line; `v0.5.0` remains immutable and is not moved.
-
 ## [0.6.0] - unreleased feature work
 
 ### Added
 
 - Session browser slice (#88): palette rows list live and exited host sessions with profile, cwd,
   controller/watcher counts, status, and a disabled reason for exited targets.
+- Project task runner slice (#89): `tasks.toml` schema, dependency validation, palette Run/Stop/Restart
+  actions, host explicit program/args, and canonical `task#<id> <name>` session labels.
+- Palette providers slice (#93): focus pane, open saved workspace, and switch theme rows reuse the
+  shared action registry. Settings navigation waits for the #91 editor destination.
+
+## [0.5.1] - 2026-11-03
+
+Compatible repair line; `v0.5.0` remains immutable and is not moved.
 
 
 ### Added

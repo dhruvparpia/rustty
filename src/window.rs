@@ -107,6 +107,7 @@ use crate::selection::{Pos, Selection};
 use crate::shell::{ShellFamily, SpawnOptions, quote_for_drop, shell_family};
 use crate::split::{Dir, Rect, Side};
 use crate::tabbar::TAB_BAR_HEIGHT;
+use crate::tasks::Task;
 use crate::theme::{self, Theme};
 use crate::uia::{DipRect, Provider};
 
@@ -3340,6 +3341,33 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             command: Command::NewTabProfile(idx),
         });
     }
+    let active_view = s
+        .app
+        .active_tab()
+        .is_some_and(|tab| tab.pane().view_alias().is_some());
+    if active_view {
+        items.push(PaletteItem {
+            label: "Detach View (close tab, shell stays running)".to_string(),
+            group: "Sessions",
+            shortcut: None,
+            disabled_reason: None,
+            command: Command::DetachView,
+        });
+        items.push(PaletteItem {
+            label: "Take Control of View".to_string(),
+            group: "Sessions",
+            shortcut: None,
+            disabled_reason: None,
+            command: Command::TakeControlView,
+        });
+        items.push(PaletteItem {
+            label: "Terminate Session (kills the shell)".to_string(),
+            group: "Sessions",
+            shortcut: None,
+            disabled_reason: None,
+            command: Command::TerminateView,
+        });
+    }
     for rec in session_records() {
         let alias = rec
             .get("alias")
@@ -3390,6 +3418,88 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             shortcut: None,
             disabled_reason: disabled,
             command: Command::AttachSession(u32::try_from(alias).unwrap_or(0)),
+        });
+    }
+    for task in crate::tasks::tasks() {
+        let live = session_records().iter().any(|rec| {
+            rec.get("state").and_then(serde_json::Value::as_str) == Some("live")
+                && rec
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|n| n == task.session_label())
+        });
+        items.push(PaletteItem {
+            label: format!("Run Task {}: {}", task.id, task.name).to_string(),
+            group: "Tasks",
+            shortcut: None,
+            disabled_reason: None,
+            command: Command::RunTask(task.id),
+        });
+        items.push(PaletteItem {
+            label: format!("Stop Task {}: {}", task.id, task.name).to_string(),
+            group: "Tasks",
+            shortcut: None,
+            disabled_reason: if live {
+                None
+            } else {
+                Some("task is not live".to_string())
+            },
+            command: Command::StopTask(task.id),
+        });
+        items.push(PaletteItem {
+            label: format!("Restart Task {}: {}", task.id, task.name).to_string(),
+            group: "Tasks",
+            shortcut: None,
+            disabled_reason: if live {
+                None
+            } else {
+                Some("task is not live".to_string())
+            },
+            command: Command::RestartTask(task.id),
+        });
+    }
+    if let Some(tab) = s.app.active_tab() {
+        let focused = tab.focused_index();
+        for idx in 0..tab.pane_count() {
+            let title = tab
+                .pane_at(idx)
+                .map(|p| p.title().unwrap_or("Pane").to_string())
+                .unwrap_or("Pane".to_string());
+            items.push(PaletteItem {
+                label: format!("Focus Pane {}: {}", idx + 1, title).to_string(),
+                group: "Panes",
+                shortcut: None,
+                disabled_reason: if focused == Some(idx) {
+                    Some("already focused".to_string())
+                } else {
+                    None
+                },
+                command: Command::FocusPane(idx),
+            });
+        }
+    }
+    for (idx, name) in crate::workspace::names().iter().enumerate() {
+        items.push(PaletteItem {
+            label: format!("Open Workspace: {}", name).to_string(),
+            group: "Workspaces",
+            shortcut: None,
+            disabled_reason: None,
+            command: Command::OpenWorkspace(idx),
+        });
+    }
+    let theme_names = menu_theme_names(s.theme_dir.as_deref());
+    let active_theme = active_theme_index(s);
+    for (idx, name) in theme_names.iter().enumerate() {
+        items.push(PaletteItem {
+            label: format!("Switch Theme: {}", name).to_string(),
+            group: "Themes",
+            shortcut: None,
+            disabled_reason: if idx == active_theme {
+                Some("already active".to_string())
+            } else {
+                None
+            },
+            command: Command::SwitchTheme(idx),
         });
     }
     let mut push = |label: &str, group: &'static str, action: KeyAction, disabled: Option<&str>| {
@@ -3593,6 +3703,28 @@ fn execute_palette_current(hwnd: HWND) {
         Command::Action(action) => run_key_action(hwnd, action),
         Command::NewTabProfile(idx) => open_profile_tab(hwnd, idx),
         Command::AttachSession(alias) => open_session_view(hwnd, alias, false),
+        Command::RunTask(id) => run_task(hwnd, id),
+        Command::StopTask(id) => stop_task(hwnd, id),
+        Command::RestartTask(id) => restart_task(hwnd, id),
+        Command::FocusPane(idx) => {
+            let Some(s) = state_mut(hwnd) else {
+                return;
+            };
+            if s.app.focus_pane(idx) {
+                sync_active_tab_geometry(hwnd);
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            }
+        }
+        Command::OpenWorkspace(idx) => open_workspace_by_index(hwnd, idx),
+        Command::SwitchTheme(idx) => set_theme(hwnd, idx),
+        Command::DetachView => {
+            let Some(s) = state_ref(hwnd) else {
+                return;
+            };
+            close_tab(hwnd, s.app.active_index());
+        }
+        Command::TakeControlView => take_view_control(hwnd),
+        Command::TerminateView => terminate_view_session(hwnd),
         Command::SwitchTab(idx) => {
             if state_mut(hwnd).is_some_and(|s| s.app.select_tab(idx)) {
                 sync_active_tab_geometry(hwnd);
@@ -5038,6 +5170,149 @@ fn live_sessions() -> Vec<serde_json::Value> {
         }
     }
     live
+}
+
+fn show_message(hwnd: HWND, text: &str) {
+    let text = wstr(text);
+    let caption = wstr("rustty");
+    unsafe {
+        let _ = MessageBoxW(
+            Some(hwnd),
+            PCWSTR::from_raw(text.as_ptr()),
+            PCWSTR::from_raw(caption.as_ptr()),
+            MB_OK | MB_ICONWARNING,
+        );
+    }
+}
+
+/// Canonical live session for task `task`; name is `task#<id> <name>`.
+fn live_task_session(task: &Task) -> Option<u32> {
+    let label = task.session_label();
+    for rec in session_records() {
+        if rec.get("state").and_then(serde_json::Value::as_str) == Some("live")
+            && rec
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|n| n == label)
+            && let Some(alias) = rec
+                .get("alias")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|a| u32::try_from(a).ok())
+        {
+            return Some(alias);
+        }
+    }
+    None
+}
+
+/// Start task `task` as a persistent host session. The host owns the process.
+fn create_task_session(hwnd: HWND, task: &Task) -> Option<u32> {
+    let Ok(mut client) = crate::host::client::Client::connect_existing() else {
+        show_message(hwnd, "session host is unavailable");
+        return None;
+    };
+    let argv = task.argv.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let program = argv[0].clone();
+    let mut args = Vec::new();
+    for item in argv.iter().skip(1) {
+        args.push(item.clone());
+    }
+    let Ok(resp) = client.call(
+        "session.create",
+        serde_json::json!({
+            "profile": task.profile,
+            "name": task.session_label(),
+            "cwd": task.cwd,
+            "program": program,
+            "args": args,
+            "cols": 120,
+            "rows": 30,
+            "persistent": true,
+        }),
+    ) else {
+        show_message(hwnd, "session host write failed");
+        return None;
+    };
+    if let Some(err) = resp.get("error") {
+        let code = err
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("internal");
+        let message = err
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        show_message(hwnd, &format!("{code}: {message}"));
+        return None;
+    }
+    resp.get("result")
+        .and_then(|r| r.get("session"))
+        .and_then(|s| s.get("alias"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|a| u32::try_from(a).ok())
+}
+
+fn run_task(hwnd: HWND, id: u32) {
+    let Some(task) = crate::tasks::task_by_id(id) else {
+        show_message(hwnd, &format!("task {id} is missing or unreadable"));
+        return;
+    };
+    for dep_id in crate::tasks::dependencies(id) {
+        let Some(dep) = crate::tasks::task_by_id(dep_id) else {
+            show_message(hwnd, &format!("dependency {dep_id} is missing"));
+            return;
+        };
+        if live_task_session(&dep).is_none() && create_task_session(hwnd, &dep).is_none() {
+            show_message(
+                hwnd,
+                &format!("dependency task {} failed to start", dep.name),
+            );
+            return;
+        }
+    }
+    let existing = live_task_session(&task);
+    if let Some(alias) = existing {
+        open_session_view(hwnd, alias, false);
+        return;
+    }
+    if let Some(alias) = create_task_session(hwnd, &task) {
+        open_session_view(hwnd, alias, false);
+    }
+}
+
+fn stop_task(hwnd: HWND, id: u32) {
+    let Some(task) = crate::tasks::task_by_id(id) else {
+        return;
+    };
+    let Some(alias) = live_task_session(&task) else {
+        show_message(hwnd, &format!("task {} is not live", task.name));
+        return;
+    };
+    let Ok(mut client) = crate::host::client::Client::connect_existing() else {
+        show_message(hwnd, "session host is unavailable");
+        return;
+    };
+    let Ok(resp) = client.call("session.terminate", serde_json::json!({"alias": alias})) else {
+        show_message(hwnd, "session host write failed");
+        return;
+    };
+    if let Some(err) = resp.get("error") {
+        let message = err
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        show_message(hwnd, message);
+    }
+}
+
+fn restart_task(hwnd: HWND, id: u32) {
+    let Some(task) = crate::tasks::task_by_id(id) else {
+        return;
+    };
+    if live_task_session(&task).is_some() {
+        stop_task(hwnd, id);
+    }
+    run_task(hwnd, id);
 }
 
 /// Open a tab that views live host session `alias` (issue #49). Closing

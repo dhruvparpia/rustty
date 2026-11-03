@@ -817,6 +817,18 @@ pub mod server {
                 }
                 opts.cwd = Some(dir.to_string());
             }
+            if let Some(program) = params.get("program").and_then(Value::as_str) {
+                opts.program = program.to_string();
+            }
+            if let Some(args) = params.get("args").and_then(Value::as_array) {
+                let mut converted: Vec<String> = Vec::new();
+                for arg in args.iter() {
+                    if let Some(value) = arg.as_str() {
+                        converted.push(value.to_string());
+                    }
+                }
+                opts.args = converted;
+            }
             opts.cols = usize::try_from(cols).unwrap_or(0);
             opts.rows = usize::try_from(rows).unwrap_or(0);
             if !(1..=i16::MAX as usize).contains(&opts.cols)
@@ -2612,6 +2624,40 @@ mod tests {
         assert_eq!(rec["state"].as_str(), Some("live"));
 
         let v = json!({"method": "session.terminate", "params": {"alias": alias}, "id": 1000});
+        server::handle(&app, &v, &conn);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn explicit_program_and_args_create_session() {
+        use std::sync::mpsc::sync_channel;
+
+        use server::{App, Conn};
+
+        let app = std::sync::Arc::new(std::sync::Mutex::new(App::new().expect("app")));
+        let (tx, _drain) = sync_channel(8);
+        let conn = Conn { token: 1, tx: &tx };
+        let req = json!({
+            "method": "session.create",
+            "params": {
+                "cols": 80, "rows": 24,
+                "program": "cmd.exe",
+                "args": ["/c", "echo", "task"],
+                "name": "task#1 dev",
+                "persistent": true,
+            },
+            "id": 1,
+        });
+        let resp = server::handle(&app, &req, &conn);
+        let rec = &resp["result"]["session"];
+        assert_eq!(
+            rec["program"].as_str(),
+            Some("cmd.exe"),
+            "explicit program reaches the host"
+        );
+        let Some(alias) = rec["alias"].as_u64() else {
+            panic!("create returned no alias");
+        };
+        let v = json!({"method": "session.terminate", "params": {"alias": alias}, "id": 2});
         server::handle(&app, &v, &conn);
     }
 }

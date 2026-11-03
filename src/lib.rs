@@ -114,6 +114,8 @@ pub mod tabbar;
 )]
 pub mod uia;
 // THEME-010: reading the system dark/light setting is a Win32 registry call.
+/// Project task runner (#89): pure Rust task store + dependency validation.
+pub mod tasks;
 #[allow(
     unsafe_code,
     reason = "THEME-010: the system theme check is a Win32 registry FFI boundary"

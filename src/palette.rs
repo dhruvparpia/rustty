@@ -34,6 +34,24 @@ pub enum Command {
     SwitchTab(usize),
     /// Open a tab that views live host session `n` (issue #49).
     AttachSession(u32),
+    /// Close the active session-view tab; this detaches the view, not the shell.
+    DetachView,
+    /// Ask the active session view to take controller rights.
+    TakeControlView,
+    /// Terminate the active session view's host shell.
+    TerminateView,
+    /// Run project task `n` (issue #89).
+    RunTask(u32),
+    /// Stop project task `n`.
+    StopTask(u32),
+    /// Stop and restart project task `n`.
+    RestartTask(u32),
+    /// Focus pane `n` in the active tab.
+    FocusPane(usize),
+    /// Open saved workspace `n` (replaces this window's tabs).
+    OpenWorkspace(usize),
+    /// Switch to theme `n`.
+    SwitchTheme(usize),
 }
 
 /// One command row.
