@@ -3,6 +3,7 @@
 # ZIP layout (FR-103: extract the folder, run the exe, no install, no admin):
 #   rustty-<version>-win-x64/
 #     rustty.exe
+#     rustty-host.exe      <- persistent session host (HOST-001)
 #     rustty.portable      <- selects local config (CONFIG-020, PKG-004)
 #     config.example.toml
 #     LICENSE                  <- MIT, in the package (OSS-003)
@@ -53,6 +54,7 @@ if (Test-Path $zip) { Remove-Item -Force $zip }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 Copy-Item "$bindir\rustty.exe" $stage
+Copy-Item "$bindir\rustty-host.exe" $stage
 Copy-Item LICENSE, README.md, config.example.toml $stage
 New-Item -ItemType File -Path (Join-Path $stage 'rustty.portable') | Out-Null
 
