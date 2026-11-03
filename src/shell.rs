@@ -293,7 +293,6 @@ struct ViewState {
     /// pump, which clears it on a host demotion notice).
     controller: Arc<AtomicBool>,
     /// UI -> pump "please take control now" pings.
-    req_tx: Sender<()>,
     /// UI -> writer-thread RPC frames (input, resize, takeover, resync).
     frame_tx: Sender<serde_json::Value>,
     /// The pump's read-handle cancel target, so `close` can wake it.
@@ -602,7 +601,6 @@ impl Shell {
         }
 
         let (frame_tx, frame_rx) = mpsc::channel::<serde_json::Value>();
-        let (req_tx, req_rx) = mpsc::channel::<()>();
         std::thread::spawn(move || {
             while let Ok(frame) = frame_rx.recv() {
                 if crate::host::write_frame(&mut writer, &frame).is_err() {
@@ -621,7 +619,6 @@ impl Shell {
             view_pump(
                 &mut reader,
                 &tx,
-                req_rx,
                 pump_frame_tx,
                 alias,
                 rev,
@@ -637,7 +634,6 @@ impl Shell {
         self.view = Some(ViewState {
             alias,
             controller: control,
-            req_tx,
             frame_tx,
             read_handle,
         });
@@ -682,11 +678,15 @@ impl Shell {
     }
 
     /// Ask the pump to take controller rights now (issue #49); the
-    /// answer arrives as a `ControlChanged` event.
+    /// answer arrives as a `ControlChanged` event. Send the RPC frame
+    /// directly so a click is not queued behind a blocked output read.
     pub fn take_control(&self) {
         #[cfg(windows)]
         if let Some(v) = &self.view {
-            let _ = v.req_tx.send(());
+            let _ = v.frame_tx.send(serde_json::json!({
+                "jsonrpc": "2.0", "id": "takeover", "method": "session.attach",
+                "params": {"alias": v.alias, "readOnly": false, "takeControl": true},
+            }));
         }
     }
 
@@ -892,13 +892,13 @@ fn view_install_snapshot(
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
+    clippy::while_let_loop,
     reason = "the pump is one state machine over shared view state"
 )]
 #[cfg(windows)]
 fn view_pump(
     rd: &mut crate::host::client::DupReader,
     tx: &Sender<ShellEvent>,
-    req_rx: Receiver<()>,
     frame_tx: Sender<serde_json::Value>,
     alias: u32,
     mut last_rev: u64,
@@ -907,68 +907,58 @@ fn view_pump(
     stopping: &Arc<AtomicBool>,
 ) {
     let mut resyncing = false;
+    let mut pending: Vec<serde_json::Value> = Vec::new();
     loop {
-        // Takeover requests first: they must not wait behind output.
-        while req_rx.try_recv().is_ok() {
-            let _ = frame_tx.send(serde_json::json!({
-                "jsonrpc": "2.0", "id": "takeover", "method": "session.attach",
-                "params": {"alias": alias, "readOnly": true, "takeControl": true},
-            }));
-        }
         let frame = match crate::host::read_frame(rd, crate::host::MAX_PAGE_BYTES) {
             Ok(f) => f,
-            Err(_) => break, // EOF, host gone, or CancelIoEx from close
+            Err(_) => break,
         };
         let method = frame.get("method").and_then(serde_json::Value::as_str);
         let params = frame.get("params");
+        let rev = params
+            .and_then(|p| p.get("revision"))
+            .and_then(serde_json::Value::as_u64);
         match method {
-            Some("session.output") => {
-                let Some(rev) = params
-                    .and_then(|p| p.get("revision"))
-                    .and_then(serde_json::Value::as_u64)
-                else {
+            Some("session.output") | Some("session.resize") => {
+                if resyncing {
+                    pending.push(frame);
                     continue;
-                };
+                }
+                let Some(rev) = rev else { continue };
                 if rev <= last_rev {
-                    continue; // an echo of bytes we already applied
+                    continue;
                 }
                 if rev > last_rev + 1 {
-                    // shortcut: gap resync uses last_rev+1, which is in
-                    // the retained window whenever frames were only
-                    // dropped by channel saturation; upgrade if a
-                    // resync ever answers with a refusal.
-                    resyncing = true;
+                    pending.push(frame);
                     let _ = frame_tx.send(serde_json::json!({
                         "jsonrpc": "2.0", "id": "resync", "method": "session.attach",
-                        "params": {"alias": alias, "readOnly": true, "fromRevision": rev - 1},
+                        "params": {"alias": alias, "readOnly": true, "fromRevision": last_rev},
                     }));
-                    last_rev = rev - 1;
+                    resyncing = true;
                     continue;
                 }
                 last_rev = rev;
-                if resyncing {
-                    continue; // covered by the snapshot that is on its way
-                }
-                let hex = params
-                    .and_then(|p| p.get("data"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                if let Ok(bytes) = view_unhex(hex) {
-                    view_send_chunks(tx, queued, bytes);
-                }
-            }
-            Some("session.resize") => {
-                let cols = params
-                    .and_then(|p| p.get("cols"))
-                    .and_then(serde_json::Value::as_u64);
-                let rows = params
-                    .and_then(|p| p.get("rows"))
-                    .and_then(serde_json::Value::as_u64);
-                if let (Some(c), Some(r)) = (cols, rows) {
-                    let c = u16::try_from(c).unwrap_or(0);
-                    let r = u16::try_from(r).unwrap_or(0);
-                    if c != 0 && r != 0 {
-                        let _ = tx.send(ShellEvent::Resize(c, r));
+                if method == Some("session.output") {
+                    let hex = params
+                        .and_then(|p| p.get("data"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    if let Ok(bytes) = view_unhex(hex) {
+                        view_send_chunks(tx, queued, bytes);
+                    }
+                } else {
+                    let cols = params
+                        .and_then(|p| p.get("cols"))
+                        .and_then(serde_json::Value::as_u64);
+                    let rows = params
+                        .and_then(|p| p.get("rows"))
+                        .and_then(serde_json::Value::as_u64);
+                    if let (Some(c), Some(r)) = (cols, rows) {
+                        let c = u16::try_from(c).unwrap_or(0);
+                        let r = u16::try_from(r).unwrap_or(0);
+                        if c != 0 && r != 0 {
+                            let _ = tx.send(ShellEvent::Resize(c, r));
+                        }
                     }
                 }
             }
@@ -990,6 +980,58 @@ fn view_pump(
                         let rev = view_install_snapshot(result, tx, queued);
                         last_rev = last_rev.max(rev);
                     }
+                    let frames = std::mem::take(&mut pending);
+                    for (idx, f) in frames.iter().enumerate() {
+                        let p = f.get("params");
+                        let Some(r) = p
+                            .and_then(|p| p.get("revision"))
+                            .and_then(serde_json::Value::as_u64)
+                        else {
+                            continue;
+                        };
+                        if r <= last_rev {
+                            continue;
+                        }
+                        if r > last_rev + 1 {
+                            for g in &frames[idx..] {
+                                pending.push(g.clone());
+                            }
+                            let _ = frame_tx.send(serde_json::json!({
+                                "jsonrpc": "2.0", "id": "resync", "method": "session.attach",
+                                "params": {"alias": alias, "readOnly": true, "fromRevision": last_rev},
+                            }));
+                            resyncing = true;
+                            break;
+                        }
+                        last_rev = r;
+                        let m = f.get("method").and_then(serde_json::Value::as_str);
+                        if m == Some("session.output") {
+                            let hex = f
+                                .get("params")
+                                .and_then(|p| p.get("data"))
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("");
+                            if let Ok(bytes) = view_unhex(hex) {
+                                view_send_chunks(tx, queued, bytes);
+                            }
+                        } else if m == Some("session.resize") {
+                            let cols = f
+                                .get("params")
+                                .and_then(|p| p.get("cols"))
+                                .and_then(serde_json::Value::as_u64);
+                            let rows = f
+                                .get("params")
+                                .and_then(|p| p.get("rows"))
+                                .and_then(serde_json::Value::as_u64);
+                            if let (Some(c), Some(r)) = (cols, rows) {
+                                let c = u16::try_from(c).unwrap_or(0);
+                                let r = u16::try_from(r).unwrap_or(0);
+                                if c != 0 && r != 0 {
+                                    let _ = tx.send(ShellEvent::Resize(c, r));
+                                }
+                            }
+                        }
+                    }
                 } else if id == Some("takeover") {
                     let granted = frame
                         .get("result")
@@ -1006,8 +1048,6 @@ fn view_pump(
     if !stopping.load(Ordering::Relaxed) {
         let _ = tx.send(ShellEvent::Notice("host connection lost"));
     }
-    // Drain any requests we still hold so senders never see Disconnected.
-    while req_rx.try_recv().is_ok() {}
 }
 
 impl Default for Shell {

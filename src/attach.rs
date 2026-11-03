@@ -317,18 +317,16 @@ fn reader_loop(
                 match method {
                     Some("session.output") | Some("session.resize") => {
                         if resyncing {
-                            // Buffer: writing now would duplicate the
-                            // side effects of replayed queries.
                             pending.push(frame);
                             continue;
                         }
                         let Some(rev) = rev else { continue };
                         if rev <= last_rev {
-                            continue; // an echo of bytes we already applied
+                            continue;
                         }
                         if rev > last_rev + 1 {
                             pending.push(frame);
-                            request_resync(&mut wr, alias);
+                            request_resync(&mut wr, alias, Some(last_rev));
                             resyncing = true;
                             continue;
                         }
@@ -362,32 +360,50 @@ fn reader_loop(
                         }
                     }
                     Some("session.resync") if !resyncing => {
-                        request_resync(&mut wr, alias);
+                        request_resync(&mut wr, alias, None);
                         resyncing = true;
                     }
                     None if resyncing
                         && frame.get("id").and_then(Value::as_str) == Some("resync") =>
                     {
-                        // The resync request's response: install the
-                        // snapshot, then flush the buffered live bytes.
                         resyncing = false;
                         let result = frame.get("result");
+                        let mut installed = last_rev;
                         if let Some(snap) = result
                             .and_then(|r| r.get("snapshot"))
                             .filter(|v| v.is_object())
                         {
                             write_out(out_h, &snapshot_ansi(snap));
-                            last_rev = snap.get("revision").and_then(Value::as_u64).unwrap_or(0);
+                            installed = snap.get("revision").and_then(Value::as_u64).unwrap_or(0);
                         } else if let Some(r) = result
                             .and_then(|r| r.get("revision"))
                             .and_then(Value::as_u64)
                         {
-                            last_rev = last_rev.max(r);
+                            installed = r;
                         }
-                        for f in std::mem::take(&mut pending) {
-                            // A resize during a resync is redundant: the
-                            // snapshot already carries the new geometry.
-                            if f.get("method").and_then(Value::as_str) == Some("session.output") {
+                        last_rev = installed;
+                        let frames = std::mem::take(&mut pending);
+                        for (idx, f) in frames.iter().enumerate() {
+                            let p = f.get("params");
+                            let Some(r) = p.and_then(|p| p.get("revision")).and_then(Value::as_u64)
+                            else {
+                                continue;
+                            };
+
+                            if r <= last_rev {
+                                continue;
+                            }
+                            if r > last_rev + 1 {
+                                for g in &frames[idx..] {
+                                    pending.push(g.clone());
+                                }
+                                request_resync(&mut wr, alias, Some(last_rev));
+                                resyncing = true;
+                                break;
+                            }
+                            last_rev = r;
+                            let m = f.get("method").and_then(Value::as_str);
+                            if m == Some("session.output") {
                                 let hex = f
                                     .get("params")
                                     .and_then(|p| p.get("data"))
@@ -395,6 +411,18 @@ fn reader_loop(
                                     .unwrap_or("");
                                 if let Some(bytes) = unhex(hex) {
                                     write_out(out_h, &bytes);
+                                }
+                            } else if m == Some("session.resize") {
+                                let c = f
+                                    .get("params")
+                                    .and_then(|p| p.get("cols"))
+                                    .and_then(Value::as_u64);
+                                let r2 = f
+                                    .get("params")
+                                    .and_then(|p| p.get("rows"))
+                                    .and_then(Value::as_u64);
+                                if let (Some(c2), Some(r2)) = (c, r2) {
+                                    follow_size(out_h, c2, r2);
                                 }
                             }
                         }
@@ -425,10 +453,14 @@ fn reader_loop(
 
 /// Ask the host (on our write handle) for a fresh snapshot attach on
 /// this connection; the answer arrives here as the id-matched response.
-fn request_resync(wr: &mut crate::host::client::DupWriter, alias: u32) {
+fn request_resync(wr: &mut crate::host::client::DupWriter, alias: u32, from: Option<u64>) {
+    let mut params = serde_json::json!({ "alias": alias, "readOnly": true });
+    if let Some(r) = from {
+        params["fromRevision"] = serde_json::json!(r);
+    }
     let req = serde_json::json!({
         "jsonrpc": "2.0", "id": "resync", "method": "session.attach",
-        "params": { "alias": alias, "readOnly": true },
+        "params": params,
     });
     let _ = crate::host::write_frame(wr, &req);
 }
@@ -651,9 +683,99 @@ fn hex(bytes: &[u8]) -> String {
 pub(crate) fn snapshot_ansi(snap: &Value) -> Vec<u8> {
     let n = |v: Option<&Value>, d: u64| v.and_then(Value::as_u64).unwrap_or(d);
     let rows = usize::try_from(n(snap.get("rows"), 0)).unwrap_or(0);
+    let in_alt = snap.get("inAlt").and_then(Value::as_bool).unwrap_or(false);
     let mut out = String::from("\x1b[H\x1b[2J");
-    for (r, spans) in snap
-        .get("lines")
+
+    if let Some(modes) = snap.get("modes") {
+        let on = |k: &str| modes.get(k).and_then(Value::as_bool).unwrap_or(false);
+        out.push_str(&format!(
+            "\x1b[?7{}",
+            if on("autoWrap") { "h" } else { "l" }
+        ));
+        out.push_str(&format!(
+            "\x1b[?2004{}",
+            if on("bracketedPaste") { "h" } else { "l" }
+        ));
+        out.push_str(&format!(
+            "\x1b[?1{}",
+            if on("appCursorKeys") { "h" } else { "l" }
+        ));
+        let mouse = modes.get("mouse").and_then(Value::as_str).unwrap_or("off");
+        out.push_str(match mouse {
+            "click" => "\x1b[?1000h\x1b[?1002l\x1b[?1003l",
+            "drag" => "\x1b[?1002h\x1b[?1000l\x1b[?1003l",
+            "any" => "\x1b[?1003h\x1b[?1000l\x1b[?1002l",
+            _ => "\x1b[?1000l\x1b[?1002l\x1b[?1003l",
+        });
+        out.push_str(&format!(
+            "\x1b[?1006{}",
+            if on("mouseSgr") { "h" } else { "l" }
+        ));
+        out.push_str(&format!(
+            "\x1b[?1015{}",
+            if on("mouseUrxvt") { "h" } else { "l" }
+        ));
+    }
+
+    if in_alt {
+        let main_rows = usize::try_from(n(snap.get("mainRows"), 0)).unwrap_or(0);
+        paint_grid(&mut out, snap.get("mainLines"), main_rows);
+        out.push_str("\x1b[?1049h");
+        out.push_str("\x1b[H\x1b[2J");
+    }
+    paint_grid(&mut out, snap.get("lines"), rows);
+
+    if let Some(pen) = snap.get("pen") {
+        let fg = pen.get("fg").and_then(parse_hex_color);
+        let bg = pen.get("bg").and_then(parse_hex_color);
+        let attrs = pen.get("attrs").and_then(Value::as_u64).unwrap_or(0) as u32;
+        out.push_str(&sgr(fg, bg, attrs));
+    } else {
+        out.push_str("\x1b[0m");
+    }
+    let cur = snap.get("cursor");
+    let mut crow = usize::try_from(n(cur.and_then(|c| c.get("row")), 0)).unwrap_or(0);
+    let ccol = n(cur.and_then(|c| c.get("col")), 0) + 1;
+    crow = crow.min(rows.saturating_sub(1)) + 1;
+    out.push_str(&format!("\x1b[{crow};{ccol}H"));
+    if cur.is_some_and(|c| c.get("visible").and_then(Value::as_bool) != Some(false)) {
+        out.push_str("\x1b[?25h");
+    } else {
+        out.push_str("\x1b[?25l");
+    }
+
+    let mut bytes = out.into_bytes();
+    if let Some(parser) = snap.get("parser") {
+        append_hex(&mut bytes, parser, "utf8Pending");
+        let st = parser.get("state").and_then(Value::as_str);
+        match st {
+            Some("escape") => bytes.push(0x1b),
+            Some("escape-intermediate") => {
+                bytes.push(0x1b);
+                append_hex(&mut bytes, parser, "intermediates");
+            }
+            Some("csi") => {
+                bytes.extend_from_slice(b"\x1b[");
+                append_hex(&mut bytes, parser, "params");
+                append_hex(&mut bytes, parser, "private");
+                append_hex(&mut bytes, parser, "intermediates");
+            }
+            Some("osc") => {
+                bytes.extend_from_slice(b"\x1b]");
+                append_hex(&mut bytes, parser, "osc");
+            }
+            Some("osc-escape") => {
+                bytes.extend_from_slice(b"\x1b]\x1b");
+                append_hex(&mut bytes, parser, "osc");
+            }
+            _ => {}
+        }
+    }
+    bytes
+}
+
+fn paint_grid(out: &mut String, lines: Option<&Value>, rows: usize) {
+    for (r, spans) in lines
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -670,8 +792,6 @@ pub(crate) fn snapshot_ansi(snap: &Value) -> Vec<u8> {
             let bg = it.next().and_then(parse_hex_color);
             let attrs = it.next().and_then(Value::as_u64).unwrap_or(0) as u32;
             out.push_str(&sgr(fg, bg, attrs));
-            // The snapshot is data: ESC and control bytes in cells
-            // become spaces (the renderer writes them to a live VT).
             let sanitized: String = text
                 .chars()
                 .map(|c| if (c as u32) < 0x20 { ' ' } else { c })
@@ -679,22 +799,17 @@ pub(crate) fn snapshot_ansi(snap: &Value) -> Vec<u8> {
             out.push_str(&sanitized);
         }
     }
-    let cur = snap.get("cursor");
-    let crow = usize::try_from(n(cur.and_then(|c| c.get("row")), 0)).unwrap_or(0);
-    let ccol = n(cur.and_then(|c| c.get("col")), 0) + 1;
-    let crow = crow.min(rows.saturating_sub(1)) + 1;
-    out.push_str(&format!("\x1b[{crow};{ccol}H"));
-    if cur.is_some_and(|c| c.get("visible").and_then(Value::as_bool) != Some(false)) {
-        out.push_str("\x1b[?25h");
-    } else {
-        out.push_str("\x1b[?25l");
-    }
-    out.into_bytes()
 }
 
-/// SGR string for a span: attributes map to the SGR codes their grid
-/// bits were named for (bold 1, dim 2, italic 3, underline 4, blink 5,
-/// inverse 7, hidden 8, strike 9).
+fn append_hex(bytes: &mut Vec<u8>, parser: &Value, key: &str) {
+    let h = parser.get(key).and_then(Value::as_str);
+    if let Some(h) = h
+        && let Some(b) = unhex(h)
+    {
+        bytes.extend_from_slice(&b);
+    }
+}
+
 fn sgr(fg: Option<(u8, u8, u8)>, bg: Option<(u8, u8, u8)>, attrs: u32) -> String {
     let mut codes: Vec<String> = vec![String::from("0")];
     for (bit, code) in [
@@ -803,5 +918,52 @@ mod tests {
         });
         let s = String::from_utf8(snapshot_ansi(&hidden)).unwrap();
         assert!(s.ends_with("\x1b[1;1H\x1b[?25l"));
+    }
+    #[test]
+    fn snapshot_ansi_restores_modes_and_pen() {
+        let snap = serde_json::json!({
+            "rows": 1,
+            "modes": { "autoWrap": true, "bracketedPaste": true, "appCursorKeys": true, "mouse": "click", "mouseSgr": true, "mouseUrxvt": false },
+            "pen": { "fg": "#D7005F", "bg": null, "attrs": 0 },
+            "cursor": { "row": 0, "col": 1, "visible": true },
+            "lines": [[["X", null, null, 0]]],
+        });
+        let s = String::from_utf8(snapshot_ansi(&snap)).unwrap();
+        assert!(s.contains("\x1b[?2004h"));
+        assert!(s.contains("\x1b[?1h"));
+        assert!(s.contains("\x1b[?1000h"));
+        assert!(s.contains("\x1b[?1006h"));
+        assert!(s.contains("\x1b[0;38;2;215;0;95m"));
+    }
+
+    #[test]
+    fn snapshot_ansi_keeps_utf8_pending() {
+        let snap = serde_json::json!({
+            "rows": 1,
+            "cursor": { "row": 0, "col": 0, "visible": false },
+            "lines": [[[" ", null, null, 0]]],
+            "parser": { "state": "ground", "utf8Pending": "c3" },
+        });
+        let bytes = snapshot_ansi(&snap);
+        assert_eq!(bytes[bytes.len() - 1], 0xc3);
+    }
+
+    #[test]
+    fn snapshot_ansi_restores_main_and_alt() {
+        let snap = serde_json::json!({
+            "rows": 2,
+            "inAlt": true,
+            "mainRows": 1,
+            "mainLines": [[["main", null, null, 0]]],
+            "cursor": { "row": 1, "col": 0, "visible": true },
+            "lines": [
+                [["alt", null, null, 0]],
+                [[" ", null, null, 0]],
+            ],
+        });
+        let s = String::from_utf8(snapshot_ansi(&snap)).unwrap();
+        assert!(s.contains("main"));
+        assert!(s.contains("\x1b[?1049h"));
+        assert!(s.contains("alt"));
     }
 }

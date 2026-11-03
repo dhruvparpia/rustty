@@ -67,12 +67,19 @@ pub struct AdvanceOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
+/// Streaming VT state-machine state.
+pub enum State {
+    /// Ordinary printable output state.
     Ground,
+    /// After ESC, before a final byte.
     Escape,
+    /// ESC plus intermediate bytes.
     EscapeIntermediate,
+    /// Inside a CSI sequence.
     Csi,
+    /// Inside an OSC string.
     Osc,
+    /// OSC string with an ESC byte seen.
     OscEscape,
     /// Inside a kitty graphics string, after `ESC _`/`ESC P`/0x90.
     KittyDetect,
@@ -80,17 +87,25 @@ enum State {
     Kitty,
     /// Kitty string saw `ESC`: next byte is the ST (`\`) or payload data.
     KittyEscape,
+    /// Inside an ignored string.
     Ignore,
+    /// Ignored string with an ESC byte seen.
     IgnoreEscape,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SavedCursor {
-    row: usize,
-    col: usize,
-    fg: Option<Color>,
-    bg: Option<Color>,
-    attrs: CellAttribute,
+/// Saved cursor snapshot for CSI 8/ and DEC save/restore.
+pub struct SavedCursor {
+    /// Saved viewport row.
+    pub row: usize,
+    /// Saved viewport column.
+    pub col: usize,
+    /// Saved foreground pen.
+    pub fg: Option<Color>,
+    /// Saved background pen.
+    pub bg: Option<Color>,
+    /// Saved SGR attributes.
+    pub attrs: CellAttribute,
 }
 
 /// Mouse reporting protocol requested by the shell (MOUSE-009).
@@ -110,12 +125,18 @@ pub enum MouseProtocol {
 /// Streaming VT parser plus the terminal state for one pane.
 #[derive(Debug, Clone)]
 pub struct Parser {
-    state: State,
-    params: Vec<u8>,
-    private: Vec<u8>,
-    intermediates: Vec<u8>,
-    osc: Vec<u8>,
-    utf8_pending: Vec<u8>,
+    /// Current state-machine state.
+    pub state: State,
+    /// CSI parameter buffer.
+    pub params: Vec<u8>,
+    /// CSI private-marker buffer.
+    pub private: Vec<u8>,
+    /// CSI intermediate buffer.
+    pub intermediates: Vec<u8>,
+    /// OSC payload buffer.
+    pub osc: Vec<u8>,
+    /// Buffered partial UTF-8 bytes.
+    pub utf8_pending: Vec<u8>,
     /// Cursor row in viewport coordinates.
     pub cursor_row: usize,
     /// Cursor column in viewport coordinates.
@@ -134,29 +155,36 @@ pub struct Parser {
     pub mouse_sgr_coordinates: bool,
     /// `CSI ?1015`: urxvt coordinate mouse encoding.
     pub mouse_urxvt_coordinates: bool,
-    scroll_top: usize,
+    /// Top of the scroll region.
+    pub scroll_top: usize,
     /// `usize::MAX` until the first grid contact; [`Parser::fit`] clamps it.
-    scroll_bottom: usize,
+    pub scroll_bottom: usize,
     /// Issue #3: no `DECSTBM` has run, so the scroll region's bottom edge
     /// follows the screen bottom across resize (grow restores full-height
     /// scrolling).
-    region_follows_bottom: bool,
+    pub region_follows_bottom: bool,
     /// #22: bytes of a UTF-8 sequence still expected inside a string state
     /// (OSC / DCS), where a 0x9C continuation byte is data, not ST.
-    string_utf8: u8,
-    saved: Option<SavedCursor>,
-    pen_fg: Option<Color>,
-    pen_bg: Option<Color>,
-    pen_attrs: CellAttribute,
+    pub string_utf8: u8,
+    /// Saved cursor, if any.
+    pub saved: Option<SavedCursor>,
+    /// Current foreground pen.
+    pub pen_fg: Option<Color>,
+    /// Current background pen.
+    pub pen_bg: Option<Color>,
+    /// Current SGR attributes.
+    pub pen_attrs: CellAttribute,
     /// OSC 8 link pen: id into `link_uris`, `0` when no link is open.
-    pen_link: u32,
+    pub pen_link: u32,
     /// OSC 8 URI table; id = index + 1, so id `0` means "no link".
     /// Bounded: past `LINK_CAP` new URIs get no target (their cells
     /// render as links with nothing to open/copy); already-interned
     /// targets keep working.
-    link_uris: Vec<String>,
-    link_ids: HashMap<String, u32>,
-    wrap_pending: bool,
+    pub link_uris: Vec<String>,
+    /// URI intern table.
+    pub link_ids: HashMap<String, u32>,
+    /// Pending auto-wrap at the right edge.
+    pub wrap_pending: bool,
 }
 
 /// OSC 8 URI table size limit (issue #41). Typical panes open a handful

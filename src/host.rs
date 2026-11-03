@@ -517,13 +517,11 @@ pub mod server {
         /// spans (`host-snapshot/v1`). A fresh grid is a repaint of the
         /// same shape, so snapshot bytes and live bytes converge.
         fn snapshot(&self) -> Value {
-            let lines: Vec<Value> = (0..self.grid.rows)
-                .map(|r| {
-                    self.grid
-                        .row(r)
-                        .map_or_else(|| json!([]), |line| json!(spans(line)))
-                })
-                .collect();
+            let lines: Vec<Value> = grid_lines(&self.grid);
+            let main_lines = self
+                .main_grid
+                .as_ref()
+                .map_or(Value::Null, |g| json!(grid_lines(g)));
             let mouse = match self.parser.mouse_protocol {
                 crate::parser::MouseProtocol::Off => "off",
                 crate::parser::MouseProtocol::Click => "click",
@@ -536,6 +534,9 @@ pub mod server {
                 "cols": self.grid.cols,
                 "rows": self.grid.rows,
                 "inAlt": self.in_alt,
+                "mainLines": main_lines,
+                "mainCols": self.main_grid.as_ref().map_or(0, |g| g.cols),
+                "mainRows": self.main_grid.as_ref().map_or(0, |g| g.rows),
                 "cursor": {
                     "row": self.parser.cursor_row,
                     "col": self.parser.cursor_col,
@@ -549,6 +550,8 @@ pub mod server {
                     "mouseSgr": self.parser.mouse_sgr_coordinates,
                     "mouseUrxvt": self.parser.mouse_urxvt_coordinates,
                 },
+                "pen": pen_value(&self.parser),
+                "parser": parser_value(&self.parser),
                 "title": self.title,
                 "cwd": self.cwd,
                 "lines": lines,
@@ -560,6 +563,9 @@ pub mod server {
         /// stream.
         fn resize(&mut self, cols: usize, rows: usize) {
             self.grid.resize(cols, rows);
+            if let Some(ref mut main) = self.main_grid {
+                main.resize(cols, rows);
+            }
             self.parser.fit(&self.grid);
             self.revision += 1;
             // Keep the delta stream contiguous: this revision carries
@@ -1680,6 +1686,73 @@ pub mod server {
         Ok(out)
     }
 
+    fn grid_lines(grid: &Grid) -> Vec<Value> {
+        (0..grid.rows)
+            .map(|r| {
+                grid.row(r)
+                    .map_or_else(|| json!([]), |line| json!(spans(line)))
+            })
+            .collect()
+    }
+
+    fn pen_value(p: &Parser) -> Value {
+        json!({
+            "fg": p.pen_fg.map_or(Value::Null, |c| json!(c.to_string())),
+            "bg": p.pen_bg.map_or(Value::Null, |c| json!(c.to_string())),
+            "attrs": p.pen_attrs.flags(),
+            "link": p.pen_link,
+        })
+    }
+
+    fn saved_value(p: &Parser) -> Value {
+        if let Some(sc) = p.saved {
+            json!({
+                "row": sc.row,
+                "col": sc.col,
+                "fg": sc.fg.map_or(Value::Null, |c| json!(c.to_string())),
+                "bg": sc.bg.map_or(Value::Null, |c| json!(c.to_string())),
+                "attrs": sc.attrs.flags(),
+            })
+        } else {
+            Value::Null
+        }
+    }
+
+    fn state_name(p: &Parser) -> String {
+        match p.state {
+            crate::parser::State::Ground => "ground".to_string(),
+            crate::parser::State::Escape => "escape".to_string(),
+            crate::parser::State::EscapeIntermediate => "escape-intermediate".to_string(),
+            crate::parser::State::Csi => "csi".to_string(),
+            crate::parser::State::Osc => "osc".to_string(),
+            crate::parser::State::OscEscape => "osc-escape".to_string(),
+            crate::parser::State::KittyDetect => "kitty-detect".to_string(),
+            crate::parser::State::Kitty => "kitty".to_string(),
+            crate::parser::State::KittyEscape => "kitty-escape".to_string(),
+            crate::parser::State::Ignore => "ignore".to_string(),
+            crate::parser::State::IgnoreEscape => "ignore-escape".to_string(),
+        }
+    }
+
+    fn parser_value(p: &Parser) -> Value {
+        json!({
+            "state": state_name(p),
+            "params": hex_encode(&p.params),
+            "private": hex_encode(&p.private),
+            "intermediates": hex_encode(&p.intermediates),
+            "osc": hex_encode(&p.osc),
+            "utf8Pending": hex_encode(&p.utf8_pending),
+            "stringUtf8": p.string_utf8,
+            "saved": saved_value(p),
+            "scrollTop": p.scroll_top,
+            "scrollBottom": p.scroll_bottom,
+            "regionFollowsBottom": p.region_follows_bottom,
+            "wrapPending": p.wrap_pending,
+            "pen": pen_value(p),
+            "linkUris": p.link_uris,
+        })
+    }
+
     #[cfg(test)]
     mod model_tests {
         use super::*;
@@ -1794,6 +1867,43 @@ pub mod server {
             let s = m.snapshot();
             assert_eq!(s["cols"], 120);
             assert_eq!(s["rows"], 35);
+        }
+        #[test]
+        fn alt_resize_keeps_main_geometry() {
+            let mut m = Model::new(10, 3);
+            m.feed(b"main");
+            m.feed(b"\x1b[?1049h alt");
+            m.resize(20, 5);
+            m.feed(b"\x1b[?1049l");
+            assert_eq!(m.grid.cols, 20);
+            assert_eq!(m.grid.rows, 5);
+        }
+
+        #[test]
+        fn snapshot_keeps_pen_and_utf8_pending() {
+            let mut m = Model::new(80, 24);
+            m.feed(b"\x1b[31mX");
+            m.feed(b"\xC3");
+            let s = m.snapshot();
+            assert_eq!(s["pen"]["fg"].as_str().unwrap(), "#D7005F");
+            assert_eq!(s["parser"]["utf8Pending"].as_str().unwrap(), "c3");
+        }
+
+        #[test]
+        fn snapshot_keeps_main_lines_while_in_alt() {
+            let mut m = Model::new(10, 3);
+            m.feed(b"main");
+            m.feed(b"\x1b[?1049h alt");
+            let s = m.snapshot();
+            assert!(s["mainLines"].is_array());
+            assert_eq!(
+                s["mainLines"][0][0][0]
+                    .as_str()
+                    .unwrap()
+                    .trim_end()
+                    .to_string(),
+                "main"
+            );
         }
     }
 }

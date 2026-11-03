@@ -88,19 +88,22 @@ fn python_re() -> &'static Regex {
 /// path: line start, whitespace, or a quoting/punctuation opener. This is
 /// the path-anchoring filter that rejects mid-word junk (`xfile.rs:1:2`).
 fn ok_prefix(text: &str, start: usize) -> bool {
-    match text[..start].chars().next_back() {
-        None => true,
-        Some(c) => c.is_whitespace() || matches!(c, '[' | '(' | '"' | '<' | ',' | '=' | '\''),
+    if start == 0 {
+        return true;
     }
+    let chars: Vec<char> = text.chars().collect();
+    let Some(c) = chars.get(start - 1) else {
+        return true;
+    };
+    c.is_whitespace() || matches!(c, '[' | '(' | '"' | '<' | ',' | '=' | '\'')
 }
 
-/// Character immediately after a match must not be alphanumeric
-/// (`file.rs:12:34x` is not a reference).
 fn ok_suffix(text: &str, end: usize) -> bool {
-    !text[end..]
-        .chars()
-        .next()
-        .is_some_and(char::is_alphanumeric)
+    let chars: Vec<char> = text.chars().collect();
+    let Some(c) = chars.get(end) else {
+        return true;
+    };
+    !c.is_alphanumeric()
 }
 
 /// One candidate match plus its byte span in the scanned line.
@@ -113,22 +116,18 @@ struct Cand {
 fn make_cand(text: &str, caps: regex::Captures<'_>, is_python: bool) -> Option<Cand> {
     let m = caps.get(0)?;
     let path = caps.get(1)?.as_str();
-    if path.contains("://") || !ok_prefix(text, m.start()) {
+    // Regex offsets are bytes; grid columns are characters. Convert every
+    // format through the same character policy (issue #64).
+    let start = text[..m.start()].chars().count();
+    let end = text[..m.end()].chars().count();
+    if path.contains("://") || !ok_prefix(text, start) {
         return None;
     }
-    if !is_python && !ok_suffix(text, m.end()) {
+    if !is_python && !ok_suffix(text, end) {
         return None;
     }
     let line = caps.get(2)?.as_str().parse().unwrap_or(0);
     let col = caps.get(3).and_then(|c| c.as_str().parse().ok());
-    let (start, end) = if is_python {
-        (m.start(), m.end())
-    } else {
-        (
-            text[..m.start()].chars().count(),
-            text[..m.end()].chars().count(),
-        )
-    };
     Some(Cand {
         start,
         end,
@@ -180,6 +179,24 @@ fn normalize_cwd(cwd: &str) -> String {
         cwd[1..].to_string()
     } else {
         cwd.to_string()
+    }
+}
+
+/// A cwd that can be joined into a Windows path (issue #66): WSL mount
+/// paths map to drives, native drive paths pass through, and other POSIX
+/// cwd values are unmappable.
+fn windows_cwd(cwd: &str) -> Option<String> {
+    match wsl_path(cwd) {
+        Some(p) => Some(p),
+        None => {
+            let norm = normalize_cwd(cwd);
+            let b = norm.as_bytes();
+            let windows_abs = b.len() >= 3
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && matches!(b[2], b'/' | b'\\');
+            if windows_abs { Some(norm) } else { None }
+        }
     }
 }
 
@@ -235,13 +252,46 @@ pub fn resolve(rf: &FileRef, cwd: Option<&str>, remote: bool) -> Resolved {
         };
     }
     match cwd {
-        Some(cwd) => Resolved::Open {
-            path: format!("{}\\{}", normalize_cwd(cwd), rf.path).replace('/', "\\"),
-            line: rf.line,
-            col: rf.col,
-        },
+        Some(cwd) => {
+            let found = windows_cwd(cwd);
+            if let Some(found) = found {
+                Resolved::Open {
+                    path: format!("{}\\{}", found, rf.path).replace('/', "\\"),
+                    line: rf.line,
+                    col: rf.col,
+                }
+            } else {
+                Resolved::CopyOnly { text }
+            }
+        }
         None => Resolved::CopyOnly { text },
     }
+}
+
+/// Tokenize the editor template with shell-style double quotes, so a quoted
+/// executable path with spaces stays one token (issue #65). No shell runs.
+fn tokenize_template(template: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    for c in template.chars() {
+        if c == '"' {
+            quoted = !quoted;
+            continue;
+        }
+        if c.is_whitespace() && !quoted {
+            if !cur.is_empty() {
+                tokens.push(cur);
+                cur = String::new();
+            }
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
 }
 
 /// Build the editor argv from the config template. Placeholders `{file}`,
@@ -261,8 +311,8 @@ pub fn editor_command(
         return None;
     }
     let col_text = col.map_or(String::new(), |c| c.to_string());
-    let mut tokens: Vec<String> = template
-        .split_whitespace()
+    let mut tokens: Vec<String> = tokenize_template(template)
+        .into_iter()
         .map(|t| {
             t.replace("{file}", path)
                 .replace("{line}", &line.to_string())
@@ -433,5 +483,43 @@ mod tests {
         assert_eq!(find_ref(&line, col).unwrap().1.path, "src/a.rs");
         let junk = "x".repeat(100_000);
         assert!(find_ref(&junk, 5).is_none());
+    }
+
+    #[test]
+    fn python_unicode_prefix_uses_char_columns() {
+        // Issue #64: click column 3 is the start of File, not byte 7.
+        let r = find_ref("错误 File \"src/main.py\", line 12", 3).unwrap();
+        assert_eq!(r.1.path, "src/main.py");
+        assert_eq!(r.1.line, 12);
+        assert_eq!(r.0.start, 3);
+    }
+
+    #[test]
+    fn quoted_editor_path_stays_one_token() {
+        let (p, a) = editor_command(
+            "\"C:\\Program Files\\VS Code\\Code.exe\" --goto {file}:{line}:{column}",
+            r"C:\p a\x.rs",
+            12,
+            Some(5),
+        )
+        .unwrap();
+        assert_eq!(p, r"C:\Program Files\VS Code\Code.exe");
+        assert_eq!(
+            a,
+            vec!["--goto".to_string(), r"C:\p a\x.rs:12:5".to_string()]
+        );
+    }
+
+    #[test]
+    fn wsl_relative_cwd_maps_to_a_drive() {
+        let rf = FileRef {
+            path: "src/main.rs".into(),
+            line: 12,
+            col: Some(3),
+        };
+        let r = resolve(&rf, Some("/mnt/c/project"), false);
+        assert!(matches!(r, Resolved::Open{ path, .. } if path == r"C:\project\src\main.rs"));
+        let r = resolve(&rf, Some("/home/user"), false);
+        assert!(matches!(r, Resolved::CopyOnly { .. }));
     }
 }

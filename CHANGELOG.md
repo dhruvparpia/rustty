@@ -12,6 +12,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   a bookmark overlay anchored to absolute history lines with eviction marking,
   and streaming selection/last-command export through a native Save As dialog.
 
+### Fixed
+
+- Attach snapshots now restore terminal modes, the active pen, partial UTF-8 bytes
+  and both screens; resizing in the alternate screen also resizes the saved main
+  screen.
+- GUI Take Control sends `readOnly:false`; console/GUI resync discards frames already
+  in the installed snapshot and applies newer output/resize frames once.
+- Diagnostic references use character columns for Python tracebacks, keep quoted
+  editor paths as one token, and map WSL `/mnt/c` cwd to `C:\` before joining relative
+  paths.
+
 ## [0.5.0] - 2026-11-02
 
 The v0.2–v0.5 features accumulated here (those milestones were tagged as
