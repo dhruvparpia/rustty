@@ -188,3 +188,28 @@ Dependencies: reliability #36; stable automation identities #44; workspace #37
 integration is useful but not required for the first `--attach` proof. This design
 initially targets local Windows sessions. Network access and remote-machine attach
 need a separate transport/authentication design and are not implied by `<n>`.
+
+## Shipped limits (v0.5)
+
+What the shipped feature does not do, stated so no one discovers it by accident:
+
+- **Local Windows managed sessions only.** The host spawns and owns every
+  session it lists. It never adopts an already-running console program, a
+  terminal window it did not create, or a session on another machine.
+- **The host process is the durability boundary.** A session survives every
+  client (GUI or CLI) crash while the host lives. If the host process itself
+  dies — crash, forced kill, sign-out, reboot — its shells die with it (they
+  live in the host's job object) and are not respawned. Attaching afterwards
+  gives an explicit "host unavailable" (exit 5); the next client starts a
+  fresh host with an empty session set.
+- **No network, no authentication.** The named pipe is local and open to the
+  logged-in user's session only. Anyone who can attach can control the shell.
+  Cross-machine attach needs the separate transport design named above.
+- **Bounded history.** Exited sessions keep their metadata in a ring of the
+  most recent 32 records; older ones fall off. Detached-output replay covers
+  the most recent 128 KiB of PTY output per session; resuming beyond that
+  point gets a fresh full snapshot, not a partial delta.
+- **Protocol is negotiated down, never up.** A newer client attaches to an
+  older host at the host's version; a client that speaks nothing the host
+  knows gets an explicit protocol-mismatch (exit 6), never a degraded
+  silent attach.

@@ -75,6 +75,7 @@ code allocation-free. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 | Doc | Purpose |
 |---|---|
 | [`docs/SPEC.md`](docs/SPEC.md) | Full product specification / SRS |
+| [`docs/design-session-attach.md`](docs/design-session-attach.md) | Persistent sessions and console attach — contract and shipped limits |
 | [`ROADMAP.md`](ROADMAP.md) | Versioned release plan |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Dev setup, conventions, PR process |
 | [`SECURITY.md`](SECURITY.md) | Vulnerability reporting |

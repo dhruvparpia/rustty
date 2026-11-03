@@ -626,7 +626,7 @@ pub mod server {
         ids_dir: std::path::PathBuf,
         cfg: Config,
         live: BTreeMap<u32, Managed>,
-        exited: VecDeque<SessionRecord>,
+        pub(crate) exited: VecDeque<SessionRecord>,
         /// Set by `host.shutdown`; the serve loop exits at the next tick.
         pub shutdown: Arc<AtomicBool>,
         /// Connected clients; idle exit needs zero.
@@ -675,14 +675,14 @@ pub mod server {
             all
         }
 
-        fn find_record(&self, alias: u32) -> Option<&SessionRecord> {
+        pub(crate) fn find_record(&self, alias: u32) -> Option<&SessionRecord> {
             self.live
                 .get(&alias)
                 .map(|m| &m.record)
                 .or_else(|| self.exited.iter().find(|r| r.alias == alias))
         }
 
-        fn push_exited(&mut self, record: SessionRecord) {
+        pub(crate) fn push_exited(&mut self, record: SessionRecord) {
             self.exited.push_back(record);
             while self.exited.len() > MAX_EXITED_RECORDS {
                 self.exited.pop_front();
@@ -2289,10 +2289,167 @@ mod tests {
             resp.get("result").is_some(),
             "new controller's input accepted"
         );
+
+        // The demoted controller's resize is refused too (issue #50).
+        let v = json!({
+            "method": "session.resize", "id": 5,
+            "params": {"alias": alias, "cols": 100, "rows": 30},
+        });
+        let resp = server::handle(&app, &v, &c1);
+        assert_eq!(resp["error"]["code"].as_str(), Some("session-busy"));
         drop(rx2);
 
         // Clean up the live session (kills the shell via the job).
-        let v = json!({"method": "session.terminate", "params": {"alias": alias}, "id": 5});
+        let v = json!({"method": "session.terminate", "params": {"alias": alias}, "id": 6});
+        server::handle(&app, &v, &conn);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn attach_statuses_are_explicit_and_never_respawn() {
+        use std::sync::mpsc::sync_channel;
+
+        use server::{App, Conn};
+
+        let app = std::sync::Arc::new(std::sync::Mutex::new(App::new().expect("app")));
+        let (tx, _drain) = sync_channel(8);
+        let conn = Conn { token: 1, tx: &tx };
+
+        // Unknown alias: explicit target-stale, never a silent spawn.
+        let v = json!({"method": "session.attach", "params": {"alias": 999_999}, "id": 1});
+        let resp = server::handle(&app, &v, &conn);
+        assert_eq!(resp["error"]["code"].as_str(), Some("target-stale"));
+
+        // Create and terminate a session, then attach to the exited one.
+        let req = json!({"method": "session.create", "params": {"cols": 80, "rows": 24}, "id": 2});
+        let alias = server::handle(&app, &req, &conn)["result"]["session"]["alias"]
+            .as_u64()
+            .expect("alias");
+        let v = json!({"method": "session.terminate", "params": {"alias": alias}, "id": 3});
+        server::handle(&app, &v, &conn);
+
+        let v = json!({"method": "session.attach", "params": {"alias": alias}, "id": 4});
+        let resp = server::handle(&app, &v, &conn);
+        assert_eq!(resp["error"]["code"].as_str(), Some("target-stale"));
+
+        // The record survives as "exited"; no live session was respawned.
+        let v = json!({"method": "session.info", "params": {"alias": alias}, "id": 5});
+        let rec = &server::handle(&app, &v, &conn)["result"]["session"];
+        assert_eq!(rec["state"].as_str(), Some("exited"));
+        assert!(rec.get("exitCode").is_some(), "exit code recorded");
+        let v = json!({"method": "session.list", "id": 6});
+        let sessions = server::handle(&app, &v, &conn)["result"]["sessions"]
+            .as_array()
+            .expect("list")
+            .clone();
+        assert_eq!(sessions.len(), 1, "exited record only, no respawn");
+        assert_eq!(sessions[0]["state"].as_str(), Some("exited"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exited_history_stays_bounded() {
+        use server::App;
+
+        let mut app = App::new().expect("app");
+        for n in 0..(MAX_EXITED_RECORDS + 8) {
+            let record = SessionRecord {
+                id: n as u64,
+                alias: n as u32,
+                name: format!("s{n}"),
+                profile: "default".to_string(),
+                cwd: ".".to_string(),
+                program: "shell".to_string(),
+                cols: 80,
+                rows: 24,
+                pid: n as u32,
+                persistent: true,
+                state: "exited".to_string(),
+                created_unix_secs: 0,
+                exit_code: Some(0),
+            };
+            app.push_exited(record);
+        }
+        assert_eq!(app.exited.len(), MAX_EXITED_RECORDS, "ring stays bounded");
+        // Oldest records fall off; the newest survive.
+        assert!(app.find_record(0).is_none(), "oldest record evicted");
+        assert!(
+            app.find_record((MAX_EXITED_RECORDS + 7) as u32).is_some(),
+            "newest record kept"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protocol_negotiation_picks_the_min_and_rejects_the_unusable() {
+        use std::sync::mpsc::sync_channel;
+
+        use server::{App, Conn};
+
+        let app = std::sync::Arc::new(std::sync::Mutex::new(App::new().expect("app")));
+        let (tx, _drain) = sync_channel(8);
+        let conn = Conn { token: 1, tx: &tx };
+
+        // Newer client than host: negotiates down to the host's version.
+        let v = json!({"method": "initialize", "params": {"protocol": 99}, "id": 1});
+        let resp = server::handle(&app, &v, &conn);
+        assert_eq!(resp["result"]["protocol"].as_u64(), Some(1));
+
+        // Client speaks nothing the host knows: explicit mismatch, and the
+        // CLI maps that to exit code 6 (attach never degrades silently).
+        let v = json!({"method": "initialize", "params": {"protocol": 0}, "id": 2});
+        let resp = server::handle(&app, &v, &conn);
+        assert_eq!(resp["error"]["code"].as_str(), Some("protocol-mismatch"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stress_repeated_attach_detach_keeps_the_session_live() {
+        use std::sync::mpsc::sync_channel;
+
+        use server::{App, Conn};
+
+        let app = std::sync::Arc::new(std::sync::Mutex::new(App::new().expect("app")));
+        let (tx, _drain) = sync_channel(8);
+        let conn = Conn { token: 1, tx: &tx };
+        let req = json!({"method": "session.create", "params": {"cols": 80, "rows": 24}, "id": 1});
+        let alias = server::handle(&app, &req, &conn)["result"]["session"]["alias"]
+            .as_u64()
+            .expect("alias");
+        let v = json!({"method": "session.info", "params": {"alias": alias}, "id": 2});
+        let pid = server::handle(&app, &v, &conn)["result"]["session"]["pid"]
+            .as_u64()
+            .expect("pid");
+
+        // 30 attach/reattach cycles from distinct clients (crash-reconnect
+        // shape: each token takes control, detaches, next token reclaims).
+        for n in 0..30u32 {
+            let (atx, arx) = sync_channel(64);
+            let ac = Conn {
+                token: 1000 + u64::from(n),
+                tx: &atx,
+            };
+            let v = json!({
+                "method": "session.attach", "id": 3 + n,
+                "params": {"alias": alias, "takeControl": true},
+            });
+            let resp = server::handle(&app, &v, &ac);
+            assert!(
+                resp["result"]["controlGranted"].as_bool() == Some(true),
+                "cycle {n}: attach granted"
+            );
+            let v = json!({"method": "session.detach", "id": 100 + n});
+            server::handle(&app, &v, &ac);
+            drop(arx);
+        }
+
+        // Same shell process, still live: no respawn across 30 reconnects.
+        let v = json!({"method": "session.info", "params": {"alias": alias}, "id": 999});
+        let rec = &server::handle(&app, &v, &conn)["result"]["session"];
+        assert_eq!(rec["pid"].as_u64(), Some(pid), "shell pid preserved");
+        assert_eq!(rec["state"].as_str(), Some("live"));
+
+        let v = json!({"method": "session.terminate", "params": {"alias": alias}, "id": 1000});
         server::handle(&app, &v, &conn);
     }
 }
