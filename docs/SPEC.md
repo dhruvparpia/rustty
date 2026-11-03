@@ -850,6 +850,7 @@ copy-on-select = false
 cursor-shape = "block"
 cursor-blink = true
 opacity = 100
+editor = "code --goto {file}:{line}:{column}"
 
 [window]
 padding = { x = 8, y = 8 }
@@ -1212,8 +1213,9 @@ PowerShell, and Visual Studio developer shells (`vswhere`).
 ## 9.30 Hyperlink requirements
 
 OSC 8 support (#41, roadmap Stage 1, slice 1). Diagnostic
-`file:line:column` recognition, editor launch and keyboard hint mode are
-the remaining #41 scope and will be specified with their child issues.
+`file:line:column` recognition and editor launch are LINK-006..008
+(#51, slice 2). Keyboard hint mode is the remaining #41 scope and will
+be specified with its child issue.
 
 | ID | Requirement | Priority |
 |---|---|---|
@@ -1222,6 +1224,9 @@ the remaining #41 scope and will be specified with their child issues.
 | LINK-003 | OSC 8 cells render in the theme `link` colour (config key `link`) with an underline, and only for real OSC 8 state (SEC-022); auto-detected text must stay visually distinct. | P1 |
 | LINK-004 | Opening a link shall require explicit user interaction: Ctrl+click, or context menu "Open Link" (SEC-003). Only `http`/`https` targets open; every other scheme is copy-only (SEC-004). | P1 |
 | LINK-005 | A plain click (no drag) on a link cell, and context menu "Copy Link", copy the URI to the clipboard. | P1 |
+| LINK-006 | Diagnostic references (`file:line:column`) in compiler and stack-trace output (cargo/clippy, tsc, python, gcc/WSL styles; drive letters, UNC, spaces and Unicode paths) shall be recognized by scanning the clicked line on demand: nothing is stored on cells, so auto-detected text never takes the OSC 8 link paint path (SEC-022). Paths are anchored by pattern shape, not naive splitting; junk (URLs, times, host:port, mid-word text) is not recognized. | P1 |
+| LINK-007 | A relative diagnostic path shall resolve against the pane's OSC 7 cwd; `/mnt/<drive>/…` shall map to `<D>:\…`; Windows absolute paths pass through. Other POSIX paths and sessions on a remote OSC 7 host (IDENT-001) are copy-path-only, never launched. | P1 |
+| LINK-008 | Ctrl+click, or context menu "Open in Editor", shall launch the command from the config key `editor` (default `code --goto {file}:{line}:{column}`; `{file}` `{line}` `{column}` placeholders, whitespace-split into argv; empty disables launching, LINK-004's explicit-interaction rule). Non-openable targets (remote host, no cwd, disabled editor) copy the reference text. A failed launch shall be ignored; plain-click behaviour is unchanged. | P1 |
 
 ---
 

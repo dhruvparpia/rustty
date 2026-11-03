@@ -92,6 +92,7 @@ use crate::color::Color;
 use crate::config::{
     self, Config, FontConfig, KeyAction, QuickEdge, QuickTerminalConfig, TabBar, TabBarPlacement,
 };
+use crate::diagnostics::{self, Resolved};
 use crate::discovery::{self, Found};
 use crate::keyboard::{self, Modifiers};
 use crate::palette::{Command, PaletteItem, PaletteState, builtin_shortcut, display_shortcut};
@@ -201,6 +202,10 @@ const MENU_COPY_LINK: usize = 0xE856;
 const MENU_VIEW_COPY_ATTACH: usize = 0xE860;
 const MENU_VIEW_TAKE_CONTROL: usize = 0xE861;
 const MENU_VIEW_TERMINATE: usize = 0xE862;
+/// Diagnostic reference under the pointer: open in editor / copy path
+/// (issue #51).
+const MENU_OPEN_EDITOR: usize = 0xE863;
+const MENU_COPY_PATH: usize = 0xE864;
 /// Workspaces submenu: "Open <name>" items (WORKSPACE-003), one per
 /// template, capped by the store's own 64-template limit.
 const MENU_WS_OPEN_BASE: usize = 0xF200;
@@ -691,6 +696,16 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         MENU_COPY_LINK => {
             if let Some(uri) = state_mut(hwnd).and_then(|s| s.link_target.take()) {
                 let _ = clipboard::set_text(&uri);
+            }
+        }
+        MENU_OPEN_EDITOR => {
+            if let Some(r) = state_mut(hwnd).and_then(|s| s.diag_target.take()) {
+                open_diagnostic(hwnd, r);
+            }
+        }
+        MENU_COPY_PATH => {
+            if let Some(r) = state_mut(hwnd).and_then(|s| s.diag_target.take()) {
+                let _ = clipboard::set_text(&diag_text(&r));
             }
         }
         MENU_NEXT_TAB => switch_tab_rel(hwnd, 1),
@@ -1191,6 +1206,10 @@ struct WindowState {
     /// OSC 8 link URI under the pointer when the context menu was opened;
     /// the Open/Copy Link menu items consume it (issue #41).
     link_target: Option<String>,
+    /// Diagnostic reference resolved under the pointer when the context
+    /// menu was opened; the Open in Editor/Copy Path items consume it
+    /// (issue #51).
+    diag_target: Option<Resolved>,
     /// Set when an app key binding consumed a `WM_KEYDOWN`; the matching
     /// `WM_CHAR` Windows posts afterwards must not reach the PTY.
     suppress_char: bool,
@@ -2037,6 +2056,7 @@ fn create_quick_window() {
         drag_anchor: None,
         last_click: None,
         link_target: None,
+        diag_target: None,
         suppress_char: false,
         pending_surrogate: None,
         fullscreen: None,
@@ -3454,6 +3474,58 @@ fn open_link(hwnd: HWND, uri: &str) {
     }
 }
 
+/// Issue #51: scan the clicked grid line for a `file:line:col` reference
+/// under grid column `col` and resolve it against the pane's OSC 7 cwd
+/// and host. SEC-022: the scan happens at click time and stores nothing
+/// on cells, so auto-detected text never takes the OSC 8 link paint path.
+fn diag_ref_at(hwnd: HWND, idx: usize, abs: usize, col: usize) -> Option<Resolved> {
+    state_ref(hwnd).and_then(|s| {
+        let pane = s.app.active_tab()?.pane_at(idx)?;
+        let text = pane.grid().line_text_abs(abs)?;
+        let (_, rf) = diagnostics::find_ref(&text, col)?;
+        Some(diagnostics::resolve(
+            &rf,
+            pane.cwd(),
+            pane.shell_host().is_some(),
+        ))
+    })
+}
+
+/// The text Copy Path puts on the clipboard for a resolved reference.
+fn diag_text(r: &Resolved) -> String {
+    match r {
+        Resolved::Open {
+            path,
+            line,
+            col: Some(c),
+        } => format!("{path}:{line}:{c}"),
+        Resolved::Open { path, line, .. } => format!("{path}:{line}"),
+        Resolved::CopyOnly { text } => text.clone(),
+    }
+}
+
+/// Issue #51: launch the configured editor for an openable reference;
+/// copy the reference text when the target is not openable here or the
+/// editor is disabled. A failed launch is ignored (no editor installed
+/// must never break the terminal).
+fn open_diagnostic(hwnd: HWND, r: Resolved) {
+    let Resolved::Open { path, line, col } = r else {
+        let _ = clipboard::set_text(&diag_text(&r));
+        return;
+    };
+    let template = state_ref(hwnd)
+        .map(|s| s.cfg.editor.clone())
+        .unwrap_or_default();
+    match diagnostics::editor_command(&template, &path, line, col) {
+        Some((program, args)) => {
+            let _ = std::process::Command::new(&program).args(&args).spawn();
+        }
+        None => {
+            let _ = clipboard::set_text(&diag_text(&Resolved::Open { path, line, col }));
+        }
+    }
+}
+
 fn handle_rbutton_down(hwnd: HWND, lparam: LPARAM) {
     if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
         && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
@@ -3517,6 +3589,27 @@ fn handle_context_menu(hwnd: HWND, lparam: LPARAM) {
             pane.parser().link_uri(id).map(str::to_string)
         })
     };
+    // Issue #51: a diagnostic reference under the pointer gets Open in
+    // Editor/Copy Path items; OSC 8 links win, and the line is scanned
+    // on demand (SEC-022).
+    let diag = if link_uri.is_none() {
+        let lp = LPARAM((((cpt.y as u32 & 0xFFFF) << 16) | (cpt.x as u32 & 0xFFFF)) as isize);
+        let (x, y) = cursor_dips(hwnd, lp);
+        state_ref(hwnd).and_then(|s| {
+            let (idx, row, col) = cell_at(s, x, y, client_height_dips(hwnd))?;
+            let abs = abs_row_in_pane(s, idx, row);
+            let pane = s.app.active_tab()?.pane_at(idx)?;
+            let text = pane.grid().line_text_abs(abs)?;
+            let (_, rf) = diagnostics::find_ref(&text, col)?;
+            Some(diagnostics::resolve(
+                &rf,
+                pane.cwd(),
+                pane.shell_host().is_some(),
+            ))
+        })
+    } else {
+        None
+    };
     unsafe {
         let menu = match CreatePopupMenu() {
             Ok(m) => m,
@@ -3527,6 +3620,13 @@ fn handle_context_menu(hwnd: HWND, lparam: LPARAM) {
             if openable_uri(uri) {
                 let _ = append_menu_item(menu, "Open Link	Ctrl+Click", MENU_OPEN_LINK);
             }
+            let _ = append_menu_separator(menu);
+        }
+        if let Some(r) = &diag {
+            if matches!(r, Resolved::Open { .. }) {
+                let _ = append_menu_item(menu, "Open in Editor	Ctrl+Click", MENU_OPEN_EDITOR);
+            }
+            let _ = append_menu_item(menu, "Copy Path", MENU_COPY_PATH);
             let _ = append_menu_separator(menu);
         }
         let _ = append_menu_item(menu, "Copy	Ctrl+Shift+C", MENU_COPY);
@@ -3543,10 +3643,16 @@ fn handle_context_menu(hwnd: HWND, lparam: LPARAM) {
         {
             s.link_target = Some(uri);
         }
+        if let Some(r) = diag
+            && let Some(s) = state_mut(hwnd)
+        {
+            s.diag_target = Some(r);
+        }
         let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, None, hwnd, None);
-        // Menu dismissed with no Open/Copy selection: drop the target.
+        // Menu dismissed with no Open/Copy selection: drop the targets.
         if let Some(s) = state_mut(hwnd) {
             s.link_target = None;
+            s.diag_target = None;
         }
         let _ = DestroyMenu(menu);
     }
@@ -3705,6 +3811,15 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
         && let Some(uri) = link_uri_at(hwnd, idx, view_row, col)
     {
         open_link(hwnd, &uri);
+        return;
+    }
+    // Issue #51: Ctrl+click on a diagnostic reference opens it in the
+    // configured editor (copy-path for non-openable targets); the line
+    // is scanned on demand, so plain clicks and selection are untouched.
+    if unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0
+        && let Some(r) = diag_ref_at(hwnd, idx, abs, col)
+    {
+        open_diagnostic(hwnd, r);
         return;
     }
     // Synthetic double-click detection: the system coalesces real mouse
@@ -5305,6 +5420,7 @@ pub fn run(
         drag_anchor: None,
         last_click: None,
         link_target: None,
+        diag_target: None,
         suppress_char: false,
         pending_surrogate: None,
         fullscreen: None,

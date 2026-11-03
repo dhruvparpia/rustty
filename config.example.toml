@@ -74,6 +74,12 @@ bell = "audible"
 # directory; the file is `session.toml` beside `config.toml`.
 session-restore = true
 
+# Command that opens a Ctrl+clicked diagnostic file:line:column reference
+# (LINK-008). {file} {line} {column} are substituted and the command is
+# split on whitespace into argv. An empty string disables launching; the
+# reference is then copied to the clipboard.
+editor = "code --goto {file}:{line}:{column}"
+
 # ---------------------------------------------------------------------------
 # Theme (CONFIG-002/003, THEME-009/013/014)
 # ---------------------------------------------------------------------------

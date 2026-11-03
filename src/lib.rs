@@ -22,6 +22,8 @@ pub mod color;
 /// issue #38).
 pub mod command;
 pub mod config;
+/// Diagnostic `file:line:col` recognition and editor launch (issue #51).
+pub mod diagnostics;
 /// Shell discovery (issue #40): WSL distros, PowerShell 7, VS developer
 /// environments, merged into the profile list.
 pub mod discovery;

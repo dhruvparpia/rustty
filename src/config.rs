@@ -802,6 +802,11 @@ pub struct Config {
     /// default `C-]` (Ctrl+]). `prefix d` detaches, `prefix ?` shows help.
     #[serde(rename = "detach-prefix", default = "default_detach_prefix")]
     pub detach_prefix: String,
+    /// Command that opens diagnostic `file:line:col` references (issue
+    /// #51): `{file}` `{line}` `{column}` placeholders, whitespace-split
+    /// into argv; empty disables launching (copy-path only).
+    #[serde(default = "default_editor")]
+    pub editor: String,
     /// Profile used for the first tab.
     #[serde(rename = "starting-profile", default)]
     pub starting_profile: String,
@@ -845,6 +850,7 @@ impl Default for Config {
             shell_integration: false,
             command_notify_ms: default_notify_ms(),
             detach_prefix: default_detach_prefix(),
+            editor: default_editor(),
             starting_profile: String::new(),
             window: WindowConfig::default(),
             split: SplitConfig::default(),
@@ -877,6 +883,7 @@ impl PartialEq for Config {
             && self.shell_integration == other.shell_integration
             && self.command_notify_ms == other.command_notify_ms
             && self.detach_prefix == other.detach_prefix
+            && self.editor == other.editor
             && self.starting_profile == other.starting_profile
             && self.window == other.window
             && self.split == other.split
@@ -922,6 +929,11 @@ fn default_notify_ms() -> u64 {
 /// Default detach prefix for the attach frontend (issue #47): Ctrl+].
 fn default_detach_prefix() -> String {
     "C-]".to_string()
+}
+
+/// Default editor command for diagnostic references (issue #51).
+fn default_editor() -> String {
+    "code --goto {file}:{line}:{column}".to_string()
 }
 
 fn validate_keybindings(map: &BTreeMap<String, String>) -> anyhow::Result<()> {
