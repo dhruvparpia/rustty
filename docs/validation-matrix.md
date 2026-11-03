@@ -7,6 +7,10 @@ individually with `cargo test --release -- --ignored --nocapture --exact <name>`
 
 ## Toolchain
 
+For the separate planned desktop platform track, see the
+[cross-platform acceptance matrix](validation-cross-platform.md). The historical
+Windows results below do not qualify macOS/Linux or the new platform interfaces.
+
 | Component | Version |
 | --- | --- |
 | rustc (stable) | 1.99.1 (2026-10-13), MSRV 1.99, edition 2024 |

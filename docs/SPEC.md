@@ -26,6 +26,13 @@ This document is the initial **full specification** and **Software Requirements 
 
 The product is **Windows-first**, not cross-platform in MVP.
 
+**2026-11-03 scope amendment:** the owner requested desktop cross-platform
+requirements for epic [#95](https://github.com/dhruvparpia/rustty/issues/95).
+The normative post-MVP extension is [Cross-platform desktop SRS](srs-cross-platform.md),
+incorporated by reference as §9.33 below. Windows API requirements and historical
+MVP exclusions remain Windows/MVP-specific. macOS/Linux support is planned, not
+shipped or qualified by this amendment; Windows 1.0 remains a separate gate.
+
 The product is **not a full POSIX shell**, not a replacement for Linux, and not an Electron terminal.
 
 ---
@@ -1271,6 +1278,23 @@ owns managed PTYs independently of any client. Console attach
 | HOST-006 | Graceful termination closes the shell's input (stdin EOF) and waits a bounded grace period (5 s) before terminating the job, so shells get a chance to exit on their own. | P1 |
 | HOST-007 | Lifecycle is explicit at creation: persistent sessions survive client detach (the shell keeps running after `--new-session --detach` and after any client exits); ephemeral sessions terminate when the last client detaches. The host never adopts a process it did not spawn. | P1 |
 | HOST-008 | Protocol version negotiation: client and host agree on `min(client, host)` at `initialize`; an incompatible host exits 6 with a clear message. A client never replaces, kills, or reconfigures a live host to force a version. | P1 |
+
+---
+
+## 9.33 Cross-platform desktop requirements (post-MVP)
+
+The [cross-platform SRS](srs-cross-platform.md) defines CP-ARCH, CP-PTY,
+CP-HOST, CP-ATTACH, CP-UI, CP-DATA, CP-MAC, CP-LINUX and CP-QUAL requirements.
+It is the authoritative platform-extension contract for #95–#100; its
+[acceptance matrix](validation-cross-platform.md) defines required evidence.
+
+Existing platform-independent terminal semantics remain shared. Windows-specific
+ConPTY, DirectWrite/Direct2D, named-pipe, Job Object and UIA requirements are not
+literal API requirements for macOS/Linux. The extension's applicability table
+defines their Unix counterparts and explicit limitations. This amendment does
+not add mobile, remote hosting, OSC 52, keyboard protocols or competitor-research
+features to scope. Detailed design choices remain subject to the recorded ADR
+gates; a requirement is not evidence of implementation.
 
 ---
 
@@ -2579,6 +2603,10 @@ Cross-platform UI:
 
 Not MVP.
 
+For the approved post-MVP desktop track, see [§9.33](#933-cross-platform-desktop-requirements-post-mvp)
+and [the architecture decision gates](srs-cross-platform.md#8-design-decisions-required-before-implementation).
+The libraries below remain evaluation candidates, not a mandated stack.
+
 If later:
 
 ```text
@@ -3109,6 +3137,7 @@ TUI apps
 |---|---|
 | Product vision | Defined |
 | Platform | Windows 10/11 |
+| Post-MVP desktop platform extension | macOS/Linux requirements in §9.33; qualification pending, #95–#100 |
 | Language | Rust |
 | License | MIT |
 | UI | Win32 native |
@@ -3339,4 +3368,3 @@ v0.3: shell integration + accessibility + IME + polish
 v0.4: Ghostty-like parity
 v0.5: stretch features
 ```
-
