@@ -152,6 +152,7 @@ editor = "code --goto {file}:{line}:{column}"
 # "Ctrl+Shift+R" = "rename-tab"
 # "Ctrl+Shift+PageUp" = "move-tab-left"
 # "Ctrl+Shift+PageDown" = "move-tab-right"
+# "Ctrl+Shift+K" = "hint-mode"        # keyboard hint mode (built-in default)
 
 # ---------------------------------------------------------------------------
 # Shell profiles (SHELL-017/019/021, CONFIG-023..028)

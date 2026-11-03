@@ -33,6 +33,9 @@ pub mod graphics;
 // Persistent session host (issue #46, docs/design-session-host.md). The
 // server/client submodules are the raw Win32 pipe/token/job FFI boundary.
 pub mod grid;
+/// Keyboard hint mode (issue #52): visible targets, label assignment, the
+/// label-prefix state machine (pure).
+pub mod hints;
 #[allow(
     unsafe_code,
     reason = "HOST-001: the session host's server and client are raw Win32 FFI boundaries"

@@ -1225,6 +1225,9 @@ struct WindowState {
     search: Option<SearchState>,
     /// PALETTE-001 (issue #39): open command palette, `None` while closed.
     palette: Option<crate::palette::PaletteState>,
+    /// Keyboard hint mode (issue #52): visible targets with typed labels,
+    /// `None` when closed.
+    hint: Option<crate::hints::HintState>,
     /// PALETTE-005: recently run palette labels, newest first, capped.
     recent: Vec<String>,
     /// Index of the selected built-in profile (MENU-008). New tabs and
@@ -1554,6 +1557,7 @@ unsafe extern "system" fn wnd_proc(
                     &s.theme,
                     s.search.as_ref(),
                     s.palette.as_ref(),
+                    s.hint.as_ref(),
                     prompt.as_deref(),
                 );
             }
@@ -2062,6 +2066,7 @@ fn create_quick_window() {
         fullscreen: None,
         search: None,
         palette: None,
+        hint: None,
         recent: Vec::new(),
         profile: 0,
     });
@@ -2422,6 +2427,18 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
     // the query instead of the PTY. Nothing reaches the shell.
     if state_ref(hwnd).is_some_and(|s| s.palette.is_some()) {
         handle_palette_keydown(hwnd, vk);
+        return;
+    }
+    // Ctrl+Shift+K opens or closes keyboard hint mode (issue #52).
+    if mods.ctrl && mods.shift && !mods.alt && vk == 0x4B {
+        toggle_hint(hwnd);
+        return;
+    }
+    // While hint mode is open every keydown is swallowed: labels, Enter,
+    // c/u and Esc drive it, and WM_CHAR is suppressed, so nothing (held
+    // keys included) reaches the shell (issue #52).
+    if state_ref(hwnd).is_some_and(|s| s.hint.is_some()) {
+        handle_hint_keydown(hwnd, vk);
         return;
     }
     // Ctrl+F opens or closes the search overlay (SEARCH-002).
@@ -2790,6 +2807,185 @@ fn toggle_palette(hwnd: HWND) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
+/// Ctrl+Shift+K (issue #52): open hint mode (visible links and file
+/// references get typed labels), or close it when already open. It takes
+/// the overlay from search/palette (one overlay per window); the grid is
+/// never modified, the labels are overlay paint only.
+fn toggle_hint(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.hint.is_some() {
+        s.hint = None;
+    } else {
+        s.search = None;
+        s.palette = None;
+        let collected = collect_hints(s);
+        if collected.is_empty() {
+            s.suppress_char = true;
+            return;
+        }
+        s.hint = Some(crate::hints::HintState {
+            hints: collected,
+            prefix: String::new(),
+            pending: None,
+        });
+    }
+    s.suppress_char = true;
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Collect the hint targets from the focused pane's visible viewport
+/// only: OSC 8 link runs, then `file:line:col` references per line
+/// (references overlapping a link span are dropped, SEC-022). Scan cost
+/// is paid once when hint mode opens.
+fn collect_hints(s: &WindowState) -> Vec<crate::hints::Hint> {
+    let Some(tab) = s.app.active_tab() else {
+        return Vec::new();
+    };
+    let focused = tab.focused_index().unwrap_or(0);
+    let Some(pane) = tab.pane_at(focused) else {
+        return Vec::new();
+    };
+    let rows = pane.grid().rows();
+    let mut links: Vec<crate::hints::LinkSpan> = Vec::new();
+    for row in 0..rows {
+        let Some(line) = pane.grid().row(row) else {
+            continue;
+        };
+        let mut col = 0usize;
+        while col < line.cells.len() {
+            let id = line.cells[col].link;
+            if id == 0 {
+                col += 1;
+                continue;
+            }
+            let mut end = col + 1;
+            while end < line.cells.len() && line.cells[end].link == id {
+                end += 1;
+            }
+            if let Some(url) = pane.parser().link_uri(id) {
+                links.push(crate::hints::LinkSpan {
+                    row,
+                    col_start: col,
+                    col_end: end,
+                    url: url.to_string(),
+                });
+            }
+            col = end;
+        }
+    }
+    let cwd = pane.cwd().map(str::to_string);
+    let remote = pane.shell_host().is_some();
+    let template = s.cfg.editor.clone();
+    let mut diags = Vec::new();
+    for row in 0..rows {
+        let Some(text) = pane.grid().line_text(row) else {
+            continue;
+        };
+        for (range, rf) in diagnostics::find_refs(&text) {
+            let resolved = diagnostics::resolve(&rf, cwd.as_deref(), remote);
+            let open_command = match &resolved {
+                Resolved::Open { path, line, col } => {
+                    diagnostics::editor_command(&template, path, *line, *col)
+                }
+                Resolved::CopyOnly { .. } => None,
+            };
+            diags.push(crate::hints::DiagSpan {
+                row,
+                col_start: range.start,
+                col_end: range.end,
+                target: diag_text(&resolved),
+                file_ref: rf,
+                open_command,
+            });
+        }
+    }
+    crate::hints::build_hints(&links, &diags, rows)
+}
+
+/// Key pressed on a pending hint: Enter/Space opens, `c`/`u` copy.
+#[derive(Clone, Copy)]
+enum HintDispatch {
+    Open,
+    Copy(crate::hints::Action),
+}
+
+/// Keydown while hint mode is open (issue #52): label keys drive the
+/// prefix machine, Enter opens the pending target, `c`/`u` copy, Esc
+/// dismisses. Every keydown is swallowed here and `suppress_char`
+/// swallows the matching `WM_CHAR`, so no keystroke — including held
+/// keys — reaches the shell while open or leaks on dismiss.
+fn handle_hint_keydown(hwnd: HWND, vk: u16) {
+    let mods = read_mods();
+    let Some(s) = state_mut(hwnd) else { return };
+    s.suppress_char = true;
+    let mut close = false;
+    let mut dispatch: Option<(crate::hints::Hint, HintDispatch)> = None;
+    if let Some(hint) = s.hint.as_mut() {
+        match vk {
+            0x1B => close = true, // Esc: dismiss
+            0x08 => {
+                // Backspace: shorten the prefix.
+                hint.prefix.pop();
+                hint.pending = None;
+            }
+            0x0D | 0x20 => {
+                // Enter/Space: open the pending target, then dismiss.
+                if let Some(i) = hint.pending {
+                    dispatch = Some((hint.hints[i].clone(), HintDispatch::Open));
+                }
+                close = true;
+            }
+            0x41..=0x5A if !mods.ctrl && !mods.alt => {
+                let ch = char::from(vk as u8 + 32);
+                if let Some(i) = hint.pending {
+                    // A complete label is pending: `c` copies the target,
+                    // `u` copies the URL; other letters are ignored.
+                    if let Some(a) = crate::hints::action_for(ch) {
+                        dispatch = Some((hint.hints[i].clone(), HintDispatch::Copy(a)));
+                        close = true;
+                    }
+                } else {
+                    match crate::hints::advance(&hint.hints, &hint.prefix, ch) {
+                        crate::hints::Step::Prefix(p) => hint.prefix = p,
+                        crate::hints::Step::Pending(i) => hint.pending = Some(i),
+                        crate::hints::Step::Invalid => close = true,
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if close {
+        s.hint = None;
+    }
+    if let Some((hint, d)) = dispatch {
+        match d {
+            HintDispatch::Open => dispatch_hint_open(hwnd, &hint),
+            HintDispatch::Copy(crate::hints::Action::CopyTarget) => {
+                let _ = clipboard::set_text(&hint.target);
+            }
+            HintDispatch::Copy(crate::hints::Action::CopyUrl) => {
+                if let Some(url) = &hint.url {
+                    let _ = clipboard::set_text(url);
+                }
+            }
+        }
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Open a hint target: links go through the browser path (SEC-004: only
+/// http/https open), diagnostics through the configured editor.
+fn dispatch_hint_open(hwnd: HWND, hint: &crate::hints::Hint) {
+    if hint.is_diag {
+        if let Some((program, args)) = &hint.open_command {
+            let _ = std::process::Command::new(program).args(args).spawn();
+        }
+    } else if let Some(url) = &hint.url {
+        open_link(hwnd, url);
+    }
+}
+
 /// Build the command registry (issue #39: one registry drives palette,
 /// menus and keybindings). Every [`KeyAction`] is listed, plus "New Tab:
 /// <profile>" per profile and "Switch to Tab N" per tab. Disabled rows
@@ -2858,6 +3054,7 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
     push("Copy", "Shell", KeyAction::Copy, None);
     push("Paste", "Shell", KeyAction::Paste, None);
     push("Search", "Shell", KeyAction::Search, None);
+    push("Hint Mode", "Shell", KeyAction::HintMode, None);
     push("Clear Screen", "Shell", KeyAction::ClearScreen, None);
     push(
         "Copy Last Command Output",
@@ -4223,6 +4420,7 @@ fn drain_and_cleanup(hwnd: HWND) {
                     &s.theme,
                     s.search.as_ref(),
                     s.palette.as_ref(),
+                    s.hint.as_ref(),
                     prompt.as_deref(),
                 );
                 s.app.clear_grid_damage();
@@ -4948,6 +5146,7 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
         KeyAction::NextCommand => command_jump(hwnd, 1),
         KeyAction::CopyLastCommand => copy_last_command(hwnd),
         KeyAction::CommandPalette => toggle_palette(hwnd),
+        KeyAction::HintMode => toggle_hint(hwnd),
     }
 }
 
@@ -5426,6 +5625,7 @@ pub fn run(
         fullscreen: None,
         search: None,
         palette: None,
+        hint: None,
         recent: Vec::new(),
         // CONFIG-013: `starting-profile` picks the initial shell.
         profile: {

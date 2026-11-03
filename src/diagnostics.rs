@@ -145,6 +145,14 @@ fn make_cand(text: &str, caps: regex::Captures<'_>, is_python: bool) -> Option<C
 /// whole reference and the parsed reference. Scans all three formats and
 /// prefers colon, then tsc, then python for overlapping matches.
 pub fn find_ref(line_text: &str, click_col: usize) -> Option<(std::ops::Range<usize>, FileRef)> {
+    find_refs(line_text)
+        .into_iter()
+        .find(|(range, _)| range.start <= click_col && click_col < range.end)
+}
+
+/// Every reference in the line, pattern-priority order (colon formats,
+/// then tsc, then python). Issue #52: the hint-mode scan takes all of them.
+pub fn find_refs(line_text: &str) -> Vec<(std::ops::Range<usize>, FileRef)> {
     let mut cands: Vec<Cand> = Vec::new();
     for c in colon_re().captures_iter(line_text) {
         if let Some(c) = make_cand(line_text, c, false) {
@@ -161,10 +169,7 @@ pub fn find_ref(line_text: &str, click_col: usize) -> Option<(std::ops::Range<us
             cands.push(c);
         }
     }
-    cands
-        .into_iter()
-        .find(|c| c.start <= click_col && click_col < c.end)
-        .map(|c| (c.start..c.end, c.rf))
+    cands.into_iter().map(|c| (c.start..c.end, c.rf)).collect()
 }
 
 /// Strip a leading slash from an OSC 7 path that carries a drive letter

@@ -559,6 +559,8 @@ pub enum KeyAction {
     CopyLastCommand,
     /// Open the command palette (issue #39).
     CommandPalette,
+    /// Open keyboard hint mode (issue #52).
+    HintMode,
 }
 
 impl KeyAction {
@@ -602,6 +604,7 @@ impl KeyAction {
             "next-command" => Self::NextCommand,
             "copy-last-command" | "copy-command-output" => Self::CopyLastCommand,
             "command-palette" | "palette" => Self::CommandPalette,
+            "hint-mode" | "hints" => Self::HintMode,
             _ => return None,
         })
     }

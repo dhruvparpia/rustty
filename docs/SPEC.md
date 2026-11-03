@@ -1214,8 +1214,7 @@ PowerShell, and Visual Studio developer shells (`vswhere`).
 
 OSC 8 support (#41, roadmap Stage 1, slice 1). Diagnostic
 `file:line:column` recognition and editor launch are LINK-006..008
-(#51, slice 2). Keyboard hint mode is the remaining #41 scope and will
-be specified with its child issue.
+(#51, slice 2). Keyboard hint mode is LINK-009 (#52, slice 3).
 
 | ID | Requirement | Priority |
 |---|---|---|
@@ -1227,6 +1226,7 @@ be specified with its child issue.
 | LINK-006 | Diagnostic references (`file:line:column`) in compiler and stack-trace output (cargo/clippy, tsc, python, gcc/WSL styles; drive letters, UNC, spaces and Unicode paths) shall be recognized by scanning the clicked line on demand: nothing is stored on cells, so auto-detected text never takes the OSC 8 link paint path (SEC-022). Paths are anchored by pattern shape, not naive splitting; junk (URLs, times, host:port, mid-word text) is not recognized. | P1 |
 | LINK-007 | A relative diagnostic path shall resolve against the pane's OSC 7 cwd; `/mnt/<drive>/…` shall map to `<D>:\…`; Windows absolute paths pass through. Other POSIX paths and sessions on a remote OSC 7 host (IDENT-001) are copy-path-only, never launched. | P1 |
 | LINK-008 | Ctrl+click, or context menu "Open in Editor", shall launch the command from the config key `editor` (default `code --goto {file}:{line}:{column}`; `{file}` `{line}` `{column}` placeholders, whitespace-split into argv; empty disables launching, LINK-004's explicit-interaction rule). Non-openable targets (remote host, no cwd, disabled editor) copy the reference text. A failed launch shall be ignored; plain-click behaviour is unchanged. | P1 |
+| LINK-009 | One binding (built-in Ctrl+Shift+K, overridable via `[keybindings]` action `hint-mode`, and the command palette "Hint Mode") shall enter keyboard hint mode: every OSC 8 link and auto-detected file reference visible in the focused pane's viewport gets a short typed label drawn as overlay paint only (the grid is never modified, so selection and copy stay uncorrupted). Label keys select (prefix-free labels), Enter opens (http/https links via the browser, openable references via the `editor` command, LINK-004/008), `c` copies the target text, `u` copies a URL, Esc dismisses. While open every keystroke is swallowed (held keys included) and dismiss leaks none. Auto-detected references render in a badge colour distinct from OSC 8 links (SEC-022); references overlapping a link get no label. Scrollback (off-screen) targets are out of scope. | P1 |
 
 ---
 

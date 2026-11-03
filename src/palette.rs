@@ -226,6 +226,7 @@ pub fn builtin_shortcut(action: KeyAction) -> Option<&'static str> {
         KeyAction::FocusLeft => "ctrl+shift+left",
         KeyAction::FocusRight => "ctrl+shift+right",
         KeyAction::CommandPalette => "ctrl+shift+p",
+        KeyAction::HintMode => "ctrl+shift+k",
         _ => return None,
     })
 }
@@ -304,6 +305,7 @@ fn builtin_actions() -> impl Iterator<Item = (&'static str, KeyAction)> {
         FocusLeft,
         FocusRight,
         CommandPalette,
+        HintMode,
     ]
     .into_iter()
     .filter_map(|a| builtin_shortcut(a).map(|s| (s, a)))
@@ -348,6 +350,7 @@ fn action_name(action: KeyAction) -> &'static str {
         KeyAction::NextCommand => "next-command",
         KeyAction::CopyLastCommand => "copy-last-command",
         KeyAction::CommandPalette => "command-palette",
+        KeyAction::HintMode => "hint-mode",
     }
 }
 

@@ -1050,9 +1050,10 @@ impl Renderer {
         theme: &Theme,
         search: Option<&SearchState>,
         palette: Option<&crate::palette::PaletteState>,
+        hint: Option<&crate::hints::HintState>,
         prompt: Option<&str>,
     ) {
-        self.paint_frame(app, theme, search, palette, prompt, true);
+        self.paint_frame(app, theme, search, palette, hint, prompt, true);
     }
 
     /// Paint only what changed since the last frame (NFR-113 damage-only
@@ -1070,9 +1071,10 @@ impl Renderer {
         theme: &Theme,
         search: Option<&SearchState>,
         palette: Option<&crate::palette::PaletteState>,
+        hint: Option<&crate::hints::HintState>,
         prompt: Option<&str>,
     ) {
-        self.paint_frame(app, theme, search, palette, prompt, false);
+        self.paint_frame(app, theme, search, palette, hint, prompt, false);
     }
 
     /// The tab-bar geometry the last frame painted, for hit testing.
@@ -1235,12 +1237,17 @@ impl Renderer {
             .max(1.0) as usize
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the frame paint takes the full overlay set"
+    )]
     fn paint_frame(
         &mut self,
         app: &App,
         theme: &Theme,
         search: Option<&SearchState>,
         palette: Option<&crate::palette::PaletteState>,
+        hint: Option<&crate::hints::HintState>,
         prompt: Option<&str>,
         force_full: bool,
     ) {
@@ -1408,6 +1415,11 @@ impl Renderer {
                 self.paint_cursor(pane, rect, idx == focused, theme);
                 idx += 1;
             });
+        }
+        // Issue #52: hint labels are overlay paint over the focused pane's
+        // grid cells; the grid is never modified, so copy stays pure.
+        if let Some(hint) = hint {
+            self.paint_hints(hint, theme, app);
         }
         if self.tab_bar_height > 0.0 {
             self.paint_tab_bar(app, theme, width, height);
@@ -1742,6 +1754,57 @@ impl Renderer {
             self.utf16 = units;
         }
         self.label = raw;
+    }
+
+    /// Paint the hint-mode labels over the focused pane's grid cells
+    /// (issue #52): one badge per target at its start cell. Overlay paint
+    /// only — the grid is never modified, so copy stays pure. OSC 8 links
+    /// and auto-detected file references get distinct badge colors
+    /// (SEC-022); the pending label uses the cursor color.
+    fn paint_hints(&mut self, hint: &crate::hints::HintState, theme: &Theme, app: &App) {
+        let Some(tab) = app.active_tab() else { return };
+        let focused = tab.focused_index().unwrap_or(usize::MAX);
+        let mut idx = 0usize;
+        let mut rect_of = None;
+        tab.for_each_pane_ref(&mut |_: &Pane, rect: Rect| {
+            if idx == focused {
+                rect_of = Some(rect);
+            }
+            idx += 1;
+        });
+        let rect = match rect_of {
+            Some(rect) => rect,
+            None => return,
+        };
+        let pad = self.split_padding;
+        for (i, h) in hint.hints.iter().enumerate() {
+            if h.row >= rect.rows || h.col >= rect.cols {
+                continue;
+            }
+            let x = self.grid_left() + (rect.col + h.col) as f32 * self.metrics.cell_width + pad;
+            let y = self.grid_top() + (rect.row + h.row) as f32 * self.metrics.cell_height + pad;
+            let w = self.metrics.cell_width * h.label.len().max(1) as f32;
+            let bg = if hint.pending == Some(i) {
+                theme.cursor
+            } else if h.is_diag {
+                theme.link
+            } else {
+                theme.search_highlight
+            };
+            self.fill_rect(x, y, x + w, y + self.metrics.cell_height, bg);
+            let label: Vec<u16> = h.label.encode_utf16().collect();
+            let text_top = y + (self.metrics.cell_height - self.metrics.text_height) / 2.0;
+            let text_rect = D2D_RECT_F {
+                left: x,
+                top: text_top,
+                right: x + w,
+                bottom: y + self.metrics.cell_height,
+            };
+            if let Some(brush) = self.brush(theme.background) {
+                let format = &self.formats[0];
+                self.draw_units(&label, format, text_rect, &brush);
+            }
+        }
     }
 
     /// Paint the command palette overlay (issue #39): a header row with the
