@@ -4,7 +4,9 @@ All notable changes to `rusttyterm` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.1] - 2026-11-03
+
+Compatible repair line; `v0.5.0` remains immutable and is not moved.
 
 ### Added
 
@@ -29,6 +31,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Clipboard writes open with the owning window HWND.
 - Palette fuzzy matching advances on Unicode boundaries; command/bookmark anchors use the
   live screen, not the scrolled viewport.
+- Console attach replays initial host stream frames before input, shares one frame-write lock,
+  keeps UTF-8 surrogate pairs and repeated key counts, and leaves the alternate screen on detach.
+- Host stream notifications are buffered by request id; identity persistence is serialized and
+  rolls back on a save failure.
+- Raw input frames are capped at 24 KiB so hex/JSON stays below the host request cap.
+- Search restarts when existing line/cell content is overwritten instead of returning stale matches.
+- Wide characters occupy two columns; combining marks attach to the base cell and continuation
+  columns are skipped by text snapshots.
 
 ## [0.5.0] - 2026-11-02
 

@@ -9,6 +9,7 @@
 //! and the main screen buffer.
 
 use std::io;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use windows::Win32::Foundation::HANDLE;
@@ -124,7 +125,6 @@ pub fn run(alias: u32, read_only: bool, take_control: bool, prefix: u8) -> io::R
     let (cols, rows) = window_size(out_h);
 
     // Enter the alt screen, then take over the console.
-    write_out(out_h, b"\x1b[?1049h");
     // Safety: console mode set on handles we validated.
     unsafe {
         SetConsoleMode(in_h, CONSOLE_MODE((saved.in_mode | IN_ADD) & !IN_CLEAR)).ok();
@@ -136,6 +136,8 @@ pub fn run(alias: u32, read_only: bool, take_control: bool, prefix: u8) -> io::R
         )
         .ok();
     }
+    // Enable VT output before entering the alternate screen.
+    write_out(out_h, b"\x1b[?1049h");
     if granted {
         client
             .send(
@@ -169,12 +171,40 @@ pub fn run(alias: u32, read_only: bool, take_control: bool, prefix: u8) -> io::R
         .and_then(|r| r.get("revision"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let mouse_mode = result
+        .and_then(|r| r.get("snapshot"))
+        .and_then(|s| s.get("modes"))
+        .and_then(|m| m.get("mouse"))
+        .and_then(Value::as_str)
+        .unwrap_or("off");
+    let mouse_sgr = result
+        .and_then(|r| r.get("snapshot"))
+        .and_then(|s| s.get("modes"))
+        .and_then(|m| m.get("mouseSgr"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     // Reader thread: PTY stream -> console. If the session/host dies
     // under us it restores the console and exits the process, because
     // the input thread is blocked in the console.
-    let reader = client.reader()?;
-    let writer = client.writer()?;
+    let lock = Arc::clone(&client.lock);
+    let initial_pending = client.pending.clone();
+    let Ok(reader) = client.reader() else {
+        write_out(out_h, b"\x1b[?1049l");
+        saved.restore();
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "reader setup failed",
+        ));
+    };
+    let Ok(writer) = client.writer() else {
+        write_out(out_h, b"\x1b[?1049l");
+        saved.restore();
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "writer setup failed",
+        ));
+    };
     let saved_for_reader = saved;
     let out_for_reader = SendH(out_h);
     // Shared control flag: the reader sees a takeover and stops the
@@ -190,18 +220,31 @@ pub fn run(alias: u32, read_only: bool, take_control: bool, prefix: u8) -> io::R
             alias,
             initial_rev,
             control_for_reader,
+            lock,
+            initial_pending,
         );
     });
 
-    let code = input_loop(&mut client, in_h, out_h, alias, &control, prefix)?;
-    // Normal detach: drop the connection, restore the caller's console.
+    let code = input_loop(
+        &mut client,
+        in_h,
+        out_h,
+        alias,
+        &control,
+        prefix,
+        mouse_mode,
+        mouse_sgr,
+    );
+    // Normal detach: leave the alternate screen, then restore the caller's console.
     drop(client);
+    write_out(out_h, b"\x1b[?1049l");
     saved.restore();
-    Ok(code)
+    code
 }
 
 /// Keystrokes/mouse/resize -> RPC frames; the detach-prefix state
 /// machine runs on the encoded bytes.
+#[allow(clippy::too_many_arguments, reason = "console input state machine")]
 fn input_loop(
     client: &mut Client,
     in_h: HANDLE,
@@ -209,10 +252,13 @@ fn input_loop(
     alias: u32,
     control: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     prefix: u8,
+    mouse_mode: &str,
+    mouse_sgr: bool,
 ) -> io::Result<u8> {
     use std::sync::atomic::Ordering;
     let mut recs = vec![INPUT_RECORD::default(); 32];
     let mut prefix_pending = false;
+    let mut pending_high: Option<u16> = None;
     let mut last_buttons = 0u32;
     let mut demoted_shown = false;
     loop {
@@ -241,9 +287,9 @@ fn input_loop(
                     .ok();
             }
             let bytes = if rec.EventType == MOUSE_EVENT as u16 {
-                mouse_bytes(rec, &mut last_buttons)
+                mouse_bytes(rec, &mut last_buttons, mouse_mode, mouse_sgr)
             } else {
-                key_bytes(rec)
+                key_bytes(rec, &mut pending_high)
             };
             if bytes.is_empty() {
                 continue;
@@ -291,7 +337,11 @@ fn input_loop(
 /// live bytes are buffered during the resync so a query is answered
 /// exactly once. Restores the console at EOF, then ends the process
 /// (the input thread is parked in the console).
-#[allow(clippy::too_many_lines, reason = "the reader is one state machine")]
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    reason = "the reader is one state machine"
+)]
 fn reader_loop(
     mut rd: crate::host::client::DupReader,
     mut wr: crate::host::client::DupWriter,
@@ -300,12 +350,66 @@ fn reader_loop(
     alias: u32,
     initial_rev: u64,
     control: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    lock: Arc<Mutex<u8>>,
+    mut initial_pending: Vec<Value>,
 ) -> ! {
     let out_h = out_h.0;
     let mut last_rev = initial_rev;
     let mut resyncing = false;
     let mut pending: Vec<Value> = Vec::new();
     let mut lost = false;
+    let frames = std::mem::take(&mut initial_pending);
+    for f in frames {
+        let method = f.get("method").and_then(Value::as_str);
+        let params = f.get("params");
+        let rev = params
+            .and_then(|p| p.get("revision"))
+            .and_then(Value::as_u64);
+        match method {
+            Some("session.output") | Some("session.resize") => {
+                if resyncing {
+                    pending.push(f);
+                    continue;
+                }
+                let Some(rev) = rev else {
+                    continue;
+                };
+                if rev <= last_rev {
+                    continue;
+                }
+                if rev > last_rev + 1 {
+                    pending.push(f);
+                    request_resync(&mut wr, alias, Some(last_rev), &lock);
+                    resyncing = true;
+                    continue;
+                }
+                last_rev = rev;
+                if method == Some("session.output") {
+                    let hex = f
+                        .get("params")
+                        .and_then(|p| p.get("data"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if let Some(bytes) = unhex(hex) {
+                        write_out(out_h, &bytes);
+                    }
+                } else if method == Some("session.resize") {
+                    let c = f
+                        .get("params")
+                        .and_then(|p| p.get("cols"))
+                        .and_then(Value::as_u64);
+                    let r = f
+                        .get("params")
+                        .and_then(|p| p.get("rows"))
+                        .and_then(Value::as_u64);
+                    if let (Some(c2), Some(r2)) = (c, r) {
+                        follow_size(out_h, c2, r2);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     loop {
         match read_frame(&mut rd, MAX_PAGE_BYTES) {
             Ok(frame) => {
@@ -326,7 +430,7 @@ fn reader_loop(
                         }
                         if rev > last_rev + 1 {
                             pending.push(frame);
-                            request_resync(&mut wr, alias, Some(last_rev));
+                            request_resync(&mut wr, alias, Some(last_rev), &lock);
                             resyncing = true;
                             continue;
                         }
@@ -360,7 +464,7 @@ fn reader_loop(
                         }
                     }
                     Some("session.resync") if !resyncing => {
-                        request_resync(&mut wr, alias, None);
+                        request_resync(&mut wr, alias, None, &lock);
                         resyncing = true;
                     }
                     None if resyncing
@@ -397,7 +501,7 @@ fn reader_loop(
                                 for g in &frames[idx..] {
                                     pending.push(g.clone());
                                 }
-                                request_resync(&mut wr, alias, Some(last_rev));
+                                request_resync(&mut wr, alias, Some(last_rev), &lock);
                                 resyncing = true;
                                 break;
                             }
@@ -453,7 +557,15 @@ fn reader_loop(
 
 /// Ask the host (on our write handle) for a fresh snapshot attach on
 /// this connection; the answer arrives here as the id-matched response.
-fn request_resync(wr: &mut crate::host::client::DupWriter, alias: u32, from: Option<u64>) {
+fn request_resync(
+    wr: &mut crate::host::client::DupWriter,
+    alias: u32,
+    from: Option<u64>,
+    lock: &Arc<Mutex<u8>>,
+) {
+    let Ok(_guard) = lock.lock() else {
+        return;
+    };
     let mut params = serde_json::json!({ "alias": alias, "readOnly": true });
     if let Some(r) = from {
         params["fromRevision"] = serde_json::json!(r);
@@ -466,63 +578,116 @@ fn request_resync(wr: &mut crate::host::client::DupWriter, alias: u32, from: Opt
 }
 
 /// One key event -> the VT bytes the console produced for it.
-fn key_bytes(rec: &INPUT_RECORD) -> Vec<u8> {
+fn key_bytes(rec: &INPUT_RECORD, pending_high: &mut Option<u16>) -> Vec<u8> {
     if rec.EventType != KEY_EVENT as u16 {
         return Vec::new();
     }
-    // Safety: reading the union arm for a KEY_EVENT record.
     let k = unsafe { rec.Event.KeyEvent };
     if !k.bKeyDown.as_bool() {
         return Vec::new();
     }
-    let ch = unsafe { k.uChar.UnicodeChar };
+    let ch = u32::from(unsafe { k.uChar.UnicodeChar });
     if ch == 0 {
         return Vec::new();
     }
-    // shortcut: lone surrogates from a console paste become U+FFFD;
-    // upgrade to a surrogate-pair accumulator if paste text shows gaps.
-    let Some(c) = char::from_u32(u32::from(ch)) else {
-        return vec![0xEF, 0xBF, 0xBD];
+    let reps = usize::from(k.wRepeatCount).max(1);
+    let high = pending_high.take();
+    let mut out: Vec<u8> = Vec::new();
+    let mut codepoint = ch;
+    if high.is_some() {
+        let Some(h) = high else {
+            return out;
+        };
+        if (0xDC00..=0xDFFF).contains(&ch) {
+            codepoint = 0x10000 + (u32::from(h) - 0xD800) * 0x400 + (ch - 0xDC00);
+        } else {
+            out.extend(vec![0xEF, 0xBF, 0xBD]);
+        }
+    }
+    if (0xD800..=0xDBFF).contains(&codepoint) {
+        *pending_high = Some(u16::try_from(codepoint).unwrap_or(0));
+        return out;
+    }
+    if (0xDC00..=0xDFFF).contains(&codepoint) {
+        out.extend(vec![0xEF, 0xBF, 0xBD]);
+        return out;
+    }
+    let Some(c) = char::from_u32(codepoint) else {
+        out.extend(vec![0xEF, 0xBF, 0xBD]);
+        return out;
     };
     let mut buf = [0u8; 4];
-    c.encode_utf8(&mut buf).as_bytes().to_vec()
+    let one = c.encode_utf8(&mut buf).as_bytes().to_vec();
+    for _ in 0..reps {
+        out.extend_from_slice(&one);
+    }
+    out
 }
 
 /// One mouse event -> SGR mouse bytes (xterm-style, what TUIs request).
-fn mouse_bytes(rec: &INPUT_RECORD, last: &mut u32) -> Vec<u8> {
-    // Safety: reading the union arm for a MOUSE_EVENT record.
+fn mouse_bytes(rec: &INPUT_RECORD, last: &mut u32, protocol: &str, sgr: bool) -> Vec<u8> {
+    if protocol == "off" {
+        return Vec::new();
+    }
     let m = unsafe { rec.Event.MouseEvent };
     let state = m.dwButtonState;
     let wheel = (m.dwEventFlags & MOUSE_WHEELED) != 0;
-    if (m.dwEventFlags & MOUSE_MOVED) != 0 && state == *last && !wheel {
+    let moved = (m.dwEventFlags & MOUSE_MOVED) != 0;
+    if moved && state == *last && !wheel {
         *last = state;
-        return Vec::new();
+        if protocol == "click" {
+            return Vec::new();
+        }
+        let btn = 32u32;
+        let suffix = "m".to_string();
+        let x = i32::from(m.dwMousePosition.X) + 1;
+        let y = i32::from(m.dwMousePosition.Y) + 1;
+        return if sgr {
+            format!("\x1b[<{btn};{x};{y}{suffix}").into_bytes()
+        } else {
+            format!("\x1b[{btn};{x};{y}{suffix}").into_bytes()
+        };
     }
     let moved_only = state == *last && !wheel;
     *last = state;
     if moved_only {
-        return Vec::new();
+        if protocol == "click" {
+            return Vec::new();
+        }
+        let btn = 32u32;
+        let suffix = "m".to_string();
+        let x = i32::from(m.dwMousePosition.X) + 1;
+        let y = i32::from(m.dwMousePosition.Y) + 1;
+        return if sgr {
+            format!("\x1b[<{btn};{x};{y}{suffix}").into_bytes()
+        } else {
+            format!("\x1b[{btn};{x};{y}{suffix}").into_bytes()
+        };
     }
     let (btn, pressed) = if wheel {
         (if (state as i32) > 0 { 64 } else { 65 }, true)
     } else if state & 1 != 0 {
         (0, true)
     } else if state & 2 != 0 {
-        (1, true)
-    } else if state & 4 != 0 {
         (2, true)
+    } else if state & 4 != 0 {
+        (1, true)
     } else {
         (3, false)
     };
-    let suffix = if pressed || wheel { b'M' } else { b'm' };
-    format!(
-        "\x1b[<{btn};{};{}{suffix}",
-        i32::from(m.dwMousePosition.X) + 1,
-        i32::from(m.dwMousePosition.Y) + 1,
-    )
-    .into_bytes()
+    let suffix = if pressed || wheel {
+        "M".to_string()
+    } else {
+        "m".to_string()
+    };
+    let x = i32::from(m.dwMousePosition.X) + 1;
+    let y = i32::from(m.dwMousePosition.Y) + 1;
+    if sgr {
+        format!("\x1b[<{btn};{x};{y}{suffix}").into_bytes()
+    } else {
+        format!("\x1b[{btn};{x};{y}{suffix}").into_bytes()
+    }
 }
-
 /// `[Ctrl+] d` detaches; `[Ctrl+] ?` prints the help line.
 fn help(out_h: HANDLE, prefix: u8) {
     let key = match prefix {
@@ -628,6 +793,7 @@ impl Saved {
             SetConsoleMode(self.in_h.0, CONSOLE_MODE(self.in_mode)).ok();
             SetConsoleMode(self.out_h.0, CONSOLE_MODE(self.out_mode)).ok();
             SetConsoleCursorInfo(self.out_h.0, core::ptr::from_ref(&self.cursor)).ok();
+            SetConsoleScreenBufferSize(self.out_h.0, self.size).ok();
             // Shrink the window, resize the buffer, restore the window.
             let point = SMALL_RECT {
                 Left: 0,

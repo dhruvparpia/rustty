@@ -86,6 +86,9 @@ pub struct SearchState {
     /// Per scanned pane: `(first_abs, last_abs)` recorded when its scan
     /// started. `note_history` compares live grid bounds against these.
     bounds: Vec<(usize, usize)>,
+    /// Per scanned pane: content revision recorded when its scan
+    /// started. Existing-line overwrites restart the scan (issue #73).
+    content_rev: Vec<u64>,
     /// Compiled regex, reused across chunks.
     regex: Option<Regex>,
     /// Identity of the selected match, preserved across rescans so new
@@ -136,6 +139,7 @@ impl SearchState {
         self.scan_pane = 0;
         self.scan_abs = 0;
         self.bounds.clear();
+        self.content_rev.clear();
         self.regex = None;
         self.scanning = false;
         self.generation = self.generation.wrapping_add(1);
@@ -190,16 +194,17 @@ impl SearchState {
         if self.query.is_empty() || self.error.is_some() {
             return false;
         }
-        let Some(tab) = tab else {
-            return false;
-        };
+        let Some(tab) = tab else { return false };
         let mut restart = false;
         let mut resume: Option<(usize, usize, usize, usize)> = None;
         let mut pane_idx = 0usize;
         tab.for_each_pane_ref(&mut |pane: &Pane, _rect: Rect| {
             if let Some(&(first, last)) = self.bounds.get(pane_idx) {
                 let grid = pane.grid();
-                if grid.first_abs() > first || grid.last_abs() < last {
+                if grid.first_abs() > first
+                    || grid.last_abs() < last
+                    || grid.content_rev() != self.content_rev.get(pane_idx).copied().unwrap_or(0)
+                {
                     restart = true;
                 } else if grid.last_abs() > last && resume.is_none() {
                     resume = Some((pane_idx, grid.first_abs(), last, grid.last_abs()));
@@ -212,16 +217,20 @@ impl SearchState {
             return true;
         }
         if let Some((p, first, old_last, new_last)) = resume {
-            // Keep matches through pane `p`'s recorded window; scan only
-            // the new tail there, then re-scan later panes so the list
-            // stays in pane order and the user's place survives.
             self.matches.retain(|m| m.pane <= p);
             self.current = self.current.min(self.matches.len().saturating_sub(1));
             self.bounds.truncate(p + 1);
+            self.content_rev.truncate(p + 1);
             self.bounds[p] = (first, new_last);
+            let Some(pane) = tab.pane_at(p) else {
+                return true;
+            };
+            self.content_rev[p] = pane.grid().content_rev();
             self.scan_pane = p;
-            self.scan_abs = self.scan_abs.max(old_last + 1);
-            self.scanning = true;
+            if !self.scanning {
+                self.scan_abs = old_last + 1;
+                self.scanning = true;
+            }
             return true;
         }
         false
@@ -244,6 +253,7 @@ impl SearchState {
             let grid = pane.grid();
             if self.bounds.len() <= pane_idx {
                 self.bounds.push((grid.first_abs(), grid.last_abs()));
+                self.content_rev.push(grid.content_rev());
                 self.scan_abs = grid.first_abs();
             }
             let last = self.bounds[pane_idx].1;
@@ -583,11 +593,14 @@ mod tests {
         tab
     }
 
-    fn append_line(tab: &mut Tab, text: &str, row: usize) {
+    fn append_line(tab: &mut Tab, text: &str, _row: usize) {
         let cols = tab.cols();
+        let mut line = Line::blank(cols);
+        for (i, ch) in text.chars().take(cols).enumerate() {
+            line.cells[i].char = ch;
+        }
         let mut pane = tab.pane_mut();
-        pane.grid_mut().append_line(Line::blank(cols));
-        pane.grid_mut().write_line_stub(row, text);
+        pane.grid_mut().append_line(line);
     }
 
     /// Drain the bounded scan to completion; returns how many steps it took.

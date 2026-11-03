@@ -13,12 +13,13 @@
 //! monotonically and persisted under the config directory so a closed
 //! alias is never silently recycled.
 
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+static IDS_IO_LOCK: std::sync::Mutex<u8> = std::sync::Mutex::new(0);
 
 /// Protocol version this build speaks. Hosts support this version and
 /// one step back; `initialize` negotiates `min(client, host)` (HOST-008).
@@ -129,11 +130,28 @@ impl IdsState {
     ///
     /// Returns an error when the file exists but cannot be parsed.
     pub fn load(dir: &Path) -> io::Result<Self> {
-        match std::fs::read(dir.join("ids.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e),
+        let binding = &IDS_IO_LOCK;
+        let Ok(_guard) = binding.lock() else {
+            return Err(io::Error::other("ids lock failed"));
+        };
+        let bytes = match std::fs::read(dir.join("ids.json")) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let tmp = dir.join("ids.json.tmp");
+                let old = dir.join("ids.json.old");
+                match std::fs::read(&tmp) {
+                    Ok(b) => b,
+                    Err(_) => match std::fs::read(&old) {
+                        Ok(b) => b,
+                        Err(_) => return Ok(Self::default()),
+                    },
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(store) => Ok(store),
+            Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
         }
     }
 
@@ -145,14 +163,24 @@ impl IdsState {
     /// Propagates any filesystem failure; the host keeps serving with
     /// the in-memory state.
     pub fn save(&self, dir: &Path) -> io::Result<()> {
+        let binding = &IDS_IO_LOCK;
+        let Ok(_guard) = binding.lock() else {
+            return Err(io::Error::other("ids lock failed"));
+        };
         std::fs::create_dir_all(dir)?;
         let tmp = dir.join("ids.json.tmp");
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, bytes)?;
         let dst = dir.join("ids.json");
-        std::fs::remove_file(&dst).ok();
-        std::fs::rename(&tmp, dst)
+        let backup = dir.join("ids.json.old");
+        std::fs::remove_file(&backup).ok();
+        if dst.exists() {
+            std::fs::rename(&dst, &backup)?;
+        }
+        std::fs::rename(&tmp, dst)?;
+        std::fs::remove_file(&backup).ok();
+        Ok(())
     }
 
     /// Allocate the next (alias, durable id) pair and record the binding.
@@ -668,10 +696,8 @@ pub mod server {
             })
         }
 
-        fn save_ids(&mut self) {
-            // A failed persist is not fatal: in-memory ids keep moving
-            // forward; the next save retries.
-            self.ids.save(&self.ids_dir).ok();
+        fn save_ids(&mut self) -> io::Result<()> {
+            self.ids.save(&self.ids_dir)
         }
 
         fn records(&self) -> Vec<&SessionRecord> {
@@ -803,7 +829,15 @@ pub mod server {
             }
 
             let (alias, id) = g.ids.allocate();
-            g.save_ids();
+            if let Err(e) = g.save_ids() {
+                g.ids.aliases.remove(&alias);
+                g.ids.next_alias = alias;
+                g.ids.next_id = id;
+                return Err(Fail::Code(
+                    "internal",
+                    format!("identity persistence failed: {e}"),
+                ));
+            }
             // Self-attach prevention (attach ADR): a shell started by the
             // host knows its alias and refuses to attach to its own session.
             opts.env.insert("RUSTTY_SESSION".into(), alias.to_string());
@@ -888,36 +922,6 @@ pub mod server {
             // handle directly; the first caller (watcher or EOF) reports,
             // the second is a no-op (issue #48, acceptance 7).
             // Safety: duplicate our own process handle for the watcher.
-            let watch = unsafe {
-                let mut h = HANDLE::default();
-                DuplicateHandle(
-                    GetCurrentProcess(),
-                    managed_process.raw(),
-                    GetCurrentProcess(),
-                    &mut h,
-                    0,
-                    false,
-                    DUPLICATE_SAME_ACCESS,
-                )
-                .map_err(|e| Fail::Code("internal", e.to_string()))?;
-                SendHandle::from_owned(Owned::new(h))
-            };
-            let exit_for_watch = Arc::clone(&exit);
-            std::thread::spawn(move || {
-                // Safety: infinite wait + exit-code query on our own handle.
-                // GetExitCodeProcess can report STILL_ACTIVE for a few ms
-                // after the process signals, so retry briefly (300ms cap)
-                // before accepting `None`.
-                let mut code = None;
-                for _ in 0..15 {
-                    code = conpty::wait_exit_code(&watch);
-                    if code.is_some() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                exit_for_watch(code.map(|c| c.cast_unsigned()));
-            });
             let managed = Managed {
                 record: record.clone(),
                 conpty,
@@ -1914,9 +1918,11 @@ pub mod server {
 #[cfg(windows)]
 pub mod client {
     use std::io;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
+    use std::sync::Mutex;
 
     use super::{MAX_PAGE_BYTES, PROTOCOL_VERSION, pipe_name, read_frame, write_frame};
 
@@ -1926,6 +1932,10 @@ pub mod client {
         id: u64,
         /// Protocol version negotiated in `initialize`.
         pub protocol: u32,
+        /// Stream notifications buffered while waiting for an RPC reply.
+        pub pending: Vec<Value>,
+        /// Shared frame-write lock, held across the whole length-prefixed frame.
+        pub lock: Arc<Mutex<u8>>,
     }
 
     /// Locate `rustty-host.exe` beside this executable.
@@ -2064,6 +2074,8 @@ pub mod client {
                 pipe,
                 id: 0,
                 protocol: 0,
+                pending: Vec::new(),
+                lock: Arc::new(Mutex::new(0)),
             };
             let resp = me.call("initialize", json!({"protocol": PROTOCOL_VERSION}))?;
             if let Some(err) = resp.get("error") {
@@ -2091,11 +2103,28 @@ pub mod client {
         ///
         /// Transport errors. Protocol-level errors come back in the
         /// envelope.
+        /// Write one frame under the shared lock.
+        pub fn write_locked(&mut self, req: &Value) -> io::Result<()> {
+            let Ok(_guard) = self.lock.lock() else {
+                return Err(io::Error::other("write lock failed"));
+            };
+            write_frame(&mut self.pipe, req)
+        }
+
+        /// One request/response round trip; intervening stream frames are
+        /// buffered until the response id matches.
         pub fn call(&mut self, method: &str, params: Value) -> io::Result<Value> {
             self.id += 1;
             let req = json!({"jsonrpc": "2.0", "id": self.id, "method": method, "params": params});
-            write_frame(&mut self.pipe, &req)?;
-            read_frame(&mut self.pipe, MAX_PAGE_BYTES)
+            self.write_locked(&req)?;
+            loop {
+                let frame = read_frame(&mut self.pipe, MAX_PAGE_BYTES)?;
+                let id = frame.get("id").and_then(Value::as_u64);
+                if id == Some(self.id) {
+                    return Ok(frame);
+                }
+                self.pending.push(frame.clone());
+            }
         }
 
         /// Fire-and-forget request (the attach frontend's input/resize
@@ -2108,7 +2137,7 @@ pub mod client {
         pub fn send(&mut self, method: &str, params: Value) -> io::Result<()> {
             self.id += 1;
             let req = json!({"jsonrpc": "2.0", "id": self.id, "method": method, "params": params});
-            write_frame(&mut self.pipe, &req)
+            self.write_locked(&req)
         }
 
         /// A read handle for the connection, for a dedicated reader

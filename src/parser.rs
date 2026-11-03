@@ -583,9 +583,71 @@ impl Parser {
         }
     }
 
+    fn is_combining(cp: u32) -> bool {
+        (0x0300..=0x036F).contains(&cp)
+            || (0x1AB0..=0x1AFF).contains(&cp)
+            || (0x1DC0..=0x1DFF).contains(&cp)
+            || (0x20D0..=0x20FF).contains(&cp)
+            || (0xFE20..=0xFE2F).contains(&cp)
+            || (0xFE00..=0xFE0F).contains(&cp)
+    }
+
+    fn is_wide(cp: u32) -> bool {
+        (0x1100..=0x115F).contains(&cp)
+            || (0x2E80..=0xA4CF).contains(&cp)
+            || (0xA960..=0xA97F).contains(&cp)
+            || (0xAC00..=0xD7AF).contains(&cp)
+            || (0xF900..=0xFAFF).contains(&cp)
+            || (0xFE10..=0xFE6F).contains(&cp)
+            || (0xFF00..=0xFF60).contains(&cp)
+            || (0xFFE0..=0xFFE6).contains(&cp)
+            || (0x1F300..=0x1F64F).contains(&cp)
+            || (0x1F900..=0x1F9FF).contains(&cp)
+    }
+
+    fn char_width(ch: char) -> usize {
+        let cp = u32::from(ch);
+        if Parser::is_combining(cp) {
+            return 0;
+        }
+        if Parser::is_wide(cp) {
+            return 2;
+        }
+        1
+    }
+
     fn print_char(&mut self, grid: &mut Grid, ch: char) {
         let cols = grid.cols;
+        let width = Parser::char_width(ch);
+        if width == 0 {
+            if self.cursor_col > 0 {
+                let Some(prev) = grid.live_cell_mut(self.cursor_row, self.cursor_col - 1) else {
+                    return;
+                };
+                let mut base_col = self.cursor_col - 1;
+                if prev.continuation {
+                    if base_col == 0 {
+                        return;
+                    }
+                    base_col -= 1;
+                }
+                let Some(cell) = grid.live_cell_mut(self.cursor_row, base_col) else {
+                    return;
+                };
+                let existing = cell
+                    .combining
+                    .clone()
+                    .map_or(String::new(), |s| s.to_string());
+                cell.combining = Some(existing + &ch.to_string());
+            }
+            return;
+        }
         if self.wrap_pending {
+            self.wrap_pending = false;
+            self.cursor_col = 0;
+            self.line_feed_quiet(grid);
+        }
+        if width == 2 && self.cursor_col + 1 >= cols && self.auto_wrap {
             self.wrap_pending = false;
             self.cursor_col = 0;
             self.line_feed_quiet(grid);
@@ -596,12 +658,37 @@ impl Parser {
             bg: self.pen_bg,
             attributes: self.pen_attrs,
             link: self.pen_link,
+            width: u8::try_from(width).unwrap_or(1),
+            continuation: false,
+            combining: None,
         };
         grid.write_cell(self.cursor_row, self.cursor_col, cell);
-        if self.cursor_col + 1 < cols {
-            self.cursor_col += 1;
-        } else if self.auto_wrap {
-            self.wrap_pending = true;
+        if width == 2 && self.cursor_col + 1 < cols {
+            let cont = Cell {
+                char: ' ',
+                fg: self.pen_fg,
+                bg: self.pen_bg,
+                attributes: self.pen_attrs,
+                link: self.pen_link,
+                width: 1,
+                continuation: true,
+                combining: None,
+            };
+            grid.write_cell(self.cursor_row, self.cursor_col + 1, cont);
+            self.cursor_col += 2;
+            if self.cursor_col >= cols && self.auto_wrap {
+                self.wrap_pending = true;
+            }
+        } else if width == 1 {
+            if self.cursor_col + 1 < cols {
+                self.cursor_col += 1;
+            } else if self.auto_wrap {
+                self.wrap_pending = true;
+            }
+        } else {
+            if self.cursor_col + 1 >= cols && self.auto_wrap {
+                self.wrap_pending = true;
+            }
         }
     }
 

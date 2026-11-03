@@ -1592,7 +1592,12 @@ impl Renderer {
         let mut out = String::new();
         for y in 0..grid.rows() {
             if let Some(line) = grid.row(y) {
-                let text: String = line.cells.iter().map(|c| c.char).collect();
+                let text: String = line
+                    .cells
+                    .iter()
+                    .filter(|c| !c.continuation)
+                    .map(crate::grid::cell_text)
+                    .collect::<String>();
                 out.push_str(text.trim_end());
                 out.push('\n');
             }
@@ -2311,6 +2316,10 @@ impl Renderer {
         let mut i = 0;
         while i < cells.len() {
             let cell = &cells[i];
+            if cell.continuation {
+                i += 1;
+                continue;
+            }
             if cell.char == ' ' || cell.attributes.contains(CellAttribute::HIDDEN) {
                 i += 1;
                 continue;
@@ -2352,17 +2361,22 @@ impl Renderer {
                 end += 1;
             }
             units.clear();
-            for ch in cells[i..end].iter().map(|cell| cell.char) {
-                // `encode_utf16` writes into the stack buffer and reports how
-                // many units it wrote: surrogates included, no allocation.
-                let mut buf = [0u16; 2];
-                let count = ch.encode_utf16(&mut buf).len();
-                units.extend_from_slice(&buf[..count]);
+            let mut run_width = 0usize;
+            for cell in &cells[i..end] {
+                run_width += usize::from(cell.width);
+                let text: String = crate::grid::cell_text(cell);
+                for ch in text.chars() {
+                    // `encode_utf16` writes into the stack buffer and reports how
+                    // many units it wrote: surrogates included, no allocation.
+                    let mut buf = [0u16; 2];
+                    let count = ch.encode_utf16(&mut buf).len();
+                    units.extend_from_slice(&buf[..count]);
+                }
             }
             let rect = D2D_RECT_F {
                 left: left + i as f32 * cw,
                 top: y_top,
-                right: left + end as f32 * cw,
+                right: left + (i + run_width) as f32 * cw,
                 bottom: y_top + self.metrics.text_height,
             };
             let Some(brush) = self.brush(fg) else {
@@ -2400,7 +2414,12 @@ impl Renderer {
         span: Option<(usize, usize)>,
         theme: &Theme,
     ) -> Option<GlyphKey> {
-        if cell.char == ' ' || cell.attributes.contains(CellAttribute::HIDDEN) {
+        if cell.char == ' '
+            || cell.continuation
+            || cell.width != 1
+            || cell.combining.is_some()
+            || cell.attributes.contains(CellAttribute::HIDDEN)
+        {
             return None;
         }
         let (fg, bg) = Self::effective_colors(cell, theme);

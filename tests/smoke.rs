@@ -4,6 +4,7 @@
 
 use rustty::app::App;
 use rustty::config::Config;
+use rustty::pane::Pane;
 use rustty::shell::ShellState;
 
 #[test]
@@ -74,4 +75,16 @@ fn the_example_config_is_valid() {
     let cfg = Config::parse(&text).expect("config.example.toml parses");
     assert_eq!(cfg.window.cols, 80);
     assert!(cfg.tab_bar.close_button);
+}
+
+/// Wide characters take two columns; combining marks attach to the base
+/// cell, not to its invisible continuation column.
+#[test]
+fn wide_and_combining_cells_keep_their_column_widths() {
+    let mut p = Pane::with_size(10, 3, 10);
+    p.feed(b"\xe7\x95\x8c\xcc\x81\x78");
+    let row = p.grid().row(0).unwrap();
+    assert_eq!(row.cells[0].width, 2);
+    assert!(row.cells[1].continuation);
+    assert_eq!(p.grid().line_text(0).as_deref(), Some("界\u{0301}x"));
 }

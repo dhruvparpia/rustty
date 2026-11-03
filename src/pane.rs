@@ -723,9 +723,14 @@ impl Pane {
                         // are no longer showable (SHELLINT-021).
                         self.commands.note_eviction(self.grid.first_abs());
                     }
-                    // DSR/DA replies go straight back to the shell.
+                    // DSR/DA replies go back to the shell only for a local
+                    // shell. A host-owned session already answers terminal
+                    // queries, so a controller view must not add a second reply
+                    // (issue #70).
                     ParserEvent::Respond(reply) => {
-                        let _ = self.shell.write_input(&reply);
+                        if self.view_alias.is_none() {
+                            let _ = self.shell.write_input(&reply);
+                        }
                     }
                     ParserEvent::Graphics(action) => {
                         let (row, col) = (self.parser.cursor_row, self.parser.cursor_col);

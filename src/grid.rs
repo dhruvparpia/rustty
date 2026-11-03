@@ -25,6 +25,13 @@ pub struct Cell {
     /// The id travels with the cell through scrollback, selection and
     /// resize for free (issue #41).
     pub link: u32,
+    /// Display width in grid columns: 1 normal, 2 wide, and continuation
+    /// cells set `continuation` so the renderer skips their glyph.
+    pub width: u8,
+    /// Continuation cell for the second column of a wide character.
+    pub continuation: bool,
+    /// Combining marks attached to this cell's base character.
+    pub combining: Option<String>,
 }
 
 impl Cell {
@@ -36,6 +43,9 @@ impl Cell {
             bg: None,
             attributes: CellAttribute::empty(),
             link: 0,
+            width: 1,
+            continuation: false,
+            combining: None,
         }
     }
 }
@@ -164,6 +174,19 @@ pub struct Grid {
     evicted: usize,
     scroll_offset: usize,
     full_dirty: bool,
+    /// Revision bumped when an existing line/cell is overwritten
+    /// (append-only output does not bump it; issue #73).
+    content_revision: u64,
+}
+/// Display text of a cell, including attached combining marks.
+#[must_use]
+pub fn cell_text(cell: &Cell) -> String {
+    let base = cell.char.to_string();
+    if let Some(ref comb) = cell.combining {
+        base + comb
+    } else {
+        base
+    }
 }
 
 impl Grid {
@@ -189,6 +212,7 @@ impl Grid {
             evicted: 0,
             scroll_offset: 0,
             full_dirty: true,
+            content_revision: 0,
         }
     }
 
@@ -289,11 +313,15 @@ impl Grid {
     pub fn write_line(&mut self, row: usize, line: Line) {
         let row = row.min(self.rows.saturating_sub(1));
         let virtual_index = self.live_top() + row;
+        let existed = virtual_index < self.total;
         while self.total <= virtual_index {
             self.append_line(Line::blank(self.cols));
         }
         let slot = self.slot(virtual_index);
         self.lines[slot] = line;
+        if existed {
+            self.content_revision += 1;
+        }
         self.lines[slot].is_dirty = true;
     }
 
@@ -310,6 +338,7 @@ impl Grid {
     pub fn write_cell(&mut self, row: usize, col: usize, cell: Cell) {
         let row = row.min(self.rows.saturating_sub(1));
         let virtual_index = self.live_top() + row;
+        let existed = virtual_index < self.total;
         while self.total <= virtual_index {
             self.append_line(Line::blank(self.cols));
         }
@@ -318,6 +347,9 @@ impl Grid {
             *dest = cell;
         }
         self.lines[slot].is_dirty = true;
+        if existed {
+            self.content_revision += 1;
+        }
     }
 
     /// Get a reference to a viewport line
@@ -342,7 +374,8 @@ impl Grid {
             self.row(row)?
                 .cells
                 .iter()
-                .map(|c| c.char)
+                .filter(|c| !c.continuation)
+                .map(cell_text)
                 .collect::<String>()
                 .trim_end()
                 .to_string(),
@@ -387,6 +420,12 @@ impl Grid {
         Some(v - top)
     }
 
+    /// Current content revision (existing output overwritten).
+    #[must_use]
+    pub fn content_rev(&self) -> u64 {
+        self.content_revision
+    }
+
     /// Oldest absolute line id still held in the buffer.
     #[must_use]
     pub fn first_abs(&self) -> usize {
@@ -416,7 +455,8 @@ impl Grid {
             self.line_abs(abs)?
                 .cells
                 .iter()
-                .map(|c| c.char)
+                .filter(|c| !c.continuation)
+                .map(cell_text)
                 .collect::<String>()
                 .trim_end()
                 .to_string(),
@@ -463,7 +503,11 @@ impl Grid {
                 continue;
             };
             let hi = hi.min(line.cells.len());
-            let text: String = line.cells[lo.min(hi)..hi].iter().map(|c| c.char).collect();
+            let text: String = line.cells[lo.min(hi)..hi]
+                .iter()
+                .filter(|c| !c.continuation)
+                .map(cell_text)
+                .collect::<String>();
             out.push_str(text.trim_end());
             out.push('\n');
         }
@@ -474,6 +518,20 @@ impl Grid {
     }
 
     /// Get a mutable reference to a viewport line, marking it dirty
+    /// Mutable live-screen cell at `(row, col)` (issue #82).
+    #[must_use]
+    pub fn live_cell_mut(&mut self, row: usize, col: usize) -> Option<&mut Cell> {
+        let row = row.min(self.rows.saturating_sub(1));
+        let v = self.live_top() + row;
+        if v >= self.total {
+            return None;
+        }
+        let slot = self.slot(v);
+        self.lines[slot].cells.get_mut(col)
+    }
+
+    /// Mutable viewport line at `row`. `None` when the row is empty.
+    #[must_use]
     pub fn row_mut(&mut self, row: usize) -> Option<&mut Line> {
         if row >= self.rows {
             return None;
@@ -670,6 +728,24 @@ impl Grid {
     ///
     /// Returns all rows after a full-redraw event (resize, scroll),
     /// otherwise only the rows written to since the last take.
+    /// True when any line in absolute range `first..=last` has changed
+    /// (used by search history tracking; issue #73).
+    #[must_use]
+    pub fn any_dirty_abs(&self, first: usize, last: usize) -> bool {
+        let from = first.max(self.evicted);
+        let to = last.min(self.last_abs());
+        for abs in from..=to {
+            let v = abs - self.evicted;
+            if self.lines[self.slot(v)].is_dirty {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Report viewport rows needing repaint, in ascending order,
+    /// without allocating (NFR-113 hot path).
+    #[must_use]
     pub fn dirty_rows(&self) -> Vec<usize> {
         if self.full_dirty {
             return (0..self.rows).collect();

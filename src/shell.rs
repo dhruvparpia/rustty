@@ -28,6 +28,10 @@ use crate::conpty;
 /// stream stays ordered and lossless.
 #[cfg(windows)]
 const MAX_QUEUED_BYTES: usize = 4 << 20;
+#[cfg(windows)]
+/// Raw input bytes per frame: hex doubles the payload and JSON adds
+/// overhead, so this stays below the host's 64-KiB request cap.
+const MAX_INPUT_CHUNK: usize = 24 * 1024;
 
 /// GHSA-v5c6-5f42-9xqj: byte budget one [`Shell::poll_events`] call
 /// delivers, so one flooding tab bounds its own work per UI tick.
@@ -569,6 +573,7 @@ impl Shell {
         let mut writer = client.writer().map_err(|e| e.to_string())?;
         // Keep the host connection open until the Shell drops (close
         // detaches; the host releases our control slot then).
+        let initial_pending = client.pending.clone();
         drop(client);
         let read_handle = reader.handle();
 
@@ -625,6 +630,7 @@ impl Shell {
                 &pump_control,
                 &pump_queued,
                 &pump_stopping,
+                initial_pending,
             );
             // Connection over (or the pane closed): the session is gone
             // for this pane; the UI converges on Exited.
@@ -699,17 +705,22 @@ impl Shell {
             if !v.controller.load(Ordering::Relaxed) {
                 return Err(ShellError::NotRunning);
             }
-            let mut data = String::with_capacity(bytes.len() * 2);
-            for b in bytes {
-                data.push_str(&format!("{b:02x}"));
+            for chunk in bytes.chunks(MAX_INPUT_CHUNK) {
+                let mut data = String::with_capacity(chunk.len() * 2);
+                for b in chunk {
+                    data.push_str(&format!("{b:02x}"));
+                }
+                let frame = serde_json::json!({
+                    "jsonrpc": "2.0", "method": "session.input",
+                    "params": {"alias": v.alias, "data": data},
+                });
+                // shortcut: unbounded frame queue; a dead writer ends the
+                // pump, upgrade to a bounded queue if input floods a dead pipe.
+                if v.frame_tx.send(frame).is_err() {
+                    return Err(ShellError::NotRunning);
+                }
             }
-            let frame = serde_json::json!({
-                "jsonrpc": "2.0", "method": "session.input",
-                "params": {"alias": v.alias, "data": data},
-            });
-            // shortcut: unbounded frame queue; a dead writer ends the
-            // pump, upgrade to a bounded queue if input floods a dead pipe.
-            return v.frame_tx.send(frame).map_err(|_| ShellError::NotRunning);
+            return Ok(());
         }
         self.inner
             .as_ref()
@@ -905,9 +916,70 @@ fn view_pump(
     control: &Arc<AtomicBool>,
     queued: &Arc<AtomicUsize>,
     stopping: &Arc<AtomicBool>,
+    mut initial_pending: Vec<serde_json::Value>,
 ) {
     let mut resyncing = false;
     let mut pending: Vec<serde_json::Value> = Vec::new();
+    let frames = std::mem::take(&mut initial_pending);
+    for f in frames {
+        let method = f.get("method").and_then(serde_json::Value::as_str);
+        let params = f.get("params");
+        let rev = params
+            .and_then(|p| p.get("revision"))
+            .and_then(serde_json::Value::as_u64);
+        match method {
+            Some("session.output") | Some("session.resize") => {
+                if resyncing {
+                    pending.push(f);
+                    continue;
+                }
+                let Some(rev) = rev else {
+                    continue;
+                };
+                if rev <= last_rev {
+                    continue;
+                }
+                if rev > last_rev + 1 {
+                    pending.push(f);
+                    let _ = frame_tx.send(serde_json::json!({
+                        "jsonrpc": "2.0", "id": "resync", "method": "session.attach",
+                        "params": {"alias": alias, "readOnly": true, "fromRevision": last_rev},
+                    }));
+                    resyncing = true;
+                    continue;
+                }
+                last_rev = rev;
+                if method == Some("session.output") {
+                    let hex = f
+                        .get("params")
+                        .and_then(|p| p.get("data"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    if let Ok(bytes) = view_unhex(hex) {
+                        view_send_chunks(tx, queued, bytes);
+                    }
+                } else {
+                    let cols = f
+                        .get("params")
+                        .and_then(|p| p.get("cols"))
+                        .and_then(serde_json::Value::as_u64);
+                    let rows = f
+                        .get("params")
+                        .and_then(|p| p.get("rows"))
+                        .and_then(serde_json::Value::as_u64);
+                    if let (Some(c), Some(r)) = (cols, rows) {
+                        let c = u16::try_from(c).unwrap_or(0);
+                        let r = u16::try_from(r).unwrap_or(0);
+                        if c != 0 && r != 0 {
+                            let _ = tx.send(ShellEvent::Resize(c, r));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     loop {
         let frame = match crate::host::read_frame(rd, crate::host::MAX_PAGE_BYTES) {
             Ok(f) => f,
