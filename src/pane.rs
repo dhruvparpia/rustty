@@ -379,6 +379,9 @@ pub struct Pane {
     dirty: bool,
     /// Mouse text selection, in absolute grid coordinates (WIN-004).
     selection: Option<Selection>,
+    /// Bookmarks over this pane's history (issue #53, BKMK-001..003),
+    /// sorted by anchor.
+    bookmarks: Vec<crate::bookmark::Bookmark>,
     /// Kitty graphics images and placements (roadmap v0.5).
     graphics: ImageStore,
     /// Viewport follows new output at the live edge (issue #42). Scrolling
@@ -411,6 +414,7 @@ impl Pane {
             in_alt: false,
             dirty: true,
             selection: None,
+            bookmarks: Vec::new(),
             graphics: ImageStore::default(),
             follow: true,
             view_alias: None,
@@ -438,6 +442,7 @@ impl Pane {
             in_alt: false,
             dirty: true,
             selection: None,
+            bookmarks: Vec::new(),
             graphics: ImageStore::default(),
             follow: true,
             view_alias: None,
@@ -476,6 +481,17 @@ impl Pane {
         let sel = self.selection?;
         let text = self.grid.selection_text(&sel);
         (!text.is_empty()).then_some(text)
+    }
+
+    /// This pane's bookmarks, sorted by anchor (issue #53, BKMK-001).
+    #[must_use]
+    pub fn bookmarks(&self) -> &[crate::bookmark::Bookmark] {
+        &self.bookmarks
+    }
+
+    /// This pane's bookmarks, mutably (toggle/delete in the window layer).
+    pub fn bookmarks_mut(&mut self) -> &mut Vec<crate::bookmark::Bookmark> {
+        &mut self.bookmarks
     }
 
     /// The pane's parser (cursor position, modes) for the renderer.
@@ -602,9 +618,10 @@ impl Pane {
     /// Absolute grid line under the cursor: where the next printed byte
     /// lands, so OSC 133 marks record command positions relative to it
     /// (the grid preallocates every screen row, so `last_abs` is the
-    /// bottom row, not the cursor).
+    /// bottom row, not the cursor). Also the bookmark anchor when the
+    /// toggle is not driven by a search match (BKMK-001, issue #53).
     #[must_use]
-    fn cursor_abs(&self) -> usize {
+    pub fn cursor_abs(&self) -> usize {
         self.grid
             .abs_of_view(self.parser.cursor_row)
             .unwrap_or_else(|| self.grid.last_abs())

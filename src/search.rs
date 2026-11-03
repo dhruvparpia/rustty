@@ -75,6 +75,10 @@ pub struct SearchState {
     /// `true` when the scan stopped at [`MAX_MATCHES`]: the count shown
     /// in the bar carries a "+" because more matches may exist.
     pub truncated: bool,
+    /// SEARCH-023 (issue #53): lines of context shown above and below the
+    /// current match. From `[search] context-lines`; the result view
+    /// reads them straight from the grid, so no re-scan is involved.
+    pub context_lines: usize,
     /// Pane index to resume the scan from.
     scan_pane: usize,
     /// Next absolute line to scan within `scan_pane` (0 = pane start).
@@ -419,6 +423,22 @@ fn _grid_reference(grid: &Grid) -> usize {
     grid.last_abs()
 }
 
+/// SEARCH-023 (issue #53): the context window around a match — lines
+/// `abs-n..=abs+n` clamped to the kept range, as `(abs, text, is_match)`.
+/// Pure grid reads: opening the view, moving between matches, and
+/// history arriving never re-scan the query.
+#[must_use]
+pub fn context_lines(grid: &Grid, abs: usize, n: usize) -> Vec<(usize, String, bool)> {
+    let from = abs.saturating_sub(n).max(grid.first_abs());
+    let to = abs.saturating_add(n).min(grid.last_abs());
+    (from..=to)
+        .filter_map(|a| {
+            let text = grid.line_text_abs(a)?;
+            Some((a, text, a == abs))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,5 +709,44 @@ mod tests {
         drain_scan(&mut search, &tab);
         assert_eq!(search.matches.len(), 2);
         assert_eq!(search.current_match(), Some(key));
+    }
+
+    #[test]
+    fn context_window_around_a_match() {
+        // Issue #53 (SEARCH-023): the view is pure grid reads around the
+        // match's abs; the match row is flagged, neighbours are not.
+        let mut grid = Grid::with_size(10, 2, 10);
+        for i in 0..6 {
+            let mut line = Line::blank(10);
+            for (c, ch) in format!("l{i}").chars().enumerate() {
+                line.cells[c].char = ch;
+            }
+            grid.append_line(line);
+        }
+        let abs = grid.last_abs() - 2;
+        let ctx = context_lines(&grid, abs, 2);
+        let ids: Vec<usize> = ctx.iter().map(|(a, ..)| *a).collect();
+        assert_eq!(ids, (abs - 2..=abs + 2).collect::<Vec<_>>());
+        let flags: Vec<bool> = ctx.iter().map(|(_, _, m)| *m).collect();
+        assert_eq!(flags, vec![false, false, true, false, false]);
+        assert_eq!(ctx[2].1, format!("l{}", abs - 2)); // viewport rows precede content
+    }
+
+    #[test]
+    fn context_window_clamps_at_both_ends() {
+        let mut grid = Grid::with_size(10, 2, 10);
+        for _ in 0..4 {
+            grid.append_line(Line::blank(10));
+        }
+        // Oldest kept line with n=3: only the line itself and the 3 below.
+        let first = grid.first_abs();
+        let ctx = context_lines(&grid, first, 3);
+        assert_eq!(ctx.len(), 4);
+        assert!(ctx[0].2);
+        // The newest line with n=3: only the 3 above and itself.
+        let last = grid.last_abs();
+        let ctx = context_lines(&grid, last, 3);
+        assert_eq!(ctx.len(), 4);
+        assert!(ctx[3].2);
     }
 }

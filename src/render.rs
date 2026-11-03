@@ -1044,6 +1044,10 @@ impl Renderer {
     /// cursor, and the search overlay when `search` is active. This is the
     /// full repaint, used for system-initiated `WM_PAINT` (expose, resize,
     /// coming back from occluded). Never panics on Direct2D failure (NFR-216).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the frame paint takes the full overlay set"
+    )]
     pub fn paint(
         &mut self,
         app: &App,
@@ -1052,8 +1056,12 @@ impl Renderer {
         palette: Option<&crate::palette::PaletteState>,
         hint: Option<&crate::hints::HintState>,
         prompt: Option<&str>,
+        search_ctx: &[(bool, String)],
+        bookmarks: Option<(&[(bool, String)], usize)>,
     ) {
-        self.paint_frame(app, theme, search, palette, hint, prompt, true);
+        self.paint_frame(
+            app, theme, search, palette, hint, prompt, search_ctx, bookmarks, true,
+        );
     }
 
     /// Paint only what changed since the last frame (NFR-113 damage-only
@@ -1065,6 +1073,10 @@ impl Renderer {
     /// The caller clears the grid damage flags afterwards
     /// (see [`crate::app::App::clear_grid_damage`]); a dropped frame keeps
     /// them set, so the next call repaints everything.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the frame paint takes the full overlay set"
+    )]
     pub fn paint_damage(
         &mut self,
         app: &App,
@@ -1073,8 +1085,12 @@ impl Renderer {
         palette: Option<&crate::palette::PaletteState>,
         hint: Option<&crate::hints::HintState>,
         prompt: Option<&str>,
+        search_ctx: &[(bool, String)],
+        bookmarks: Option<(&[(bool, String)], usize)>,
     ) {
-        self.paint_frame(app, theme, search, palette, hint, prompt, false);
+        self.paint_frame(
+            app, theme, search, palette, hint, prompt, search_ctx, bookmarks, false,
+        );
     }
 
     /// The tab-bar geometry the last frame painted, for hit testing.
@@ -1249,6 +1265,8 @@ impl Renderer {
         palette: Option<&crate::palette::PaletteState>,
         hint: Option<&crate::hints::HintState>,
         prompt: Option<&str>,
+        search_ctx: &[(bool, String)],
+        bookmarks: Option<(&[(bool, String)], usize)>,
         force_full: bool,
     ) {
         if unsafe { self.target.CheckWindowState() } == D2D1_WINDOW_STATE_OCCLUDED {
@@ -1433,8 +1451,12 @@ impl Renderer {
             self.paint_prompt_bar(theme, width, height);
         } else if let Some(palette) = palette {
             self.paint_palette(palette, theme, width, height);
+        } else if let Some((rows, sel)) = bookmarks {
+            // BKMK-002 (issue #53): the bookmark list takes the overlay
+            // strip, one row per bookmark, selected row highlighted.
+            self.paint_bookmarks(rows, sel, theme, width, height);
         } else if let Some(search) = search {
-            self.paint_search_bar(search, theme, width, height);
+            self.paint_search_bar(search, search_ctx, theme, width, height);
         }
         unsafe {
             self.target
@@ -1686,7 +1708,14 @@ impl Renderer {
         self.prompt_label = label;
     }
 
-    fn paint_search_bar(&mut self, search: &SearchState, theme: &Theme, width: f32, height: f32) {
+    fn paint_search_bar(
+        &mut self,
+        search: &SearchState,
+        ctx: &[(bool, String)],
+        theme: &Theme,
+        width: f32,
+        height: f32,
+    ) {
         let bar_h = SEARCH_BAR_HEIGHT.min(height.max(0.0));
         if bar_h <= 0.0 {
             return;
@@ -1695,6 +1724,58 @@ impl Renderer {
         let bottom = height - tab_bottom;
         let top = (bottom - bar_h).max(0.0);
         self.fill_rect(0.0, top, width, bottom, theme.tab_bar);
+        // SEARCH-023 (issue #53): context lines above the bar, the current
+        // match marked. Rows are built by the window layer from the grid,
+        // so the view needs no re-scan.
+        if !ctx.is_empty() {
+            let row_h = palette_row_height(self.metrics.cell_height);
+            let panel_h = (row_h * ctx.len() as f32).min(top);
+            let rows = (panel_h / row_h) as usize;
+            if rows > 0 {
+                let panel_top = top - row_h * rows as f32;
+                self.fill_rect(0.0, panel_top, width, top, theme.tab_bar);
+                let dim = {
+                    let fg = theme.foreground;
+                    let bg = theme.tab_bar;
+                    Color {
+                        r: ((u16::from(fg.r) + u16::from(bg.r)) / 2) as u8,
+                        g: ((u16::from(fg.g) + u16::from(bg.g)) / 2) as u8,
+                        b: ((u16::from(fg.b) + u16::from(bg.b)) / 2) as u8,
+                    }
+                };
+                let mut units = std::mem::take(&mut self.utf16);
+                for (slot, (is_match, text)) in ctx.iter().take(rows).enumerate() {
+                    let row_top = panel_top + row_h * slot as f32;
+                    tabbar::fit_title_into(
+                        text,
+                        (width - 24.0).max(0.0),
+                        self.metrics.cell_width,
+                        &mut self.search_label,
+                    );
+                    if self.search_label.is_empty() {
+                        continue;
+                    }
+                    units.clear();
+                    units.extend(self.search_label.encode_utf16());
+                    if *is_match {
+                        units.insert(0, u16::from(b'>'));
+                    }
+                    let text_top = row_top + (row_h - self.metrics.text_height) / 2.0;
+                    let rect = D2D_RECT_F {
+                        left: 8.0,
+                        top: text_top,
+                        right: width - 8.0,
+                        bottom: text_top + self.metrics.text_height,
+                    };
+                    let color = if *is_match { theme.foreground } else { dim };
+                    if let Some(brush) = self.brush(color) {
+                        let format = &self.formats[0];
+                        self.draw_units(&units, format, rect, &brush);
+                    }
+                }
+                self.utf16 = units;
+            }
+        }
         let mut raw = std::mem::take(&mut self.label);
         raw.clear();
         raw.push_str("Search: ");
@@ -1893,6 +1974,92 @@ impl Renderer {
             } else {
                 theme.foreground
             };
+            draw_row(self, &label, row_top, color);
+        }
+        self.label = label;
+        self.utf16 = units;
+    }
+
+    /// BKMK-002 (issue #53): the bookmark list overlay — one row per
+    /// bookmark, selected row highlighted, evicted anchors marked "✕" and
+    /// dimmed. Rows come prebuilt from the window layer (label + evicted
+    /// flag), so the paint stays a plain strip render.
+    fn paint_bookmarks(
+        &mut self,
+        rows: &[(bool, String)],
+        sel: usize,
+        theme: &Theme,
+        width: f32,
+        height: f32,
+    ) {
+        let row_h = palette_row_height(self.metrics.cell_height);
+        let shown = rows.len().min(crate::palette::VISIBLE_ROWS);
+        let bar_h = (row_h * (1 + shown) as f32).min(height.max(0.0));
+        if bar_h <= 0.0 {
+            return;
+        }
+        let tab_bottom = self.tab_bar_height.min(height.max(0.0));
+        let bottom = height - tab_bottom;
+        let top = (bottom - bar_h).max(0.0);
+        self.fill_rect(0.0, top, width, bottom, theme.tab_bar);
+        let mut label = std::mem::take(&mut self.label);
+        let mut units = std::mem::take(&mut self.utf16);
+        let mut draw_row = |r: &mut Self, text: &str, row_top: f32, color: Color| {
+            tabbar::fit_title_into(
+                text,
+                (width - 16.0).max(0.0),
+                r.metrics.cell_width,
+                &mut r.search_label,
+            );
+            if r.search_label.is_empty() {
+                return;
+            }
+            units.clear();
+            units.extend(r.search_label.encode_utf16());
+            let text_top = row_top + (row_h - r.metrics.text_height) / 2.0;
+            let rect = D2D_RECT_F {
+                left: 8.0,
+                top: text_top,
+                right: width - 8.0,
+                bottom: text_top + r.metrics.text_height,
+            };
+            if let Some(brush) = r.brush(color) {
+                let format = &r.formats[0];
+                r.draw_units(&units, format, rect, &brush);
+            }
+        };
+        label.clear();
+        label.push_str("Bookmarks  ");
+        label.push_str(&(sel + 1).to_string());
+        label.push('/');
+        label.push_str(&rows.len().to_string());
+        label.push_str("  Up/Down scroll, Enter jump, d delete, Esc close");
+        draw_row(self, &label, top, theme.foreground);
+        // Window the list so the selected row is always visible.
+        let start = sel.saturating_sub(shown.saturating_sub(1));
+        let start = start.min(rows.len().saturating_sub(shown));
+        let dim = {
+            let fg = theme.foreground;
+            let bg = theme.tab_bar;
+            Color {
+                r: ((u16::from(fg.r) + u16::from(bg.r)) / 2) as u8,
+                g: ((u16::from(fg.g) + u16::from(bg.g)) / 2) as u8,
+                b: ((u16::from(fg.b) + u16::from(bg.b)) / 2) as u8,
+            }
+        };
+        for (slot, (evicted, text)) in rows[start..start + shown].iter().enumerate() {
+            let row_index = start + slot;
+            let row_top = top + row_h * (slot as f32 + 1.0);
+            if row_index == sel {
+                self.fill_rect(0.0, row_top, width, row_top + row_h, theme.tab_active);
+            }
+            label.clear();
+            if *evicted {
+                label.push('\u{2715}');
+                label.push(' ');
+            }
+            label.push_str(text);
+            let color = if *evicted { dim } else { theme.foreground };
             draw_row(self, &label, row_top, color);
         }
         self.label = label;

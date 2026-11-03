@@ -310,6 +310,14 @@ pub struct SearchConfig {
     /// Regex default.
     #[serde(rename = "regex-default", default)]
     pub regex_default: bool,
+    /// SEARCH-023 (issue #53): lines of context shown above and below the
+    /// current match in the result view. Clamped to 0..=16 at use.
+    #[serde(rename = "context-lines", default = "default_context_lines")]
+    pub context_lines: usize,
+}
+
+fn default_context_lines() -> usize {
+    3
 }
 
 impl Default for SearchConfig {
@@ -319,6 +327,7 @@ impl Default for SearchConfig {
             case_sensitive_default: false,
             whole_word_default: false,
             regex_default: false,
+            context_lines: default_context_lines(),
         }
     }
 }
@@ -561,6 +570,16 @@ pub enum KeyAction {
     CommandPalette,
     /// Open keyboard hint mode (issue #52).
     HintMode,
+    /// Add/remove a bookmark at the cursor or current search match
+    /// (issue #53, BKMK-001).
+    ToggleBookmark,
+    /// Show the bookmark list (issue #53, BKMK-002).
+    ShowBookmarks,
+    /// Export the current selection to a file (issue #53, EXPORT-001).
+    ExportSelection,
+    /// Export the last finished command's output to a file
+    /// (issue #53, EXPORT-002).
+    ExportLastCommand,
 }
 
 impl KeyAction {
@@ -605,6 +624,10 @@ impl KeyAction {
             "copy-last-command" | "copy-command-output" => Self::CopyLastCommand,
             "command-palette" | "palette" => Self::CommandPalette,
             "hint-mode" | "hints" => Self::HintMode,
+            "toggle-bookmark" | "bookmark" => Self::ToggleBookmark,
+            "show-bookmarks" | "bookmarks" => Self::ShowBookmarks,
+            "export-selection" => Self::ExportSelection,
+            "export-last-command" | "export-command-output" => Self::ExportLastCommand,
             _ => return None,
         })
     }

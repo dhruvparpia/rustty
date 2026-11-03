@@ -6,6 +6,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- Large-output slice 2 (#53): search result context lines (`[search] context-lines`),
+  a bookmark overlay anchored to absolute history lines with eviction marking,
+  and streaming selection/last-command export through a native Save As dialog.
+
 ## [0.5.0] - 2026-11-02
 
 The v0.2–v0.5 features accumulated here (those milestones were tagged as

@@ -1232,9 +1232,10 @@ OSC 8 support (#41, roadmap Stage 1, slice 1). Diagnostic
 
 ## 9.31 Large-output search and reading requirements
 
-Issue #42 slice 1 (roadmap "Large-output mode"). Bookmarks, streaming
-export and optional disk-backed history are the remaining #42 scope and
-will be specified with their child issues.
+Issue #42 slice 1 (roadmap "Large-output mode"). Issue #53 slice 2 ships
+search context, stable bookmarks and streaming export. Optional disk-backed
+history is the remaining #42 scope (#54) and will be specified with that
+issue.
 
 | ID | Requirement | Priority |
 |---|---|---|
@@ -1245,6 +1246,12 @@ will be specified with their child issues.
 | SEARCH-020 | Appending output keeps the results already shown, so the selected match survives new output. | P1 |
 | SEARCH-021 | A rescan (e.g. a case toggle) that finds the same match restores the user's selection to it. | P2 |
 | SEARCH-022 | Scrolling away from the live edge pauses the follow-the-output snap; the reading position survives a burst of shell output. Returning to the live edge (wheel to the bottom, search jump, command jump) resumes it. | P1 |
+| SEARCH-023 | Search results shall show configurable context lines above and below the current match (`[search] context-lines`, clamped 0..16); the result view reads those lines from the grid without re-scanning the query. | P1 |
+| BKMK-001 | A bookmark shall anchor on the grid's absolute line id, added at the current search match or the focused pane's cursor and toggled off when already present; the list is sorted by anchor and capped at 256. | P1 |
+| BKMK-002 | The bookmark overlay shall list bookmarks one row per bookmark with the selected row visible, and Up/Down/Enter/d/Esc drive it while every key is swallowed; the overlay takes the strip from search/palette/hint. | P1 |
+| BKMK-003 | An anchor evicted from scrollback shall be marked and never jumped to; the bookmark list must not silently repoint a dead anchor. | P1 |
+| EXPORT-001 | Exporting the current selection shall stream line by line to a file chosen via a Save As dialog, with peak memory bounded to one line (no full history clone). | P1 |
+| EXPORT-002 | Exporting the last finished command's output shall stream its block to a file chosen via a Save As dialog, clamped to the kept history and bounded to one line in memory. | P1 |
 
 ## 9.32 Session host requirements
 

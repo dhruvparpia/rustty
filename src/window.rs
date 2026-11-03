@@ -206,6 +206,11 @@ const MENU_VIEW_TERMINATE: usize = 0xE862;
 /// (issue #51).
 const MENU_OPEN_EDITOR: usize = 0xE863;
 const MENU_COPY_PATH: usize = 0xE864;
+/// Bookmarks and streaming export (issue #53).
+const MENU_TOGGLE_BOOKMARK: usize = 0xE865;
+const MENU_SHOW_BOOKMARKS: usize = 0xE866;
+const MENU_EXPORT_SELECTION: usize = 0xE867;
+const MENU_EXPORT_LAST: usize = 0xE868;
 /// Workspaces submenu: "Open <name>" items (WORKSPACE-003), one per
 /// template, capped by the store's own 64-template limit.
 const MENU_WS_OPEN_BASE: usize = 0xF200;
@@ -678,6 +683,10 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         MENU_SPLIT_RIGHT => split_pane(hwnd, Dir::Vertical),
         MENU_SPLIT_DOWN => split_pane(hwnd, Dir::Horizontal),
         MENU_SEARCH => toggle_search(hwnd),
+        MENU_TOGGLE_BOOKMARK => toggle_bookmark(hwnd),
+        MENU_SHOW_BOOKMARKS => toggle_bookmarks_overlay(hwnd),
+        MENU_EXPORT_SELECTION => export_selection(hwnd),
+        MENU_EXPORT_LAST => export_last_command(hwnd),
         MENU_PALETTE => toggle_palette(hwnd),
         MENU_PREV_COMMAND => command_jump(hwnd, -1),
         MENU_NEXT_COMMAND => command_jump(hwnd, 1),
@@ -1228,6 +1237,11 @@ struct WindowState {
     /// Keyboard hint mode (issue #52): visible targets with typed labels,
     /// `None` when closed.
     hint: Option<crate::hints::HintState>,
+    /// BKMK-002 (issue #53): the bookmark list overlay is open. Anchors
+    /// live on the pane; this is view state only.
+    bookmarks_open: bool,
+    /// Selected row in the bookmark overlay.
+    bm_sel: usize,
     /// PALETTE-005: recently run palette labels, newest first, capped.
     recent: Vec<String>,
     /// Index of the selected built-in profile (MENU-008). New tabs and
@@ -1538,28 +1552,32 @@ unsafe extern "system" fn wnd_proc(
             // is otherwise empty) — the shell drain would never run.
             let mut ps = PAINTSTRUCT::default();
             let _dc = unsafe { BeginPaint(hwnd, &mut ps) };
-            if let Some(s) = state_mut(hwnd)
-                && let Some(r) = &mut s.renderer
-            {
+            if let Some(s) = state_mut(hwnd) {
                 let prompt = s
                     .renaming
                     .as_ref()
                     .map(|(_, buf)| format!("Rename tab: {buf}  (Enter to accept, Esc to cancel)"));
-                // NFR-216: paint() logs and swallows Direct2D failures.
-                let active = s.app.active_index();
-                r.set_bell_state(
-                    s.bell_flash,
-                    &s.bell_tabs,
-                    s.bell_tabs.get(active).copied().unwrap_or(false),
-                );
-                r.paint(
-                    &s.app,
-                    &s.theme,
-                    s.search.as_ref(),
-                    s.palette.as_ref(),
-                    s.hint.as_ref(),
-                    prompt.as_deref(),
-                );
+                let ctx_rows = search_context_rows(s);
+                let bm_rows = s.bookmarks_open.then(|| bookmark_rows(s));
+                let bm_arg = bm_rows.as_ref().map(|rows| (rows.as_slice(), s.bm_sel));
+                if let Some(r) = &mut s.renderer {
+                    let active = s.app.active_index();
+                    r.set_bell_state(
+                        s.bell_flash,
+                        &s.bell_tabs,
+                        s.bell_tabs.get(active).copied().unwrap_or(false),
+                    );
+                    r.paint(
+                        &s.app,
+                        &s.theme,
+                        s.search.as_ref(),
+                        s.palette.as_ref(),
+                        s.hint.as_ref(),
+                        prompt.as_deref(),
+                        &ctx_rows,
+                        bm_arg,
+                    );
+                }
             }
             let _ = unsafe { EndPaint(hwnd, &ps) };
             LRESULT(0)
@@ -2067,6 +2085,8 @@ fn create_quick_window() {
         search: None,
         palette: None,
         hint: None,
+        bookmarks_open: false,
+        bm_sel: 0,
         recent: Vec::new(),
         profile: 0,
     });
@@ -2441,6 +2461,17 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
         handle_hint_keydown(hwnd, vk);
         return;
     }
+    // Ctrl+Shift+B opens or closes the bookmark list (issue #53, BKMK-002).
+    if mods.ctrl && mods.shift && !mods.alt && vk == 0x42 {
+        toggle_bookmarks_overlay(hwnd);
+        return;
+    }
+    // While the bookmark list is open every keydown is swallowed:
+    // Up/Down/Enter/d/Esc drive it, and WM_CHAR is suppressed (issue #53).
+    if state_ref(hwnd).is_some_and(|s| s.bookmarks_open) {
+        handle_bookmark_keydown(hwnd, vk);
+        return;
+    }
     // Ctrl+F opens or closes the search overlay (SEARCH-002).
     if mods.ctrl && !mods.shift && !mods.alt && vk == 0x46 {
         toggle_search(hwnd);
@@ -2779,12 +2810,15 @@ fn toggle_search(hwnd: HWND) {
         s.search = None;
     } else if s.cfg.search.visible {
         // `[search]` sets the starting options (SEARCH-007/008/009).
+        s.bookmarks_open = false;
         let defaults = s.cfg.search.clone();
-        s.search = Some(SearchState::with_defaults(
+        let mut state = SearchState::with_defaults(
             defaults.case_sensitive_default,
             defaults.whole_word_default,
             defaults.regex_default,
-        ));
+        );
+        state.context_lines = defaults.context_lines; // SEARCH-023 (issue #53)
+        s.search = Some(state);
     }
     s.suppress_char = true;
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -2799,6 +2833,7 @@ fn toggle_palette(hwnd: HWND) {
         s.palette = None;
     } else {
         s.search = None;
+        s.bookmarks_open = false;
         let items = build_palette_items(s);
         let recent = s.recent.clone();
         s.palette = Some(PaletteState::new(items, &recent));
@@ -2818,6 +2853,7 @@ fn toggle_hint(hwnd: HWND) {
     } else {
         s.search = None;
         s.palette = None;
+        s.bookmarks_open = false;
         let collected = collect_hints(s);
         if collected.is_empty() {
             s.suppress_char = true;
@@ -2831,6 +2867,279 @@ fn toggle_hint(hwnd: HWND) {
     }
     s.suppress_char = true;
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// BKMK-001 (issue #53): add a bookmark at the current search match when
+/// search is open, otherwise at the focused pane's cursor; a bookmark
+/// already anchored there is removed. Labels are the anchor line's text.
+fn toggle_bookmark(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(tab) = s.app.active_tab_mut() else {
+        return;
+    };
+    let focused = tab.focused_index().unwrap_or(0);
+    // The search overlay's current match wins as the anchor, so the
+    // workflow is "search, walk matches, bookmark".
+    let key = s.search.as_ref().and_then(|sr| sr.current_match());
+    let (pane_idx, abs) = match key {
+        Some(k) => (k.pane, k.abs),
+        None => {
+            let Some(pane) = tab.pane_at(focused) else {
+                return;
+            };
+            (focused, pane.cursor_abs())
+        }
+    };
+    let Some(mut pane) = tab.pane_at_mut(pane_idx) else {
+        return;
+    };
+    let Some(line) = pane.grid().line_text_abs(abs) else {
+        return; // anchor already evicted
+    };
+    let label: String = crate::bookmark::label_of(&line);
+    let added = crate::bookmark::toggle(pane.bookmarks_mut(), abs, label);
+    let _ = added;
+    s.suppress_char = true;
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// BKMK-002 (issue #53): open the bookmark list, or close it when already
+/// open. It takes the overlay strip from search/palette/hint (one overlay
+/// per window).
+fn toggle_bookmarks_overlay(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    s.bookmarks_open = !s.bookmarks_open;
+    if s.bookmarks_open {
+        s.search = None;
+        s.palette = None;
+        s.hint = None;
+        s.bm_sel = 0;
+    }
+    s.suppress_char = true;
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Rows for the bookmark overlay: `(evicted, label)` per bookmark, the
+/// focused pane's list (BKMK-003: anchors below the grid's kept window
+/// are marked, not silently dropped).
+fn bookmark_rows(s: &WindowState) -> Vec<(bool, String)> {
+    let Some(tab) = s.app.active_tab() else {
+        return Vec::new();
+    };
+    let focused = tab.focused_index().unwrap_or(0);
+    let Some(pane) = tab.pane_at(focused) else {
+        return Vec::new();
+    };
+    let first = pane.grid().first_abs();
+    pane.bookmarks()
+        .iter()
+        .map(|b| (crate::bookmark::is_evicted(b.abs, first), b.label.clone()))
+        .collect()
+}
+
+/// Context lines around the current search match (SEARCH-023, issue #53).
+/// Pure grid reads: the view never re-scans the query.
+fn search_context_rows(s: &WindowState) -> Vec<(bool, String)> {
+    let Some(search) = s.search.as_ref() else {
+        return Vec::new();
+    };
+    let Some(found) = search.current_match() else {
+        return Vec::new();
+    };
+    let pane_idx = found.pane;
+    let abs = found.abs;
+    let n = search.context_lines.min(16);
+    if n == 0 {
+        return Vec::new();
+    }
+    let Some(tab) = s.app.active_tab() else {
+        return Vec::new();
+    };
+    let Some(pane) = tab.pane_at(pane_idx) else {
+        return Vec::new();
+    };
+    crate::search::context_lines(pane.grid(), abs, n)
+        .into_iter()
+        .map(|(_, text, is_match)| (is_match, text))
+        .collect()
+}
+
+/// BKMK-002 (issue #53): keys for the open bookmark overlay. Every
+/// keydown is consumed (WM_CHAR suppressed) so nothing reaches the shell.
+fn handle_bookmark_keydown(hwnd: HWND, vk: u16) {
+    let Some(s) = state_mut(hwnd) else { return };
+    s.suppress_char = true;
+    let rows = bookmark_rows(s);
+    let n = rows.len();
+    match vk {
+        0x1B => {
+            // Esc: close.
+            s.bookmarks_open = false;
+        }
+        0x26 => {
+            // Up: previous bookmark.
+            s.bm_sel = s.bm_sel.saturating_sub(1);
+        }
+        0x28 => {
+            // Down: next bookmark.
+            s.bm_sel = (s.bm_sel + 1).min(n.saturating_sub(1));
+        }
+        0x44 => {
+            // d: delete the selected bookmark (BKMK-001 removal).
+            let Some(tab) = s.app.active_tab_mut() else {
+                return;
+            };
+            let focused = tab.focused_index().unwrap_or(0);
+            let Some(mut pane) = tab.pane_at_mut(focused) else {
+                return;
+            };
+            if s.bm_sel < pane.bookmarks().len() {
+                pane.bookmarks_mut().remove(s.bm_sel);
+            }
+            s.bm_sel = s.bm_sel.min(pane.bookmarks().len().saturating_sub(1));
+            if pane.bookmarks().is_empty() {
+                s.bookmarks_open = false;
+            }
+        }
+        0x0D => {
+            // Enter: jump to the anchor; evicted anchors are a no-op
+            // (marked in the list, BKMK-003).
+            let Some(tab) = s.app.active_tab_mut() else {
+                return;
+            };
+            let focused = tab.focused_index().unwrap_or(0);
+            let Some(mut pane) = tab.pane_at_mut(focused) else {
+                return;
+            };
+            let marks = pane.bookmarks();
+            if s.bm_sel < marks.len() {
+                let b = marks[s.bm_sel].clone();
+                if !crate::bookmark::is_evicted(b.abs, pane.grid().first_abs()) {
+                    pane.grid_mut().scroll_to_abs(b.abs);
+                    pane.update_follow();
+                }
+            }
+        }
+        _ => {}
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// EXPORT-001 (issue #53): write the current selection to a file picked
+/// in a save dialog, streamed one grid line at a time (peak memory is
+/// one line, never a history clone).
+fn export_selection(hwnd: HWND) {
+    // Snapshot the selection, then close the state borrow before the
+    // modal dialog (WM paint handlers need the state while it runs).
+    let sel = {
+        let s = match state_ref(hwnd) {
+            Some(s) => s,
+            None => return,
+        };
+        let tab = match s.app.active_tab() {
+            Some(t) => t,
+            None => return,
+        };
+        tab.pane().selection()
+    };
+    let Some(sel) = sel else { return };
+    let Some(path) = save_dialog(hwnd, "rustty-selection.txt") else {
+        return;
+    };
+    let s = match state_ref(hwnd) {
+        Some(s) => s,
+        None => return,
+    };
+    let Some(tab) = s.app.active_tab() else {
+        return;
+    };
+    let pane = tab.pane();
+    export_to_file(&path, |w| {
+        crate::export::stream_selection(pane.grid(), &sel, w)
+    });
+}
+
+/// EXPORT-002 (issue #53): write the last finished command's output
+/// block to a file, streamed.
+fn export_last_command(hwnd: HWND) {
+    let range = {
+        let s = match state_ref(hwnd) {
+            Some(s) => s,
+            None => return,
+        };
+        let tab = match s.app.active_tab() {
+            Some(t) => t,
+            None => return,
+        };
+        let pane = tab.pane();
+        let Some(block) = pane.commands().last_finished() else {
+            return;
+        };
+        let to = block.end_abs.unwrap_or_else(|| pane.grid().last_abs());
+        (block.output_start_abs, to)
+    };
+    let Some(path) = save_dialog(hwnd, "rustty-output.txt") else {
+        return;
+    };
+    let s = match state_ref(hwnd) {
+        Some(s) => s,
+        None => return,
+    };
+    let Some(tab) = s.app.active_tab() else {
+        return;
+    };
+    let pane = tab.pane();
+    export_to_file(&path, |w| {
+        crate::export::stream_lines(pane.grid(), range.0, range.1, w)
+    });
+}
+
+/// Create `path` and run a streaming writer; I/O errors are logged, the
+/// app never panics on a failed export.
+fn export_to_file(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+) {
+    match std::fs::File::create(path) {
+        Ok(mut file) => {
+            if let Err(e) = write(&mut file) {
+                eprintln!("rustty: export failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("rustty: export failed: {e}"),
+    }
+}
+
+/// Native "Save As" dialog (issue #53). Returns the chosen path, `None`
+/// when cancelled.
+fn save_dialog(hwnd: HWND, suggested: &str) -> Option<std::path::PathBuf> {
+    use windows::Win32::UI::Controls::Dialogs::OFN_OVERWRITEPROMPT;
+    use windows::Win32::UI::Controls::Dialogs::OFN_PATHMUSTEXIST;
+    use windows::Win32::UI::Controls::Dialogs::{GetSaveFileNameW, OPENFILENAMEW};
+    let mut buf = [0u16; 4096];
+    for (slot, ch) in buf.iter_mut().zip(suggested.encode_utf16()) {
+        *slot = ch;
+    }
+    let filter: Vec<u16> = "Text files (*.txt)\0*.txt\0All files\0*.*\0"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: u32::try_from(std::mem::size_of::<OPENFILENAMEW>()).unwrap_or(u32::MAX),
+        hwndOwner: hwnd,
+        lpstrFilter: windows::core::PCWSTR(filter.as_ptr()),
+        lpstrFile: windows::core::PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        Flags: OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT,
+        ..Default::default()
+    };
+    let ok = unsafe { GetSaveFileNameW(&mut ofn) }.as_bool();
+    if !ok {
+        return None;
+    }
+    let end = buf.iter().position(|c| *c == 0)?;
+    let text = String::from_utf16(&buf[..end]).ok()?;
+    Some(std::path::PathBuf::from(text))
 }
 
 /// Collect the hint targets from the focused pane's visible viewport
@@ -3001,6 +3310,14 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
         .app
         .active_tab()
         .is_some_and(|tab| tab.pane().commands().last_finished().is_some());
+    let has_bookmarks = s
+        .app
+        .active_tab()
+        .is_some_and(|tab| !tab.pane().bookmarks().is_empty());
+    let has_selection = s
+        .app
+        .active_tab()
+        .is_some_and(|tab| tab.pane().selection().is_some());
     // Per-tab and per-profile rows are built before the `push` closure
     // borrows `items` mutably.
     for (idx, tab) in s.app.tabs().iter().enumerate() {
@@ -3055,6 +3372,25 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
     push("Paste", "Shell", KeyAction::Paste, None);
     push("Search", "Shell", KeyAction::Search, None);
     push("Hint Mode", "Shell", KeyAction::HintMode, None);
+    push("Toggle Bookmark", "Shell", KeyAction::ToggleBookmark, None);
+    push(
+        "Show Bookmark List",
+        "Shell",
+        KeyAction::ShowBookmarks,
+        (!has_bookmarks).then_some("No bookmarks in this pane"),
+    );
+    push(
+        "Export Selection to File",
+        "Shell",
+        KeyAction::ExportSelection,
+        (!has_selection).then_some("No selection"),
+    );
+    push(
+        "Export Last Command Output to File",
+        "Shell",
+        KeyAction::ExportLastCommand,
+        (!last_finished).then_some("No finished command in this pane yet"),
+    );
     push("Clear Screen", "Shell", KeyAction::ClearScreen, None);
     push(
         "Copy Last Command Output",
@@ -3830,6 +4166,10 @@ fn handle_context_menu(hwnd: HWND, lparam: LPARAM) {
         let _ = append_menu_item(menu, "Paste	Ctrl+Shift+V", MENU_PASTE);
         let _ = append_menu_separator(menu);
         let _ = append_menu_item(menu, "Search	Ctrl+F", MENU_SEARCH);
+        let _ = append_menu_item(menu, "Toggle Bookmark	Ctrl+Shift+B", MENU_TOGGLE_BOOKMARK);
+        let _ = append_menu_item(menu, "Show Bookmarks", MENU_SHOW_BOOKMARKS);
+        let _ = append_menu_item(menu, "Export Selection to File", MENU_EXPORT_SELECTION);
+        let _ = append_menu_item(menu, "Export Last Command Output", MENU_EXPORT_LAST);
         let _ = append_menu_item(menu, "Split Right	Ctrl+Shift+Enter", MENU_SPLIT_RIGHT);
         let _ = append_menu_item(menu, "Split Below	Ctrl+Shift+-", MENU_SPLIT_DOWN);
         let _ = append_menu_separator(menu);
@@ -4404,11 +4744,14 @@ fn drain_and_cleanup(hwnd: HWND) {
                 .search
                 .as_mut()
                 .is_some_and(|search| search.note_history(s.app.active_tab()));
+            let prompt = s
+                .renaming
+                .as_ref()
+                .map(|(_, buf)| format!("Rename tab: {buf}  (Enter to accept, Esc to cancel)"));
+            let ctx_rows = search_context_rows(s);
+            let bm_rows = s.bookmarks_open.then(|| bookmark_rows(s));
+            let bm_arg = bm_rows.as_ref().map(|rows| (rows.as_slice(), s.bm_sel));
             if let Some(r) = &mut s.renderer {
-                let prompt = s
-                    .renaming
-                    .as_ref()
-                    .map(|(_, buf)| format!("Rename tab: {buf}  (Enter to accept, Esc to cancel)"));
                 let active = s.app.active_index();
                 r.set_bell_state(
                     s.bell_flash,
@@ -4422,6 +4765,8 @@ fn drain_and_cleanup(hwnd: HWND) {
                     s.palette.as_ref(),
                     s.hint.as_ref(),
                     prompt.as_deref(),
+                    &ctx_rows,
+                    bm_arg,
                 );
                 s.app.clear_grid_damage();
             } else {
@@ -5147,6 +5492,10 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
         KeyAction::CopyLastCommand => copy_last_command(hwnd),
         KeyAction::CommandPalette => toggle_palette(hwnd),
         KeyAction::HintMode => toggle_hint(hwnd),
+        KeyAction::ToggleBookmark => toggle_bookmark(hwnd),
+        KeyAction::ShowBookmarks => toggle_bookmarks_overlay(hwnd),
+        KeyAction::ExportSelection => export_selection(hwnd),
+        KeyAction::ExportLastCommand => export_last_command(hwnd),
     }
 }
 
@@ -5626,6 +5975,8 @@ pub fn run(
         search: None,
         palette: None,
         hint: None,
+        bookmarks_open: false,
+        bm_sel: 0,
         recent: Vec::new(),
         // CONFIG-013: `starting-profile` picks the initial shell.
         profile: {

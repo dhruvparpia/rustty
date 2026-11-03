@@ -16,6 +16,9 @@ pub mod app;
 #[cfg(windows)]
 #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
 pub mod attach;
+/// Bookmarks over a pane's history (issue #53, SPEC BKMK-001..003). Pure
+/// anchor math.
+pub mod bookmark;
 pub mod cli;
 pub mod color;
 /// Per-command metadata from OSC 133 transitions (SHELLINT-006/010/013-019,
@@ -27,6 +30,9 @@ pub mod diagnostics;
 /// Shell discovery (issue #40): WSL distros, PowerShell 7, VS developer
 /// environments, merged into the profile list.
 pub mod discovery;
+/// Streaming text export of a selection or command output (issue #53,
+/// SPEC EXPORT-001/002). Pure, one line in memory at a time.
+pub mod export;
 /// Kitty graphics protocol: header parsing and base64 (pure, spec graphics
 /// protocols, roadmap v0.5).
 pub mod graphics;
