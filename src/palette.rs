@@ -181,26 +181,31 @@ pub fn fuzzy_score(label: &str, query: &str) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
     }
-    let label_lower = label.to_lowercase();
+    let label_lower: Vec<char> = label.to_lowercase().chars().collect();
+    let query_chars: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
     let mut score: i64 = 0;
     let mut pos = 0usize;
-    for (qi, qch) in query.chars().flat_map(char::to_lowercase).enumerate() {
-        let rest = label_lower.get(pos..)?;
-        let found = rest.find(qch)?;
-        let at = pos + found;
+    for (qi, qch) in query_chars.iter().enumerate() {
+        let mut found = usize::MAX;
+        for (i, c) in label_lower.iter().enumerate().skip(pos) {
+            if *c == *qch {
+                found = i;
+                break;
+            }
+        }
+        if found == usize::MAX {
+            return None;
+        }
+        let at = found;
         pos = at + 1;
-        if qi == 0 && found == 0 {
-            score += 24; // label starts with the query
+        if qi == 0 && at == 0 {
+            score += 24;
         }
-        let prev = if at == 0 {
-            ' '
-        } else {
-            label_lower.as_bytes()[at - 1].max(b' ') as char
-        };
-        if matches!(prev, ' ' | ':' | '-' | '/') {
-            score += 12; // word/segment start
+        let prev = if at == 0 { ' ' } else { label_lower[at - 1] };
+        if prev.is_whitespace() || prev == ':' || prev == '-' || prev == '/' {
+            score += 12;
         }
-        score += 4 - i64::try_from(at.min(4)).unwrap_or(4); // early match bonus
+        score += 4 - i64::try_from(at.min(4)).unwrap_or(4);
     }
     Some(score)
 }
@@ -484,5 +489,10 @@ mod tests {
     fn display_shortcut_is_human_readable() {
         assert_eq!(display_shortcut("ctrl+shift+p"), "Ctrl+Shift+P");
         assert_eq!(display_shortcut("ctrl+shift+right-bracket"), "Ctrl+Shift+]");
+    }
+    #[test]
+    fn fuzzy_handles_unicode_boundaries() {
+        assert!(fuzzy_score("résumé", "rés").is_some());
+        assert!(fuzzy_score("界界", "界").is_some());
     }
 }

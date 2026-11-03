@@ -22,6 +22,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Diagnostic references use character columns for Python tracebacks, keep quoted
   editor paths as one token, and map WSL `/mnt/c` cwd to `C:\` before joining relative
   paths.
+- Clear scrollback now preserves the live viewport's absolute line ids.
+- Workspace mutation refuses an unreadable store instead of replacing it with an empty one.
+- Windows argv quoting preserves empty args, embedded quotes/backslashes and trailing slashes.
+- OSC 7 scripts emit valid percent-encoded file URIs with the hostname/path separator.
+- Clipboard writes open with the owning window HWND.
+- Palette fuzzy matching advances on Unicode boundaries; command/bookmark anchors use the
+  live screen, not the scrolled viewport.
 
 ## [0.5.0] - 2026-11-02
 

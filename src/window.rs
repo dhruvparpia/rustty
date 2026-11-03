@@ -704,7 +704,7 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         }
         MENU_COPY_LINK => {
             if let Some(uri) = state_mut(hwnd).and_then(|s| s.link_target.take()) {
-                let _ = clipboard::set_text(&uri);
+                let _ = clipboard::set_text(hwnd, &uri);
             }
         }
         MENU_OPEN_EDITOR => {
@@ -714,7 +714,7 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         }
         MENU_COPY_PATH => {
             if let Some(r) = state_mut(hwnd).and_then(|s| s.diag_target.take()) {
-                let _ = clipboard::set_text(&diag_text(&r));
+                let _ = clipboard::set_text(hwnd, &diag_text(&r));
             }
         }
         MENU_NEXT_TAB => switch_tab_rel(hwnd, 1),
@@ -3271,11 +3271,11 @@ fn handle_hint_keydown(hwnd: HWND, vk: u16) {
         match d {
             HintDispatch::Open => dispatch_hint_open(hwnd, &hint),
             HintDispatch::Copy(crate::hints::Action::CopyTarget) => {
-                let _ = clipboard::set_text(&hint.target);
+                let _ = clipboard::set_text(hwnd, &hint.target);
             }
             HintDispatch::Copy(crate::hints::Action::CopyUrl) => {
                 if let Some(url) = &hint.url {
-                    let _ = clipboard::set_text(url);
+                    let _ = clipboard::set_text(hwnd, url);
                 }
             }
         }
@@ -4043,7 +4043,7 @@ fn diag_text(r: &Resolved) -> String {
 /// must never break the terminal).
 fn open_diagnostic(hwnd: HWND, r: Resolved) {
     let Resolved::Open { path, line, col } = r else {
-        let _ = clipboard::set_text(&diag_text(&r));
+        let _ = clipboard::set_text(hwnd, &diag_text(&r));
         return;
     };
     let template = state_ref(hwnd)
@@ -4054,7 +4054,7 @@ fn open_diagnostic(hwnd: HWND, r: Resolved) {
             let _ = std::process::Command::new(&program).args(&args).spawn();
         }
         None => {
-            let _ = clipboard::set_text(&diag_text(&Resolved::Open { path, line, col }));
+            let _ = clipboard::set_text(hwnd, &diag_text(&Resolved::Open { path, line, col }));
         }
     }
 }
@@ -4583,7 +4583,7 @@ fn handle_lbutton_up(hwnd: HWND, lparam: LPARAM) {
         pane.parser().link_uri(id).map(str::to_string)
     });
     if let Some(uri) = copy_link {
-        let _ = clipboard::set_text(&uri);
+        let _ = clipboard::set_text(hwnd, &uri);
     }
     if let Some(s) = state_mut(hwnd) {
         s.drag_anchor = None;
@@ -5058,7 +5058,7 @@ fn copy_attach_command(hwnd: HWND) {
     let alias =
         state_ref(hwnd).and_then(|s| s.app.active_tab().and_then(|t| t.pane().view_alias()));
     if let Some(alias) = alias {
-        let _ = clipboard::set_text(&format!("rustty --attach {alias}"));
+        let _ = clipboard::set_text(hwnd, &format!("rustty --attach {alias}"));
     }
 }
 
@@ -5376,7 +5376,7 @@ fn copy_selection(hwnd: HWND) {
     if let Some(text) = text
         && !text.is_empty()
     {
-        let _ = clipboard::set_text(&text);
+        let _ = clipboard::set_text(hwnd, &text);
     }
 }
 
@@ -5539,7 +5539,7 @@ fn copy_last_command(hwnd: HWND) {
     else {
         return;
     };
-    if !clipboard::set_text(&text) {
+    if !clipboard::set_text(hwnd, &text) {
         eprintln!("rustty: clipboard copy failed");
     }
 }
@@ -5612,7 +5612,7 @@ fn copy_screen(hwnd: HWND) {
         .pane()
         .selection_text()
         .unwrap_or_else(|| Renderer::visible_text(tab.pane().grid()));
-    if !text.is_empty() && !clipboard::set_text(&text) {
+    if !text.is_empty() && !clipboard::set_text(hwnd, &text) {
         eprintln!("rustty: clipboard copy failed");
     }
 }

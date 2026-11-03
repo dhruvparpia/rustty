@@ -623,7 +623,7 @@ impl Pane {
     #[must_use]
     pub fn cursor_abs(&self) -> usize {
         self.grid
-            .abs_of_view(self.parser.cursor_row)
+            .live_abs(self.parser.cursor_row)
             .unwrap_or_else(|| self.grid.last_abs())
     }
 

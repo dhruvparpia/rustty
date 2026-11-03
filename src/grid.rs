@@ -349,8 +349,20 @@ impl Grid {
         )
     }
 
-    /// Absolute (monotonic) line id of viewport row `row`, `None` when the
-    /// row has no backing line.
+    /// Absolute line id of live-screen row `row` (unscrolled viewport),
+    /// `None` when the row has no backing line. Used by command/bookmark
+    /// anchors so reading scrollback never moves them (issue #78).
+    #[must_use]
+    pub fn live_abs(&self, row: usize) -> Option<usize> {
+        let v = self.live_top() + row;
+        if v >= self.total {
+            return None;
+        }
+        Some(self.evicted + v)
+    }
+
+    /// Absolute (monotonic) line id of viewport row `row`, `None` when
+    /// the row has no backing line.
     #[must_use]
     pub fn abs_of_view(&self, row: usize) -> Option<usize> {
         if row >= self.rows {
@@ -587,13 +599,14 @@ impl Grid {
             .filter_map(|r| self.live_row(r).cloned())
             .collect();
         let (cols, rows, sb) = (self.cols, self.rows, self.scrollback);
+        let start_abs = self.evicted + self.live_top();
         *self = Grid::with_size(cols, rows, sb);
         for (i, line) in live.into_iter().enumerate() {
             self.write_line(i, line);
         }
+        self.evicted = start_abs;
         self.mark_all_dirty();
     }
-
     /// Shift viewport rows `top..=bottom` up by one line; the region's bottom
     /// row becomes blank. Used by DL, ESC M and SU on partial scroll regions.
     ///
@@ -1270,5 +1283,16 @@ mod tests {
         assert_eq!(grid.word_range_abs(abs, 3), Some((3, 14))); // src/main.rs
         assert_eq!(grid.word_range_abs(abs, 0), Some((0, 2)));
         assert_eq!(grid.word_range_abs(abs, 14), Some((14, 15)));
+    }
+    #[test]
+    fn clear_scrollback_keeps_live_absolute_ids() {
+        let mut grid = Grid::with_size(10, 3, 10);
+        append_lines(&mut grid, 20);
+        let first_live = grid.live_abs(0).unwrap();
+        let last = grid.last_abs();
+        grid.clear_scrollback();
+        assert_eq!(grid.first_abs(), first_live);
+        assert_eq!(grid.last_abs(), last);
+        assert_eq!(grid.live_abs(0), Some(first_live));
     }
 }

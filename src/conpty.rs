@@ -465,24 +465,54 @@ unsafe fn own(handle: HANDLE) -> Owned<HANDLE> {
 
 /// Build a wide command line: the program path, then each argument,
 /// quoting anything with spaces (the classic CommandLineToArgvW shape).
-fn wide_command_line(program: &str, args: &[String]) -> Vec<u16> {
-    let mut s = String::new();
-    if program.contains(' ') {
-        s.push('"');
-        s.push_str(program);
-        s.push('"');
-    } else {
-        s.push_str(program);
+fn quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        let mut out = String::new();
+        out.push('"');
+        out.push('"');
+        return out;
     }
+    let needs = arg
+        .chars()
+        .any(|c| c.is_whitespace() || c == '"' || c == '\\')
+        || arg.contains("\\");
+    if !needs {
+        return arg.to_string();
+    }
+    let mut out = String::new();
+    out.push('"');
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        if c == '\\' {
+            backslashes += 1;
+        } else if c == '"' {
+            let n = backslashes * 2 + 1;
+            for _ in 0..n {
+                out.push('\\');
+            }
+            out.push('"');
+            backslashes = 0;
+        } else {
+            for _ in 0..backslashes {
+                out.push('\\');
+            }
+            out.push(c);
+            backslashes = 0;
+        }
+    }
+    let n = backslashes * 2;
+    for _ in 0..n {
+        out.push('\\');
+    }
+    out.push('"');
+    out.to_string()
+}
+
+fn wide_command_line(program: &str, args: &[String]) -> Vec<u16> {
+    let mut s = quote_arg(program);
     for arg in args {
         s.push(' ');
-        if arg.contains(' ') && !arg.starts_with('"') {
-            s.push('"');
-            s.push_str(arg);
-            s.push('"');
-        } else {
-            s.push_str(arg);
-        }
+        s.push_str(&quote_arg(arg));
     }
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }

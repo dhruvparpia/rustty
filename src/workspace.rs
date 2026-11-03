@@ -12,6 +12,7 @@
 //! read (newer version, unparseable, over cap) is reported and **never**
 //! rewritten — every mutating operation refuses to touch it (WORKSPACE-009).
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -249,8 +250,10 @@ pub fn store_path() -> Option<PathBuf> {
 /// Read the store at `path`. Never fails: the reason text is for the user.
 #[must_use]
 pub fn read_store(path: &Path) -> Loaded {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Loaded::Store(Store::default());
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Loaded::Store(Store::default()),
+        Err(e) => return Loaded::Unusable(format!("workspaces file unreadable: {e}")),
     };
     if text.trim().is_empty() {
         return Loaded::Store(Store::default());

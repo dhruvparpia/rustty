@@ -5,6 +5,7 @@
 //! process, allocation failure) are reported as `None`/`false` — the UI
 //! must degrade silently, never panic.
 
+use windows::Win32::Foundation::HWND;
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     SetClipboardData,
@@ -43,9 +44,9 @@ pub fn get_text() -> Option<String> {
 ///
 /// Returns `false` when the clipboard is held by another process or the
 /// system refuses the write.
-pub fn set_text(text: &str) -> bool {
+pub fn set_text(owner: HWND, text: &str) -> bool {
     unsafe {
-        if OpenClipboard(None).is_err() {
+        if OpenClipboard(Some(owner)).is_err() {
             return false;
         }
         let ok = (|| {

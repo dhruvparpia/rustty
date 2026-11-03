@@ -5,8 +5,9 @@ $rtBel = [char]7
 
 function global:Prompt {
     $cwd = $PWD.ProviderPath -replace '\\', '/'
+    $uriPath = [uri]::EscapeDataString($cwd)
     "$rtEsc]133;D:$LASTEXITCODE$rtBel" +
-    "$rtEsc]7;file://${env:COMPUTERNAME}$cwd$rtBel" +
+    "$rtEsc]7;file://${env:COMPUTERNAME}/$uriPath$rtBel" +
     "$rtEsc]133;A$rtBel" +
     "PS $PWD> "
 }
