@@ -8,6 +8,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 Compatible repair line; `v0.5.0` remains immutable and is not moved.
 
+## [0.6.0] - unreleased feature work
+
+### Added
+
+- Session browser slice (#88): palette rows list live and exited host sessions with profile, cwd,
+  controller/watcher counts, status, and a disabled reason for exited targets.
+
+
 ### Added
 
 - Large-output slice 2 (#53): search result context lines (`[search] context-lines`),

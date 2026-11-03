@@ -1456,9 +1456,25 @@ pub mod server {
                 let g = app
                     .lock()
                     .map_err(|_| Fail::Code("internal", "state lock poisoned".to_string()))?;
-                Ok(
-                    json!({"schema": SCHEMA, "sessions": g.records().iter().map(|r| r.json()).collect::<Vec<_>>() }),
-                )
+                let sessions = g
+                    .records()
+                    .iter()
+                    .map(|r| {
+                        let mut controllers = 0usize;
+                        let mut watchers = 0usize;
+                        if let Some(m) = g.live.get(&r.alias) {
+                            if m.controller.is_some() {
+                                controllers = 1;
+                            }
+                            watchers = m.subs.len() - controllers;
+                        }
+                        let mut rec = r.json();
+                        rec["controllers"] = json!(controllers);
+                        rec["watchers"] = json!(watchers);
+                        rec
+                    })
+                    .collect::<Vec<_>>();
+                Ok(json!({"schema": SCHEMA, "sessions": sessions }))
             }
             "session.info" => {
                 let g = app
@@ -2437,6 +2453,13 @@ mod tests {
         let resp = server::handle(&app, &v, &c1);
         assert_eq!(resp["error"]["code"].as_str(), Some("session-busy"));
         drop(rx2);
+
+        // The unified browser list carries controller/watcher counts.
+        let v = json!({"method": "session.list", "id": 7});
+        let binding = server::handle(&app, &v, &conn);
+        let rec = &binding["result"]["sessions"].as_array().expect("list")[0];
+        assert_eq!(rec["controllers"].as_u64(), Some(1), "one controller");
+        assert_eq!(rec["watchers"].as_u64(), Some(1), "one demoted watcher");
 
         // Clean up the live session (kills the shell via the job).
         let v = json!({"method": "session.terminate", "params": {"alias": alias}, "id": 6});

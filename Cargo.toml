@@ -1,6 +1,6 @@
 [package]
 name = "rustty"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.99"
 description = "A fast, native-feeling, MIT-licensed terminal emulator for Windows (spec: docs/SPEC.md)"

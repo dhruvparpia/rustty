@@ -3340,7 +3340,7 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             command: Command::NewTabProfile(idx),
         });
     }
-    for rec in live_sessions() {
+    for rec in session_records() {
         let alias = rec
             .get("alias")
             .and_then(serde_json::Value::as_u64)
@@ -3349,11 +3349,46 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             .get("name")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("session");
+        let state = rec.get("state").and_then(serde_json::Value::as_str);
+        let state_text = state.unwrap_or("unknown");
+        let profile = rec
+            .get("profile")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let cwd = rec
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let controllers = rec
+            .get("controllers")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0u64);
+        let watchers = rec
+            .get("watchers")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0u64);
+        let exit_code = rec.get("exitCode").and_then(serde_json::Value::as_u64);
+        let live = state == Some("live");
+        let label = if live {
+            format!(
+                "View Session {alias}: {name} [{profile}] {cwd} ({controllers} controller(s), {watchers} watcher(s))"
+            )
+        } else {
+            format!(
+                "Session {alias}: {name} [{profile}] {cwd} ({state_text}, exit {:?})",
+                exit_code
+            )
+        };
+        let disabled = if live {
+            None
+        } else {
+            Some("session is exited; attach would not respawn".to_string())
+        };
         items.push(PaletteItem {
-            label: format!("View Session {alias}: {name}"),
+            label,
             group: "Sessions",
             shortcut: None,
-            disabled_reason: None,
+            disabled_reason: disabled,
             command: Command::AttachSession(u32::try_from(alias).unwrap_or(0)),
         });
     }
@@ -4976,10 +5011,10 @@ fn new_tab_with_profile(hwnd: HWND, spec: ProfileSpec) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
-/// Live host sessions for the palette (issue #49). Connecting only (no
-/// spawn) keeps the palette inert when no host runs; the client drops
-/// here so listing never counts as a host connection.
-fn live_sessions() -> Vec<serde_json::Value> {
+/// All host session records for the unified session browser (issue #88).
+/// Connecting only (no spawn) keeps the browser inert when no host runs;
+/// the client drops here so listing never counts as a host connection.
+fn session_records() -> Vec<serde_json::Value> {
     let Ok(mut client) = crate::host::client::Client::connect_existing() else {
         return Vec::new();
     };
@@ -4990,13 +5025,19 @@ fn live_sessions() -> Vec<serde_json::Value> {
     resp.get("result")
         .and_then(|r| r.get("sessions"))
         .and_then(serde_json::Value::as_array)
-        .map(|list| {
-            list.iter()
-                .filter(|rec| rec.get("state").and_then(serde_json::Value::as_str) == Some("live"))
-                .cloned()
-                .collect()
-        })
+        .map(|list| list.to_vec())
         .unwrap_or_default()
+}
+
+/// Live host sessions only, for attach/view and terminate actions.
+fn live_sessions() -> Vec<serde_json::Value> {
+    let mut live = Vec::new();
+    for rec in session_records() {
+        if rec.get("state").and_then(serde_json::Value::as_str) == Some("live") {
+            live.push(rec.clone());
+        }
+    }
+    live
 }
 
 /// Open a tab that views live host session `alias` (issue #49). Closing
