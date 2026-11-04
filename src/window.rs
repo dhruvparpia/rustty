@@ -5151,7 +5151,7 @@ fn confirm_yes_no(hwnd: HWND, text: &str) -> bool {
 }
 
 fn close_pane_or_tab(hwnd: HWND) {
-    let (multi, live, busy, confirm) = match state_ref(hwnd) {
+    let (split, live, busy, confirm, last) = match state_ref(hwnd) {
         Some(s) => (
             s.app.pane_count() > 1,
             s.app
@@ -5163,22 +5163,27 @@ fn close_pane_or_tab(hwnd: HWND) {
                 .active_tab()
                 .is_some_and(|t| t.pane().command_running()),
             s.app.tab_confirm_close(),
+            s.app.tab_count() == 1,
         ),
         None => return,
     };
     // TAB-018 / SPLIT-006: confirm when the profile asks and the close would
-    // kill a running shell, or would quit (it is the last tab).
-    if confirm && (live || !multi) {
+    // kill a running shell, or would close the last tab.
+    if confirm && (live || last) {
         let text = if busy {
             "A command is running in this tab. Close it and kill the shell?"
-        } else {
+        } else if split {
+            "Close this pane and kill its shell?"
+        } else if last {
             "Close this tab? It is the last one, so rustty will quit."
+        } else {
+            "Close this tab and kill its shell?"
         };
         if !confirm_yes_no(hwnd, text) {
             return;
         }
     }
-    if multi {
+    if split {
         let quit = state_mut(hwnd).is_some_and(|st| st.app.close_active_pane());
         if quit {
             let _ = unsafe { DestroyWindow(hwnd) };
