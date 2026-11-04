@@ -18,7 +18,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   actions, host explicit program/args, and canonical `task#<id> <name>` session labels.
 - Palette providers slice (#93): focus pane, open saved workspace, and switch theme rows reuse the
   shared action registry. Settings navigation waits for the #91 editor destination.
-- Command timeline slice (#90): palette rows expose retained command ids, exit status and duration; jump/copy/export actions use canonical command ids from the active pane.
+- Command timeline slice (#90): palette rows expose retained command ids, exit status and duration; jump/copy/export actions use canonical command ids from the active pane. Finished-command rows also open a search overlay scoped to that command's output range. Durable cross-restart indexing remains later.
 - TaskRunner seam (#89 architecture): task lifecycle moved from `window.rs` into a deep `TaskRunner` module with a `HostAdapter` seam, explicit outcomes, and synthetic host tests.
 
 ### Fixed

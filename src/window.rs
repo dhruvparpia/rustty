@@ -3725,6 +3725,15 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
                 disabled_reason: None,
                 command: Command::JumpCommand(cmd.id),
             });
+            if cmd.end_abs.is_some() {
+                items.push(PaletteItem {
+                    label: format!("Search Command {} Output", cmd.id).to_string(),
+                    group: "Commands",
+                    shortcut: None,
+                    disabled_reason: None,
+                    command: Command::SearchCommand(cmd.id),
+                });
+            }
         }
         if let Some(last) = pane.commands().last_finished() {
             items.push(PaletteItem {
@@ -4003,6 +4012,7 @@ fn execute_palette_current(hwnd: HWND) {
         Command::JumpCommand(cmd_id) => jump_command(hwnd, cmd_id),
         Command::CopyCommand(cmd_id) => copy_command(hwnd, cmd_id),
         Command::ExportCommand(cmd_id) => export_command(hwnd, cmd_id),
+        Command::SearchCommand(cmd_id) => search_command_output(hwnd, cmd_id),
         Command::DetachView => {
             let Some(s) = state_ref(hwnd) else {
                 return;
@@ -6138,6 +6148,47 @@ fn copy_last_command(hwnd: HWND) {
     if !clipboard::set_text(hwnd, &text) {
         eprintln!("rustty: clipboard copy failed");
     }
+}
+
+/// #90: open search scoped to one finished command's output range.
+fn search_command_output(hwnd: HWND, cmd_id: u64) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(tab) = s.app.active_tab() else {
+        return;
+    };
+    let focused = tab.focused_index().unwrap_or(0);
+    let Some(pane) = tab.pane_at(focused) else {
+        return;
+    };
+    let Some(cmd) = pane.commands().find(cmd_id) else {
+        show_message(hwnd, &format!("command {} is not retained", cmd_id));
+        return;
+    };
+    let Some(end) = cmd.end_abs else {
+        show_message(hwnd, "command is still running");
+        return;
+    };
+    let lo = cmd.output_start_abs;
+    if lo >= end {
+        show_message(hwnd, "command has no output");
+        return;
+    }
+    let defaults = &s.cfg.search;
+    let mut state = SearchState::with_defaults(
+        defaults.case_sensitive_default,
+        defaults.whole_word_default,
+        defaults.regex_default,
+    );
+    state.context_lines = defaults.context_lines;
+    state.scope = Some((focused, lo, end));
+    state.query = String::new();
+    s.search = Some(state);
+    s.palette = None;
+    s.hint = None;
+    s.bookmarks_open = false;
+    s.settings_open = false;
+    s.suppress_char = true;
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
 /// Jump the viewport to one retained command block (issue #90).

@@ -64,6 +64,8 @@ pub enum Command {
     CopyCommand(u64),
     /// Export one command's output by canonical id.
     ExportCommand(u64),
+    /// Search one finished command's output by canonical id (issue #90).
+    SearchCommand(u64),
 }
 
 /// One command row.

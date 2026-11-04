@@ -79,6 +79,8 @@ pub struct SearchState {
     /// current match. From `[search] context-lines`; the result view
     /// reads them straight from the grid, so no re-scan is involved.
     pub context_lines: usize,
+    /// #90 command-scoped search: one pane, absolute output range `[lo, hi)`.
+    pub scope: Option<(usize, usize, usize)>,
     /// Pane index to resume the scan from.
     scan_pane: usize,
     /// Next absolute line to scan within `scan_pane` (0 = pane start).
@@ -195,6 +197,24 @@ impl SearchState {
             return false;
         }
         let Some(tab) = tab else { return false };
+        if let Some((p, _lo, _hi)) = self.scope {
+            let Some(pane) = tab.pane_at(p) else {
+                return false;
+            };
+            let grid = pane.grid();
+            let Some(bound) = self.bounds.get(p) else {
+                self.refresh(Some(tab));
+                return true;
+            };
+            if grid.first_abs() > bound.0
+                || grid.last_abs() < bound.1
+                || grid.content_rev() != self.content_rev.get(p).copied().unwrap_or(0)
+            {
+                self.refresh(Some(tab));
+                return true;
+            }
+            return false;
+        }
         let mut restart = false;
         let mut resume: Option<(usize, usize, usize, usize)> = None;
         let mut pane_idx = 0usize;
@@ -242,6 +262,76 @@ impl SearchState {
     /// [`Self::truncated`]; finishing every pane restores the selected
     /// match by identity.
     fn scan_chunk(&mut self, tab: &Tab) {
+        if let Some((p, lo, hi)) = self.scope {
+            let Some(pane) = tab.pane_at(p) else {
+                self.scanning = false;
+                return;
+            };
+            let grid = pane.grid();
+            let from = lo.max(grid.first_abs());
+            let to = hi.min(grid.last_abs());
+            if from >= to {
+                self.scanning = false;
+                return;
+            }
+            if self.bounds.len() <= p {
+                self.bounds.resize(p + 1, (0, 0));
+                self.content_rev.resize(p + 1, 0u64);
+            }
+            self.bounds[p] = (from, to);
+            self.content_rev[p] = grid.content_rev();
+            self.scan_abs = from;
+            let mut abs = from;
+            let mut budget = SEARCH_SCAN_ROWS;
+            while abs < to && budget > 0 {
+                if self.matches.len() >= MAX_MATCHES {
+                    self.truncated = true;
+                    self.scanning = false;
+                    break;
+                }
+                if let Some(line) = grid.line_abs(abs) {
+                    let (text, bounds) = line_text_with_cell_bounds(line);
+                    let found = match self.regex.as_ref() {
+                        Some(re) => regex_matches(re, &text, self.options.whole_word),
+                        None => plain_matches(
+                            &text,
+                            &self.query,
+                            self.options.case_sensitive,
+                            self.options.whole_word,
+                        ),
+                    };
+                    for (lo_char, hi_char) in found {
+                        if self.matches.len() >= MAX_MATCHES {
+                            self.truncated = true;
+                            self.scanning = false;
+                            break;
+                        }
+                        if lo_char >= bounds.len() || hi_char > bounds.len() {
+                            continue;
+                        }
+                        let (lo_col, _lo_end) = bounds[lo_char];
+                        let (_lo_start, hi_col) = bounds[hi_char - 1];
+                        self.matches.push(SearchMatch {
+                            pane: p,
+                            abs,
+                            lo: lo_col,
+                            hi: hi_col,
+                        });
+                    }
+                }
+                abs += 1;
+                budget -= 1;
+            }
+            if self.scanning && abs >= to {
+                self.scanning = false;
+                if let Some(key) = self.current_key.take()
+                    && let Some(pos) = self.matches.iter().position(|m| *m == key)
+                {
+                    self.current = pos;
+                }
+            }
+            return;
+        }
         let mut budget = SEARCH_SCAN_ROWS;
         let mut pane_count = 0usize;
         tab.for_each_pane_ref(&mut |pane: &Pane, _rect: Rect| {
@@ -816,5 +906,15 @@ mod tests {
             !search.matches.is_empty(),
             "tail starved after 20 scan ticks"
         );
+    }
+    #[test]
+    fn command_scoped_search_stays_in_one_range() {
+        let tab = tab_from_lines(&["alpha", "beta", "alpha"], 20);
+        let mut search = SearchState::new();
+        search.query = "alpha".to_string();
+        search.scope = Some((0, 4, 6));
+        assert!(search.refresh(Some(&tab)));
+        assert_eq!(search.matches.len(), 1);
+        assert_eq!(search.matches[0].abs, 4);
     }
 }
