@@ -10,8 +10,8 @@ theme = "copper-dark"
 Dark uses graphite surfaces and warm copper focus accents; light uses warm
 paper, dark ink and deep copper. Both use readable secondary labels and a
 positional active-tab/selected-row indicator. Native caption buttons, window
-dragging and resizing remain Windows-owned. Windows 11 supports custom caption,
-text and frame colors; unsupported DWM attributes fall back to system styling.
+dragging and resizing remain Windows-owned. The caption follows the skin background, with
+custom text and frame colors where supported; unsupported DWM attributes fall back to system styling.
 
 To customize chrome independently, replace the plain theme key with a table:
 

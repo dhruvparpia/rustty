@@ -2128,7 +2128,7 @@ impl Renderer {
                 );
             }
             if i == active {
-                self.fill_rect(lo, bar_top, hi, bar_top + 2.0, ui.accent);
+                self.fill_rect(lo, bar_top, hi, bar_top + 3.0, ui.accent);
             }
             let close_w = if self.tab_close_button {
                 tabbar::close_width(cw)
@@ -2136,7 +2136,9 @@ impl Renderer {
                 0.0
             };
             let icon = shell_icon(tab.profile());
-            let icon_w = cw * 1.6;
+            // Reserve the icon slot only when a profile icon is drawn; otherwise
+            // the title starts at the tab's left chrome and leaves no blank band.
+            let icon_w = if icon.is_some() { cw * 1.6 } else { 0.0 };
             let marquee = self.marquee_tab == Some(i);
             tabbar::fit_title_into(
                 &self.titles[i],

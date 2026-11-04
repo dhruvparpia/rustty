@@ -9,6 +9,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Added
 
 - Copper native dark/light skins, independent UI color overrides, native caption
+  Fix: caption uses the window background instead of the tab-bar strip, title icon slots are reserved only when an icon is drawn, and the active-tab marker is 3 DIPs.
   colors and positional active-tab/palette/bookmark indicators. See
   [Copper skin](docs/copper-skin.md) for configuration and Windows validation.
 - Session browser slice (#88): palette rows list live and exited host sessions with profile, cwd,

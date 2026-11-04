@@ -697,7 +697,7 @@ mod tests {
     fn copper_text_and_focus_meet_contrast_contract() {
         for theme in [Theme::copper_dark(), Theme::copper_light()] {
             let ui = theme.ui_colors();
-            for bg in [theme.tab_bar, theme.tab_active] {
+            for bg in [theme.tab_bar, theme.tab_active, theme.background] {
                 for fg in [ui.foreground, ui.muted] {
                     assert!(contrast(fg, bg) >= 4.5, "{}: {fg} on {bg}", theme.name);
                 }

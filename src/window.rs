@@ -119,7 +119,9 @@ fn apply_caption_skin(hwnd: HWND, theme: &Theme) {
     let ui = theme.ui_colors();
     let colorref =
         |c: crate::color::Color| u32::from(c.r) | (u32::from(c.g) << 8) | (u32::from(c.b) << 16);
-    let bg = theme.tab_bar;
+    // The caption is window chrome, not the tab-bar strip; colouring it with
+    // tab_bar makes the native menu bar look like a second tab bar.
+    let bg = theme.background;
     let dark =
         u32::from(u32::from(bg.r) * 299 + u32::from(bg.g) * 587 + u32::from(bg.b) * 114 < 128_000);
     for (attribute, value) in [
