@@ -454,6 +454,9 @@ pub struct Renderer {
     search_label: String,
     /// Reused rename-prompt label (TAB-013).
     prompt_label: String,
+    /// Overlay title and hint, set when bookmark/settings overlay opens.
+    overlay_title: String,
+    overlay_hint: String,
     /// Reused row-damage mask for [`Renderer::paint_damage`]: one entry per
     /// tab row (each leaf's viewport rows stacked in layout order).
     mask: Vec<bool>,
@@ -728,6 +731,8 @@ impl Renderer {
             label: String::new(),
             search_label: String::new(),
             prompt_label: String::new(),
+            overlay_title: String::new(),
+            overlay_hint: String::new(),
             mask: Vec::new(),
             damage: Damage::default(),
             pane_damage: Vec::new(),
@@ -746,6 +751,12 @@ impl Renderer {
     #[must_use]
     pub fn metrics(&self) -> CellMetrics {
         self.metrics
+    }
+
+    /// Set the overlay strip title/hint for bookmark or settings overlays.
+    pub fn set_overlay(&mut self, title: &str, hint: &str) {
+        self.overlay_title = title.to_string();
+        self.overlay_hint = hint.to_string();
     }
 
     /// Tab-bar strip height in DIPs (0.0 when hidden).
@@ -2025,11 +2036,13 @@ impl Renderer {
             }
         };
         label.clear();
-        label.push_str("Bookmarks  ");
+        label.push_str(&self.overlay_title);
+        label.push(' ');
         label.push_str(&(sel + 1).to_string());
         label.push('/');
         label.push_str(&rows.len().to_string());
-        label.push_str("  Up/Down scroll, Enter jump, d delete, Esc close");
+        label.push_str("  ");
+        label.push_str(&self.overlay_hint);
         draw_row(self, &label, top, theme.ui_colors().foreground);
         // Window the list so the selected row is always visible.
         let start = sel.saturating_sub(shown.saturating_sub(1));

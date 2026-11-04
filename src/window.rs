@@ -1290,6 +1290,11 @@ struct WindowState {
     bookmarks_open: bool,
     /// Selected row in the bookmark overlay.
     bm_sel: usize,
+    /// #91 settings overlay: open and selected setting.
+    settings_open: bool,
+    settings_sel: usize,
+    /// Typed TOML value for the selected setting, applied on Enter.
+    settings_input: String,
     /// PALETTE-005: recently run palette labels, newest first, capped.
     recent: Vec<String>,
     /// Index of the selected built-in profile (MENU-008). New tabs and
@@ -1611,8 +1616,25 @@ unsafe extern "system" fn wnd_proc(
                     .as_ref()
                     .map(|(_, buf)| format!("Rename tab: {buf}  (Enter to accept, Esc to cancel)"));
                 let ctx_rows = search_context_rows(s);
-                let bm_rows = s.bookmarks_open.then(|| bookmark_rows(s));
-                let bm_arg = bm_rows.as_ref().map(|rows| (rows.as_slice(), s.bm_sel));
+                let overlay_rows = if s.bookmarks_open {
+                    bookmark_rows(s)
+                } else if s.settings_open {
+                    settings_rows(s)
+                } else {
+                    Vec::new()
+                };
+                let overlay = if overlay_rows.is_empty() {
+                    None
+                } else {
+                    Some((
+                        overlay_rows.as_slice(),
+                        if s.settings_open {
+                            s.settings_sel
+                        } else {
+                            s.bm_sel
+                        },
+                    ))
+                };
                 if let Some(r) = &mut s.renderer {
                     let active = s.app.active_index();
                     r.set_bell_state(
@@ -1628,7 +1650,7 @@ unsafe extern "system" fn wnd_proc(
                         s.hint.as_ref(),
                         prompt.as_deref(),
                         &ctx_rows,
-                        bm_arg,
+                        overlay,
                     );
                 }
             }
@@ -2148,6 +2170,9 @@ fn create_quick_window() {
         hint: None,
         bookmarks_open: false,
         bm_sel: 0,
+        settings_open: false,
+        settings_sel: 0,
+        settings_input: String::new(),
         recent: Vec::new(),
         profile: 0,
     });
@@ -2533,6 +2558,11 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
         handle_bookmark_keydown(hwnd, vk);
         return;
     }
+    // #91 settings overlay swallows every keydown; printables reach WM_CHAR.
+    if state_ref(hwnd).is_some_and(|s| s.settings_open) {
+        handle_settings_keydown(hwnd, vk);
+        return;
+    }
     // Ctrl+F opens or closes the search overlay (SEARCH-002).
     if mods.ctrl && !mods.shift && !mods.alt && vk == 0x46 {
         toggle_search(hwnd);
@@ -2751,6 +2781,15 @@ fn handle_char(hwnd: HWND, code: u32, sys: bool) {
         let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
         return;
     }
+    // #91 settings overlay: typed text builds the TOML value.
+    if s.settings_open {
+        if ch.is_control() {
+            return;
+        }
+        s.settings_input.push(ch);
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+        return;
+    }
     // While search is active, typed text edits the query, not the shell.
     if let Some(search) = &mut s.search {
         if ch.is_control() {
@@ -2964,6 +3003,50 @@ fn toggle_bookmark(hwnd: HWND) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
+const BOOKMARKS_TITLE: &str = "Bookmarks";
+const BOOKMARKS_HINT: &str = "Up/Down scroll, Enter jump, d delete, Esc close";
+const SETTINGS_TITLE: &str = "Settings";
+const SETTINGS_HINT: &str = "Up/Down select, type value, Enter apply, Esc close";
+
+fn settings_rows(s: &WindowState) -> Vec<(bool, String)> {
+    crate::settings::settings(&s.cfg)
+        .iter()
+        .map(|st| (false, st.label()))
+        .collect()
+}
+
+/// Plain top-level scalar key for a setting; table/profile rows stay later.
+fn plain_key(setting: &crate::settings::Setting) -> Option<String> {
+    let name = setting.name.clone();
+    if name == "tab-bar.visible" {
+        return Some("tab-bar".to_string());
+    }
+    if name.contains('.') {
+        return None;
+    }
+    Some(name.clone())
+}
+
+/// #91: open the in-app settings overlay at setting `idx`.
+fn open_settings_overlay(hwnd: HWND, idx: usize) {
+    let Some(s) = state_mut(hwnd) else {
+        return;
+    };
+    s.palette = None;
+    s.search = None;
+    s.bookmarks_open = false;
+    s.hint = None;
+    s.settings_open = true;
+    let n = crate::settings::settings(&s.cfg).len();
+    s.settings_sel = idx.min(n.saturating_sub(1));
+    s.settings_input = String::new();
+    if let Some(r) = &mut s.renderer {
+        r.set_overlay(SETTINGS_TITLE, SETTINGS_HINT);
+    }
+    s.suppress_char = true;
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
 /// BKMK-002 (issue #53): open the bookmark list, or close it when already
 /// open. It takes the overlay strip from search/palette/hint (one overlay
 /// per window).
@@ -2974,7 +3057,11 @@ fn toggle_bookmarks_overlay(hwnd: HWND) {
         s.search = None;
         s.palette = None;
         s.hint = None;
+        s.settings_open = false;
         s.bm_sel = 0;
+        if let Some(r) = &mut s.renderer {
+            r.set_overlay(BOOKMARKS_TITLE, BOOKMARKS_HINT);
+        }
     }
     s.suppress_char = true;
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -3023,6 +3110,54 @@ fn search_context_rows(s: &WindowState) -> Vec<(bool, String)> {
         .into_iter()
         .map(|(_, text, is_match)| (is_match, text))
         .collect()
+}
+
+/// #91 settings overlay keys. Up/Down select; Esc closes; Enter applies the
+/// typed TOML value to a plain top-level key.
+fn handle_settings_keydown(hwnd: HWND, vk: u16) {
+    let Some(s) = state_mut(hwnd) else { return };
+    s.suppress_char = true;
+    let rows = settings_rows(s);
+    let n = rows.len();
+    match vk {
+        0x1B => {
+            s.settings_open = false;
+        }
+        0x26 => {
+            s.settings_sel = s.settings_sel.saturating_sub(1);
+        }
+        0x28 => {
+            s.settings_sel = (s.settings_sel + 1).min(n.saturating_sub(1));
+        }
+        0x0D => {
+            if s.settings_input.is_empty() {
+                return;
+            }
+            let settings = crate::settings::settings(&s.cfg);
+            if s.settings_sel >= settings.len() {
+                return;
+            }
+            let st = settings[s.settings_sel].clone();
+            let Some(key) = plain_key(&st) else {
+                show_message(hwnd, "table/profile settings are a later slice");
+                return;
+            };
+            let Some(path) = crate::config::config_path() else {
+                show_message(hwnd, "no config path");
+                return;
+            };
+            let value = s.settings_input.clone();
+            let result = crate::settings::replace_plain(&path, key.clone(), value);
+            if let Err(e) = result {
+                show_message(hwnd, &format!("settings write failed: {e}"));
+                return;
+            }
+            s.settings_input = String::new();
+            reload_config(s, hwnd);
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+        }
+        _ => {}
+    }
 }
 
 /// BKMK-002 (issue #53): keys for the open bookmark overlay. Every
@@ -3618,13 +3753,13 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             command: Command::OpenWorktree(idx),
         });
     }
-    for st in crate::settings::settings(&s.cfg) {
+    for (idx, st) in crate::settings::settings(&s.cfg).iter().enumerate() {
         items.push(PaletteItem {
             label: st.label().to_string(),
             group: "Settings",
             shortcut: None,
             disabled_reason: None,
-            command: Command::OpenPreferences,
+            command: Command::OpenSettings(idx),
         });
     }
     let map = s.cfg.keymap();
@@ -3861,6 +3996,7 @@ fn execute_palette_current(hwnd: HWND) {
         Command::SwitchTheme(idx) => set_theme(hwnd, idx),
         Command::OpenWorktree(idx) => open_worktree(hwnd, idx),
         Command::OpenPreferences => open_preferences(hwnd),
+        Command::OpenSettings(idx) => open_settings_overlay(hwnd, idx),
         Command::JumpCommand(cmd_id) => jump_command(hwnd, cmd_id),
         Command::CopyCommand(cmd_id) => copy_command(hwnd, cmd_id),
         Command::ExportCommand(cmd_id) => export_command(hwnd, cmd_id),
@@ -5063,8 +5199,25 @@ fn drain_and_cleanup(hwnd: HWND) {
                 .as_ref()
                 .map(|(_, buf)| format!("Rename tab: {buf}  (Enter to accept, Esc to cancel)"));
             let ctx_rows = search_context_rows(s);
-            let bm_rows = s.bookmarks_open.then(|| bookmark_rows(s));
-            let bm_arg = bm_rows.as_ref().map(|rows| (rows.as_slice(), s.bm_sel));
+            let overlay_rows = if s.bookmarks_open {
+                bookmark_rows(s)
+            } else if s.settings_open {
+                settings_rows(s)
+            } else {
+                Vec::new()
+            };
+            let overlay = if overlay_rows.is_empty() {
+                None
+            } else {
+                Some((
+                    overlay_rows.as_slice(),
+                    if s.settings_open {
+                        s.settings_sel
+                    } else {
+                        s.bm_sel
+                    },
+                ))
+            };
             if let Some(r) = &mut s.renderer {
                 let active = s.app.active_index();
                 r.set_bell_state(
@@ -5080,7 +5233,7 @@ fn drain_and_cleanup(hwnd: HWND) {
                     s.hint.as_ref(),
                     prompt.as_deref(),
                     &ctx_rows,
-                    bm_arg,
+                    overlay,
                 );
                 s.app.clear_grid_damage();
             } else {
@@ -6431,6 +6584,9 @@ pub fn run(
         hint: None,
         bookmarks_open: false,
         bm_sel: 0,
+        settings_open: false,
+        settings_sel: 0,
+        settings_input: String::new(),
         recent: Vec::new(),
         // CONFIG-013: `starting-profile` picks the initial shell.
         profile: {

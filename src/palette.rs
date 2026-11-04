@@ -56,6 +56,8 @@ pub enum Command {
     OpenWorktree(usize),
     /// Open the native Preferences config editor.
     OpenPreferences,
+    /// Open the in-app settings overlay at setting `n` (issue #91).
+    OpenSettings(usize),
     /// Jump the viewport to command `n`'s block.
     JumpCommand(u64),
     /// Copy one command's output by canonical id.

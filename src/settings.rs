@@ -324,6 +324,52 @@ pub fn write_text_atomic(path: &Path, text: String) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Atomic plain-key editor for the settings overlay (issue #91).
+/// Replaces one top-level scalar assignment, keeps the trailing comment, and
+/// writes through `write_text_atomic`. Table/profile keys are later slices.
+///
+/// # Errors
+///
+/// Any I/O failure; the original file remains on disk.
+#[allow(dead_code, reason = "settings overlay edits plain keys")]
+pub fn replace_plain(path: &Path, key: String, value: String) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let lines = text.lines().map(|s| s.to_string()).collect::<Vec<String>>();
+    let key = key.to_string();
+    let mut found = false;
+    let first_section = lines.iter().position(|line| line.trim().starts_with('['));
+    let mut out = Vec::new();
+    for line in lines.iter() {
+        let Some(eq) = line.find('=') else {
+            out.push(line.clone());
+            continue;
+        };
+        let name = line[..eq].to_string().trim().to_string();
+        if !found && name == key {
+            found = true;
+            let rest = line[eq + 1..].to_string();
+            let comment = match rest.find('#') {
+                Some(c) => rest[c..].to_string(),
+                None => String::new(),
+            };
+            let head = line[..eq + 1].to_string().trim_end().to_string();
+            out.push(
+                format!("{} {} {}", head, value, comment)
+                    .trim_end()
+                    .to_string(),
+            );
+        } else {
+            out.push(line.clone());
+        }
+    }
+    if !found {
+        let insert = first_section.unwrap_or(out.len());
+        out.insert(insert, format!("{} = {}", key, value).to_string());
+    }
+    let new_text = format!("{}\n", out.join("\n")).to_string();
+    write_text_atomic(path, new_text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +442,36 @@ mod tests {
         std::fs::create_dir_all(&tmp).expect("tmp directory");
         assert!(write_text_atomic(&path, "font = \"Cascadia Mono\"\n".to_string()).is_err());
         assert_eq!(std::fs::read_to_string(&path).expect("read"), original);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn replace_plain_preserves_the_comment() {
+        let dir = std::env::temp_dir().join(format!("rustty-settings-edit-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# keep\nfont = \"Old\" # comment\n").expect("seed");
+        replace_plain(&path, "font".to_string(), "\"New\"".to_string()).expect("edit");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "# keep\nfont = \"New\" # comment\n",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replace_plain_inserts_a_missing_plain_key_before_sections() {
+        let dir =
+            std::env::temp_dir().join(format!("rustty-settings-insert-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# head\n[window]\ncols = 80\n").expect("seed");
+        replace_plain(&path, "font".to_string(), "\"Cascadia Mono\"".to_string()).expect("insert");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "# head\nfont = \"Cascadia Mono\"\n[window]\ncols = 80\n",
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
