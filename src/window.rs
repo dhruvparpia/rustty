@@ -1295,6 +1295,8 @@ struct WindowState {
     settings_sel: usize,
     /// Typed TOML value for the selected setting, applied on Enter.
     settings_input: String,
+    /// #88: poll ticks between palette registry refreshes.
+    palette_refresh_tick: usize,
     /// PALETTE-005: recently run palette labels, newest first, capped.
     recent: Vec<String>,
     /// Index of the selected built-in profile (MENU-008). New tabs and
@@ -2173,6 +2175,7 @@ fn create_quick_window() {
         settings_open: false,
         settings_sel: 0,
         settings_input: String::new(),
+        palette_refresh_tick: 0,
         recent: Vec::new(),
         profile: 0,
     });
@@ -5174,6 +5177,34 @@ fn show_toast(title: &str, body: &str) {
     })();
 }
 
+/// #88: rebuild the palette registry from a fresh session snapshot, keeping
+/// the selected command and typed query.
+fn refresh_palette(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(old) = s.palette.as_ref() else {
+        return;
+    };
+    let old_query = old.query.clone();
+    let old_command = old.selected().map(|it| it.command);
+    let items = build_palette_items(s);
+    let mut state = PaletteState::new(items, &s.recent);
+    state.query = old_query;
+    state.refresh();
+    if let Some(command) = old_command {
+        if let Some(idx) = state.registry().iter().position(|it| it.command == command) {
+            if let Some(pos) = state.hits().iter().position(|i| *i == idx) {
+                state.current = pos;
+            } else {
+                state.current = 0;
+            }
+        } else {
+            state.current = 0;
+        }
+    }
+    s.palette = Some(state);
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
 /// WM_TIMER: drain every shell, close dead panes (and the tabs they leave
 /// behind), refresh the caption.
 fn drain_and_cleanup(hwnd: HWND) {
@@ -5297,6 +5328,15 @@ fn drain_and_cleanup(hwnd: HWND) {
     if changed {
         // A vanished tab can hide the strip again (tab-bar = "auto").
         sync_tab_bar(hwnd);
+    }
+    // #88: refresh the session/task palette every ~3 s while it is open.
+    if state_ref(hwnd).is_some_and(|s| s.palette.is_some())
+        && let Some(s) = state_mut(hwnd)
+    {
+        s.palette_refresh_tick += 1;
+        if s.palette_refresh_tick % 90 == 0 {
+            refresh_palette(hwnd);
+        }
     }
 }
 
@@ -6587,6 +6627,7 @@ pub fn run(
         settings_open: false,
         settings_sel: 0,
         settings_input: String::new(),
+        palette_refresh_tick: 0,
         recent: Vec::new(),
         // CONFIG-013: `starting-profile` picks the initial shell.
         profile: {

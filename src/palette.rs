@@ -165,6 +165,12 @@ impl PaletteState {
         self.items.get(idx)
     }
 
+    /// The full registry (for refresh/selection identity).
+    #[must_use]
+    pub fn registry(&self) -> &[PaletteItem] {
+        &self.items
+    }
+
     /// The selected item, `None` when the hit list is empty.
     #[must_use]
     pub fn selected(&self) -> Option<&PaletteItem> {
