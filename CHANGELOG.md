@@ -14,6 +14,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   actions, host explicit program/args, and canonical `task#<id> <name>` session labels.
 - Palette providers slice (#93): focus pane, open saved workspace, and switch theme rows reuse the
   shared action registry. Settings navigation waits for the #91 editor destination.
+- Command timeline slice (#90): palette rows expose retained command ids, exit status and duration; jump/copy/export actions use canonical command ids from the active pane.
 
 ## [0.5.1] - 2026-11-03
 

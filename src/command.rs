@@ -211,6 +211,12 @@ impl CommandTracker {
         self.ring.iter().rev().find(|c| !c.running)
     }
 
+    /// The retained command with id `id`, `None` once evicted.
+    #[must_use]
+    pub fn find(&self, id: u64) -> Option<&Command> {
+        self.ring.iter().find(|c| c.id == id)
+    }
+
     /// Block-start line of the command just above absolute line `from`
     /// (previous-command navigation). `None` when already at the top.
     #[must_use]
@@ -249,6 +255,17 @@ mod tests {
         assert_eq!(c.end_abs, Some(20));
         assert_eq!(c.duration_ms(), Some(1500));
         assert_eq!(c.success(), Some(true));
+    }
+
+    #[test]
+    fn find_by_id_returns_the_record() {
+        let mut t = CommandTracker::new();
+        t.command_start(10, Some("C:/src".into()), 1000);
+        t.prompt_end(20, Some(0), 2500);
+        let c = t.find(1).expect("id 1 retained");
+        assert_eq!(c.id, 1);
+        assert_eq!(c.start_abs, 10);
+        assert_eq!(c.end_abs, Some(20));
     }
 
     #[test]

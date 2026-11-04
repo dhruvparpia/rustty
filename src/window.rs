@@ -3502,6 +3502,51 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             command: Command::SwitchTheme(idx),
         });
     }
+    if let Some(tab) = s.app.active_tab() {
+        let pane = tab.pane();
+        let cmds = pane.commands().iter().collect::<Vec<_>>();
+        let start = cmds.len().saturating_sub(20);
+        for cmd in cmds.iter().skip(start) {
+            let status = cmd.success();
+            let status_text = if status == Some(true) {
+                "ok".to_string()
+            } else if status == Some(false) {
+                "fail".to_string()
+            } else {
+                "unknown".to_string()
+            };
+            let duration = cmd.duration_ms();
+            let duration_text = if let Some(d) = duration {
+                format!("{} ms", d).to_string()
+            } else {
+                "running".to_string()
+            };
+            items.push(PaletteItem {
+                label: format!("Jump Command {}: {} {}", cmd.id, status_text, duration_text)
+                    .to_string(),
+                group: "Commands",
+                shortcut: None,
+                disabled_reason: None,
+                command: Command::JumpCommand(cmd.id),
+            });
+        }
+        if let Some(last) = pane.commands().last_finished() {
+            items.push(PaletteItem {
+                label: format!("Copy Command {} Output", last.id).to_string(),
+                group: "Commands",
+                shortcut: None,
+                disabled_reason: None,
+                command: Command::CopyCommand(last.id),
+            });
+            items.push(PaletteItem {
+                label: format!("Export Command {} Output", last.id).to_string(),
+                group: "Commands",
+                shortcut: None,
+                disabled_reason: None,
+                command: Command::ExportCommand(last.id),
+            });
+        }
+    }
     let mut push = |label: &str, group: &'static str, action: KeyAction, disabled: Option<&str>| {
         items.push(PaletteItem {
             label: label.to_string(),
@@ -3717,6 +3762,9 @@ fn execute_palette_current(hwnd: HWND) {
         }
         Command::OpenWorkspace(idx) => open_workspace_by_index(hwnd, idx),
         Command::SwitchTheme(idx) => set_theme(hwnd, idx),
+        Command::JumpCommand(cmd_id) => jump_command(hwnd, cmd_id),
+        Command::CopyCommand(cmd_id) => copy_command(hwnd, cmd_id),
+        Command::ExportCommand(cmd_id) => export_command(hwnd, cmd_id),
         Command::DetachView => {
             let Some(s) = state_ref(hwnd) else {
                 return;
@@ -5858,6 +5906,56 @@ fn copy_last_command(hwnd: HWND) {
     if !clipboard::set_text(hwnd, &text) {
         eprintln!("rustty: clipboard copy failed");
     }
+}
+
+/// Jump the viewport to one retained command block (issue #90).
+fn jump_command(hwnd: HWND, id: u64) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(tab) = s.app.active_tab_mut() else {
+        return;
+    };
+    let mut pane = tab.pane_mut();
+    let Some(start_abs) = pane.commands().find(id).map(|c| c.start_abs) else {
+        return;
+    };
+    pane.grid_mut().scroll_to_abs(start_abs);
+    pane.update_follow();
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    search_resync(hwnd);
+}
+
+/// Copy one retained command's output by canonical id (issue #90).
+fn copy_command(hwnd: HWND, id: u64) {
+    let Some(s) = state_ref(hwnd) else { return };
+    let Some(tab) = s.app.active_tab() else {
+        return;
+    };
+    let pane = tab.pane();
+    let Some(text) = pane.command_output_text(id) else {
+        return;
+    };
+    if !clipboard::set_text(hwnd, &text) {
+        eprintln!("rustty: clipboard copy failed");
+    }
+}
+
+/// Export one retained command's output by canonical id (issue #90).
+fn export_command(hwnd: HWND, id: u64) {
+    let Some(s) = state_ref(hwnd) else { return };
+    let Some(tab) = s.app.active_tab() else {
+        return;
+    };
+    let pane = tab.pane();
+    let Some(cmd) = pane.commands().find(id) else {
+        return;
+    };
+    let to = cmd.end_abs.unwrap_or(pane.grid().last_abs());
+    let Some(path) = save_dialog(hwnd, "rustty-command.txt") else {
+        return;
+    };
+    export_to_file(&path, |w| {
+        crate::export::stream_lines(pane.grid(), cmd.output_start_abs, to, w)
+    });
 }
 
 /// Pane focus by keyboard (SPLIT-004).

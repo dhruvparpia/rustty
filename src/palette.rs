@@ -52,6 +52,12 @@ pub enum Command {
     OpenWorkspace(usize),
     /// Switch to theme `n`.
     SwitchTheme(usize),
+    /// Jump the viewport to command `n`'s block.
+    JumpCommand(u64),
+    /// Copy one command's output by canonical id.
+    CopyCommand(u64),
+    /// Export one command's output by canonical id.
+    ExportCommand(u64),
 }
 
 /// One command row.
