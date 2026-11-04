@@ -761,6 +761,26 @@ fn set_theme(hwnd: HWND, idx: usize) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
+fn open_worktree(hwnd: HWND, idx: usize) {
+    let Some(wt) = crate::worktree::discover().get(idx).cloned() else {
+        show_message(hwnd, &format!("worktree {} is unavailable", idx + 1));
+        return;
+    };
+    if !wt.available {
+        show_message(
+            hwnd,
+            &format!("worktree {} is unavailable", wt.root.clone()),
+        );
+        return;
+    }
+    let Some(s) = state_mut(hwnd) else {
+        return;
+    };
+    let mut spec = active_profile(s);
+    spec.cwd = Some(wt.root.clone());
+    new_tab_with_profile(hwnd, spec);
+}
+
 fn open_profile_tab(hwnd: HWND, idx: usize) {
     let Some(s) = state_mut(hwnd) else {
         return;
@@ -3544,6 +3564,19 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             });
         }
     }
+    for (idx, wt) in crate::worktree::discover().iter().enumerate() {
+        items.push(PaletteItem {
+            label: format!("Open Worktree {}: {}", idx + 1, wt.label()).to_string(),
+            group: "Worktrees",
+            shortcut: None,
+            disabled_reason: if wt.available {
+                None
+            } else {
+                Some("worktree unavailable".to_string())
+            },
+            command: Command::OpenWorktree(idx),
+        });
+    }
     let mut push = |label: &str, group: &'static str, action: KeyAction, disabled: Option<&str>| {
         items.push(PaletteItem {
             label: label.to_string(),
@@ -3759,6 +3792,7 @@ fn execute_palette_current(hwnd: HWND) {
         }
         Command::OpenWorkspace(idx) => open_workspace_by_index(hwnd, idx),
         Command::SwitchTheme(idx) => set_theme(hwnd, idx),
+        Command::OpenWorktree(idx) => open_worktree(hwnd, idx),
         Command::JumpCommand(cmd_id) => jump_command(hwnd, cmd_id),
         Command::CopyCommand(cmd_id) => copy_command(hwnd, cmd_id),
         Command::ExportCommand(cmd_id) => export_command(hwnd, cmd_id),

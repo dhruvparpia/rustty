@@ -125,6 +125,8 @@ pub mod tasks;
 pub mod theme;
 /// Workspace templates (WORKSPACE-001..009): pure Rust store + schema.
 pub mod workspace;
+/// Worktree discovery (#92): existing Git worktrees, branch/path and availability.
+pub mod worktree;
 // Win32 window + message loop FFI boundary (spec WIN-001, WIN-005).
 #[cfg(windows)]
 #[allow(

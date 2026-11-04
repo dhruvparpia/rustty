@@ -52,6 +52,8 @@ pub enum Command {
     OpenWorkspace(usize),
     /// Switch to theme `n`.
     SwitchTheme(usize),
+    /// Open existing Git worktree `n` as a tab at its root.
+    OpenWorktree(usize),
     /// Jump the viewport to command `n`'s block.
     JumpCommand(u64),
     /// Copy one command's output by canonical id.
