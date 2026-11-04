@@ -157,6 +157,15 @@ fn validate_tasks(tasks: Vec<Task>) -> Option<String> {
 }
 
 #[must_use]
+pub fn default_store() -> Store {
+    let p = store_path().unwrap_or_default();
+    let Loaded::Store(store) = read_store(&p) else {
+        return Store::default();
+    };
+    store
+}
+
+#[must_use]
 pub fn tasks() -> Vec<Task> {
     let p = store_path().unwrap_or_default();
     tasks_at(&p)

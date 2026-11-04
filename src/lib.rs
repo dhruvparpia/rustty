@@ -114,6 +114,8 @@ pub mod tabbar;
 )]
 pub mod uia;
 // THEME-010: reading the system dark/light setting is a Win32 registry call.
+/// TaskRunner seam (#89): store lookup, dependency readiness, reconnect, stop and restart.
+pub mod task_runner;
 /// Project task runner (#89): pure Rust task store + dependency validation.
 pub mod tasks;
 #[allow(

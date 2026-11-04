@@ -107,7 +107,6 @@ use crate::selection::{Pos, Selection};
 use crate::shell::{ShellFamily, SpawnOptions, quote_for_drop, shell_family};
 use crate::split::{Dir, Rect, Side};
 use crate::tabbar::TAB_BAR_HEIGHT;
-use crate::tasks::Task;
 use crate::theme::{self, Theme};
 use crate::uia::{DipRect, Provider};
 
@@ -5233,134 +5232,69 @@ fn show_message(hwnd: HWND, text: &str) {
     }
 }
 
-/// Canonical live session for task `task`; name is `task#<id> <name>`.
-fn live_task_session(task: &Task) -> Option<u32> {
-    let label = task.session_label();
-    for rec in session_records() {
-        if rec.get("state").and_then(serde_json::Value::as_str) == Some("live")
-            && rec
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|n| n == label)
-            && let Some(alias) = rec
-                .get("alias")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|a| u32::try_from(a).ok())
-        {
-            return Some(alias);
-        }
-    }
-    None
-}
-
-/// Start task `task` as a persistent host session. The host owns the process.
-fn create_task_session(hwnd: HWND, task: &Task) -> Option<u32> {
-    let Ok(mut client) = crate::host::client::Client::connect_existing() else {
-        show_message(hwnd, "session host is unavailable");
-        return None;
-    };
-    let argv = task.argv.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    let program = argv[0].clone();
-    let mut args = Vec::new();
-    for item in argv.iter().skip(1) {
-        args.push(item.clone());
-    }
-    let Ok(resp) = client.call(
-        "session.create",
-        serde_json::json!({
-            "profile": task.profile,
-            "name": task.session_label(),
-            "cwd": task.cwd,
-            "program": program,
-            "args": args,
-            "cols": 120,
-            "rows": 30,
-            "persistent": true,
-        }),
-    ) else {
-        show_message(hwnd, "session host write failed");
-        return None;
-    };
-    if let Some(err) = resp.get("error") {
-        let code = err
-            .get("code")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("internal");
-        let message = err
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        show_message(hwnd, &format!("{code}: {message}"));
-        return None;
-    }
-    resp.get("result")
-        .and_then(|r| r.get("session"))
-        .and_then(|s| s.get("alias"))
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|a| u32::try_from(a).ok())
+fn task_runner() -> crate::task_runner::TaskRunner {
+    let store = crate::tasks::default_store();
+    let host = crate::task_runner::real_host_adapter();
+    crate::task_runner::TaskRunner::with(&store, &host)
 }
 
 fn run_task(hwnd: HWND, id: u32) {
-    let Some(task) = crate::tasks::task_by_id(id) else {
-        show_message(hwnd, &format!("task {id} is missing or unreadable"));
-        return;
-    };
-    for dep_id in crate::tasks::dependencies(id) {
-        let Some(dep) = crate::tasks::task_by_id(dep_id) else {
-            show_message(hwnd, &format!("dependency {dep_id} is missing"));
-            return;
-        };
-        if live_task_session(&dep).is_none() && create_task_session(hwnd, &dep).is_none() {
-            show_message(
-                hwnd,
-                &format!("dependency task {} failed to start", dep.name),
-            );
-            return;
+    let outcome = task_runner().run(id);
+    match outcome {
+        crate::task_runner::Outcome::Started(alias)
+        | crate::task_runner::Outcome::AlreadyRunning(alias) => {
+            open_session_view(hwnd, alias, false)
         }
-    }
-    let existing = live_task_session(&task);
-    if let Some(alias) = existing {
-        open_session_view(hwnd, alias, false);
-        return;
-    }
-    if let Some(alias) = create_task_session(hwnd, &task) {
-        open_session_view(hwnd, alias, false);
+        crate::task_runner::Outcome::MissingTask(_) => {
+            show_message(hwnd, &format!("task {id} is missing or unreadable"))
+        }
+        crate::task_runner::Outcome::DependencyFailed(dep_id, message) => {
+            show_message(hwnd, &format!("dependency {dep_id}: {message}"))
+        }
+        crate::task_runner::Outcome::HostFailed(message) => show_message(hwnd, &message),
+        crate::task_runner::Outcome::NotLive(_) => {
+            show_message(hwnd, &format!("task {id} is not live"))
+        }
+        crate::task_runner::Outcome::Stopped(_) => {}
     }
 }
 
 fn stop_task(hwnd: HWND, id: u32) {
-    let Some(task) = crate::tasks::task_by_id(id) else {
-        return;
-    };
-    let Some(alias) = live_task_session(&task) else {
-        show_message(hwnd, &format!("task {} is not live", task.name));
-        return;
-    };
-    let Ok(mut client) = crate::host::client::Client::connect_existing() else {
-        show_message(hwnd, "session host is unavailable");
-        return;
-    };
-    let Ok(resp) = client.call("session.terminate", serde_json::json!({"alias": alias})) else {
-        show_message(hwnd, "session host write failed");
-        return;
-    };
-    if let Some(err) = resp.get("error") {
-        let message = err
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        show_message(hwnd, message);
+    let outcome = task_runner().stop(id);
+    match outcome {
+        crate::task_runner::Outcome::Stopped(_) => {}
+        crate::task_runner::Outcome::Started(_)
+        | crate::task_runner::Outcome::AlreadyRunning(_) => {}
+        crate::task_runner::Outcome::MissingTask(_) => {
+            show_message(hwnd, &format!("task {id} is missing or unreadable"))
+        }
+        crate::task_runner::Outcome::NotLive(_) => {
+            show_message(hwnd, &format!("task {id} is not live"))
+        }
+        crate::task_runner::Outcome::DependencyFailed(dep_id, message) => {
+            show_message(hwnd, &format!("dependency {dep_id}: {message}"))
+        }
+        crate::task_runner::Outcome::HostFailed(message) => show_message(hwnd, &message),
     }
 }
 
 fn restart_task(hwnd: HWND, id: u32) {
-    let Some(task) = crate::tasks::task_by_id(id) else {
-        return;
-    };
-    if live_task_session(&task).is_some() {
-        stop_task(hwnd, id);
+    let outcome = task_runner().restart(id);
+    match outcome {
+        crate::task_runner::Outcome::Started(alias)
+        | crate::task_runner::Outcome::AlreadyRunning(alias) => {
+            open_session_view(hwnd, alias, false)
+        }
+        crate::task_runner::Outcome::MissingTask(_) => {
+            show_message(hwnd, &format!("task {id} is missing or unreadable"))
+        }
+        crate::task_runner::Outcome::DependencyFailed(dep_id, message) => {
+            show_message(hwnd, &format!("dependency {dep_id}: {message}"))
+        }
+        crate::task_runner::Outcome::HostFailed(message) => show_message(hwnd, &message),
+        crate::task_runner::Outcome::Stopped(_) => {}
+        crate::task_runner::Outcome::NotLive(_) => {}
     }
-    run_task(hwnd, id);
 }
 
 /// Open a tab that views live host session `alias` (issue #49). Closing
