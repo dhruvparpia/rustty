@@ -835,11 +835,12 @@ impl Renderer {
             return false;
         };
         let cw = self.metrics.cell_width;
-        // The stored label carries the icon prefix and close-box suffix that
-        // the title draw strips; discount both sides the same way.
-        let close_chars = if self.tab_close_button { 2 } else { 0 };
-        let close_w = if self.tab_close_button { 1.5 * cw } else { 0.0 };
-        let full = title.chars().count().saturating_sub(2 + close_chars) as f32 * cw;
+        let close_w = if self.tab_close_button {
+            tabbar::close_width(cw)
+        } else {
+            0.0
+        };
+        let full = title.chars().filter(|c| !c.is_control()).count() as f32 * cw;
         full > (hi - lo) - TAB_CHROME - 1.6 * cw - close_w
     }
 
@@ -1704,7 +1705,7 @@ impl Renderer {
                 right: width - 8.0,
                 bottom: text_top + self.metrics.text_height,
             };
-            if let Some(brush) = self.brush(theme.foreground) {
+            if let Some(brush) = self.brush(theme.ui_colors().foreground) {
                 let format = &self.formats[0];
                 self.draw_units(&units, format, rect, &brush);
             }
@@ -1739,15 +1740,7 @@ impl Renderer {
             if rows > 0 {
                 let panel_top = top - row_h * rows as f32;
                 self.fill_rect(0.0, panel_top, width, top, theme.tab_bar);
-                let dim = {
-                    let fg = theme.foreground;
-                    let bg = theme.tab_bar;
-                    Color {
-                        r: ((u16::from(fg.r) + u16::from(bg.r)) / 2) as u8,
-                        g: ((u16::from(fg.g) + u16::from(bg.g)) / 2) as u8,
-                        b: ((u16::from(fg.b) + u16::from(bg.b)) / 2) as u8,
-                    }
-                };
+                let dim = theme.ui_colors().muted;
                 let mut units = std::mem::take(&mut self.utf16);
                 for (slot, (is_match, text)) in ctx.iter().take(rows).enumerate() {
                     let row_top = panel_top + row_h * slot as f32;
@@ -1772,7 +1765,11 @@ impl Renderer {
                         right: width - 8.0,
                         bottom: text_top + self.metrics.text_height,
                     };
-                    let color = if *is_match { theme.foreground } else { dim };
+                    let color = if *is_match {
+                        theme.ui_colors().foreground
+                    } else {
+                        dim
+                    };
                     if let Some(brush) = self.brush(color) {
                         let format = &self.formats[0];
                         self.draw_units(&units, format, rect, &brush);
@@ -1833,7 +1830,7 @@ impl Renderer {
                 right: width - 8.0,
                 bottom: text_top + self.metrics.text_height,
             };
-            if let Some(brush) = self.brush(theme.foreground) {
+            if let Some(brush) = self.brush(theme.ui_colors().foreground) {
                 let format = &self.formats[0];
                 self.draw_units(&units, format, rect, &brush);
             }
@@ -1947,7 +1944,7 @@ impl Renderer {
         label.push_str(&(palette.current + 1).to_string());
         label.push('/');
         label.push_str(&hits.len().to_string());
-        draw_row(self, &label, top, theme.foreground);
+        draw_row(self, &label, top, theme.ui_colors().foreground);
         let start = palette.window_start(shown);
         for (slot, &hit) in hits[start..start + shown].iter().enumerate() {
             let Some(item) = palette.item(hit) else {
@@ -1956,6 +1953,7 @@ impl Renderer {
             let row_top = top + row_h * (slot as f32 + 1.0);
             if start + slot == palette.current {
                 self.fill_rect(0.0, row_top, width, row_top + row_h, theme.tab_active);
+                self.fill_rect(0.0, row_top, 3.0, row_top + row_h, theme.ui_colors().accent);
             }
             label.clear();
             label.push_str(&item.label);
@@ -1968,16 +1966,9 @@ impl Renderer {
                 label.push_str(reason);
             }
             let color = if item.disabled_reason.is_some() {
-                // No alpha in the theme model: blend toward the strip colour.
-                let fg = theme.foreground;
-                let bg = theme.tab_bar;
-                Color {
-                    r: ((u16::from(fg.r) + u16::from(bg.r)) / 2) as u8,
-                    g: ((u16::from(fg.g) + u16::from(bg.g)) / 2) as u8,
-                    b: ((u16::from(fg.b) + u16::from(bg.b)) / 2) as u8,
-                }
+                theme.ui_colors().muted
             } else {
-                theme.foreground
+                theme.ui_colors().foreground
             };
             draw_row(self, &label, row_top, color);
         }
@@ -2039,24 +2030,17 @@ impl Renderer {
         label.push('/');
         label.push_str(&rows.len().to_string());
         label.push_str("  Up/Down scroll, Enter jump, d delete, Esc close");
-        draw_row(self, &label, top, theme.foreground);
+        draw_row(self, &label, top, theme.ui_colors().foreground);
         // Window the list so the selected row is always visible.
         let start = sel.saturating_sub(shown.saturating_sub(1));
         let start = start.min(rows.len().saturating_sub(shown));
-        let dim = {
-            let fg = theme.foreground;
-            let bg = theme.tab_bar;
-            Color {
-                r: ((u16::from(fg.r) + u16::from(bg.r)) / 2) as u8,
-                g: ((u16::from(fg.g) + u16::from(bg.g)) / 2) as u8,
-                b: ((u16::from(fg.b) + u16::from(bg.b)) / 2) as u8,
-            }
-        };
+        let dim = theme.ui_colors().muted;
         for (slot, (evicted, text)) in rows[start..start + shown].iter().enumerate() {
             let row_index = start + slot;
             let row_top = top + row_h * (slot as f32 + 1.0);
             if row_index == sel {
                 self.fill_rect(0.0, row_top, width, row_top + row_h, theme.tab_active);
+                self.fill_rect(0.0, row_top, 3.0, row_top + row_h, theme.ui_colors().accent);
             }
             label.clear();
             if *evicted {
@@ -2064,7 +2048,11 @@ impl Renderer {
                 label.push(' ');
             }
             label.push_str(text);
-            let color = if *evicted { dim } else { theme.foreground };
+            let color = if *evicted {
+                dim
+            } else {
+                theme.ui_colors().foreground
+            };
             draw_row(self, &label, row_top, color);
         }
         self.label = label;
@@ -2076,9 +2064,11 @@ impl Renderer {
     /// Every buffer it needs is reused from the renderer, so a frame with
     /// the bar visible allocates nothing (NFR-113).
     fn paint_tab_bar(&mut self, app: &App, theme: &Theme, width: f32, height: f32) {
+        let ui = theme.ui_colors();
         let bar_top = self.tab_bar_top(height);
         let bar_bottom = bar_top + self.tab_bar_height;
         self.fill_rect(0.0, bar_top, width, bar_bottom, theme.tab_bar);
+        self.fill_rect(0.0, bar_bottom - 1.0, width, bar_bottom, ui.border);
         // Titles: fill the reused slots with the reused scratch String,
         // swapping buffers so each slot keeps its own capacity.
         let cw = self.metrics.cell_width;
@@ -2088,10 +2078,6 @@ impl Renderer {
         titles.resize(app.tabs().len(), String::new());
         for (slot, tab) in titles.iter_mut().zip(app.tabs()) {
             label.clear();
-            if let Some((glyph, _)) = shell_icon(tab.profile()) {
-                label.push(glyph);
-                label.push(' ');
-            }
             if self.tab_show_profiles && !tab.profile().is_empty() && !tab.title_is_fixed() {
                 label.push_str(tab.profile());
                 label.push_str(" \u{b7} ");
@@ -2102,9 +2088,6 @@ impl Renderer {
             if let Some(host) = tab.pane().shell_host() {
                 label.push_str(" @");
                 label.push_str(host);
-            }
-            if self.tab_close_button {
-                label.push_str("  \u{d7}");
             }
             std::mem::swap(slot, &mut label);
         }
@@ -2144,9 +2127,16 @@ impl Renderer {
                     mix(theme.search_highlight, theme.tab_bar, 0.25),
                 );
             }
-            let close_w = if self.tab_close_button { cw * 1.5 } else { 0.0 };
+            if i == active {
+                self.fill_rect(lo, bar_top, hi, bar_top + 2.0, ui.accent);
+            }
+            let close_w = if self.tab_close_button {
+                tabbar::close_width(cw)
+            } else {
+                0.0
+            };
             let icon = shell_icon(tab.profile());
-            let icon_w = if icon.is_some() { cw * 1.6 } else { 0.0 };
+            let icon_w = cw * 1.6;
             let marquee = self.marquee_tab == Some(i);
             tabbar::fit_title_into(
                 &self.titles[i],
@@ -2157,34 +2147,32 @@ impl Renderer {
             if marquee {
                 // Signboard: show the whole title, not the ellipsised fit.
                 label.clear();
-                label.push_str(&self.titles[i]);
-                if self.tab_close_button {
-                    label.truncate(label.len() - 4);
-                }
-            }
-            if label.is_empty() {
-                continue;
-            }
-            if let Some((glyph, _)) = icon {
-                label.drain(..glyph.len_utf8() + 1);
+                label.extend(self.titles[i].chars().filter(|c| !c.is_control()));
             }
             units.clear();
             units.extend(label.encode_utf16());
             let rect = D2D_RECT_F {
                 left: lo + TAB_CHROME / 2.0 + icon_w,
                 top: y_top,
-                right: hi - TAB_CHROME / 2.0,
+                right: (hi - TAB_CHROME / 2.0 - close_w).max(lo + TAB_CHROME / 2.0 + icon_w),
                 bottom: y_top + self.metrics.text_height,
             };
-            let color = if i == active {
-                theme.foreground
-            } else {
-                mix(theme.foreground, theme.tab_bar, 0.45)
-            };
+            let color = if i == active { ui.foreground } else { ui.muted };
             let Some(brush) = self.brush(color) else {
                 continue;
             };
+            let clip = D2D_RECT_F {
+                left: lo,
+                top: bar_top,
+                right: hi,
+                bottom: bar_bottom,
+            };
+            unsafe {
+                self.target
+                    .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED)
+            };
             if let Some((glyph, icon_color)) = icon
+                && hi - lo >= TAB_CHROME + icon_w + close_w
                 && let (Some(icon_brush), Some(icon_format)) =
                     (self.brush(icon_color), self.icon_format.as_ref())
             {
@@ -2217,17 +2205,18 @@ impl Renderer {
                 self.draw_units(&units, format, rect, &brush);
             }
             if self.tab_close_button {
-                let close_w = cw * 1.5;
+                let close_w = tabbar::close_width(cw);
                 units.clear();
                 units.extend("\u{d7}".encode_utf16());
                 let close_rect = D2D_RECT_F {
-                    left: hi - close_w,
+                    left: (hi - close_w).max(lo),
                     top: y_top,
                     right: hi,
                     bottom: y_top + self.metrics.text_height,
                 };
                 self.draw_units(&units, format, close_rect, &brush);
             }
+            unsafe { self.target.PopAxisAlignedClip() };
         }
         self.layout.tabs = tabs;
         let (lo, hi) = plus;
@@ -2241,7 +2230,7 @@ impl Renderer {
                 right: cx + self.metrics.cell_width / 2.0,
                 bottom: y_top + self.metrics.text_height,
             };
-            let color = mix(theme.foreground, theme.tab_bar, 0.35);
+            let color = ui.muted;
             if let Some(brush) = self.brush(color) {
                 let format = &self.formats[0];
                 self.draw_units(&units, format, rect, &brush);
@@ -2567,7 +2556,7 @@ impl Renderer {
             }
             let chip_w = label.chars().count() as f32 * cw + TAB_CHROME;
             let bg = if is_focus {
-                mix(theme.tab_bar, theme.split_focus, 0.25)
+                theme.tab_active
             } else {
                 theme.tab_bar
             };
@@ -2587,9 +2576,9 @@ impl Renderer {
                 bottom: y + 1.0 + self.metrics.text_height,
             };
             let color = if is_focus {
-                theme.foreground
+                theme.ui_colors().foreground
             } else {
-                mix(theme.foreground, theme.tab_bar, 0.45)
+                theme.ui_colors().muted
             };
             if let Some(brush) = self.brush(color) {
                 let format = &self.formats[0];

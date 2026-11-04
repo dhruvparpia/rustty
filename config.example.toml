@@ -21,7 +21,8 @@
 # ---------------------------------------------------------------------------
 
 # Theme preset. Known: predawn, catppuccin-mocha, gruvbox-dark, one-dark,
-# solarized-dark. An unknown name warns and falls back to predawn. A [theme]
+# solarized-dark, solarized-light, copper-dark, copper-light.
+# An unknown name warns and falls back to predawn. A [theme]
 # table (below) can name a theme file and override single colors.
 theme = "predawn"
 
@@ -84,7 +85,8 @@ editor = "code --goto {file}:{line}:{column}"
 # Theme (CONFIG-002/003, THEME-009/013/014)
 # ---------------------------------------------------------------------------
 # `theme = "gruvbox-dark"` picks a preset: predawn, catppuccin-mocha,
-# gruvbox-dark, one-dark, solarized-dark, solarized-light. With no `theme` key
+# gruvbox-dark, one-dark, solarized-dark, solarized-light, copper-dark, copper-light.
+# With no `theme` key
 # the app follows the Windows dark/light setting (THEME-010): light picks
 # solarized-light, dark picks predawn.
 #
@@ -107,6 +109,11 @@ editor = "code --goto {file}:{line}:{column}"
 # tab-active = "#2C2A38"
 # split-border = "#44424F"
 # split-focus = "#FF7C36"
+# UI-only colors; these do not change terminal text, cursor or ANSI output.
+# ui-foreground = "#F0EAE2"
+# ui-muted = "#B6B0A8"
+# ui-accent = "#E0A477"
+# ui-border = "#454B54"
 # palette = [
 #   "#000000", "#D7005F", "#00BE6F", "#FF7C36",
 #   "#28018F", "#B000AB", "#7C70FF", "#E7E7E7",

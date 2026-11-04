@@ -108,6 +108,31 @@ use crate::shell::{ShellFamily, SpawnOptions, quote_for_drop, shell_family};
 use crate::split::{Dir, Rect, Side};
 use crate::tabbar::TAB_BAR_HEIGHT;
 use crate::theme::{self, Theme};
+
+/// SKIN-006: retain native caption controls and let DWM color their surfaces.
+/// Unsupported attributes (Windows 10) fail harmlessly to the system caption.
+fn apply_caption_skin(hwnd: HWND, theme: &Theme) {
+    use windows::Win32::Graphics::Dwm::{
+        DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
+        DwmSetWindowAttribute,
+    };
+    let ui = theme.ui_colors();
+    let colorref =
+        |c: crate::color::Color| u32::from(c.r) | (u32::from(c.g) << 8) | (u32::from(c.b) << 16);
+    let bg = theme.tab_bar;
+    let dark =
+        u32::from(u32::from(bg.r) * 299 + u32::from(bg.g) * 587 + u32::from(bg.b) * 114 < 128_000);
+    for (attribute, value) in [
+        (DWMWA_USE_IMMERSIVE_DARK_MODE, dark),
+        (DWMWA_CAPTION_COLOR, colorref(bg)),
+        (DWMWA_TEXT_COLOR, colorref(ui.foreground)),
+        (DWMWA_BORDER_COLOR, colorref(ui.border)),
+    ] {
+        // SAFETY: each attribute accepts a four-byte BOOL/COLORREF. DWM
+        // copies the live stack value synchronously; hwnd belongs to this UI.
+        let _ = unsafe { DwmSetWindowAttribute(hwnd, attribute, (&value as *const u32).cast(), 4) };
+    }
+}
 use crate::uia::{DipRect, Provider};
 
 /// Window class name.
@@ -1199,6 +1224,7 @@ unsafe extern "system" fn ws_name_dlgproc(
 struct WindowState {
     app: App,
     theme: Theme,
+    caption_skin: Option<(crate::color::Color, theme::UiColors)>,
     spawn: SpawnOptions,
     font: FontConfig,
     tab_bar: TabBar,
@@ -1459,7 +1485,7 @@ impl WindowState {
         }
         for (idx, &(lo, hi)) in layout.tabs.iter().enumerate() {
             if x >= lo && x < hi {
-                let close_w = self.metrics.cell_width * 1.5;
+                let close_w = crate::tabbar::close_width(self.metrics.cell_width);
                 if self.cfg.tab_bar.close_button && x >= hi - close_w {
                     return TabHit::Close(idx);
                 }
@@ -1573,6 +1599,11 @@ unsafe extern "system" fn wnd_proc(
             let mut ps = PAINTSTRUCT::default();
             let _dc = unsafe { BeginPaint(hwnd, &mut ps) };
             if let Some(s) = state_mut(hwnd) {
+                let skin = (s.theme.tab_bar, s.theme.ui_colors());
+                if s.caption_skin != Some(skin) {
+                    apply_caption_skin(hwnd, &s.theme);
+                    s.caption_skin = Some(skin);
+                }
                 let prompt = s
                     .renaming
                     .as_ref()
@@ -1601,6 +1632,13 @@ unsafe extern "system" fn wnd_proc(
             }
             let _ = unsafe { EndPaint(hwnd, &ps) };
             LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_THEMECHANGED => {
+            if let Some(s) = state_mut(hwnd) {
+                s.caption_skin = None;
+            }
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_ERASEBKGND => LRESULT(1), // Direct2D owns the whole client area
         WM_APP => {
@@ -2068,6 +2106,7 @@ fn create_quick_window() {
         }
     };
     let state = Box::new(WindowState {
+        caption_skin: None,
         restore: None,
         ws_source: None,
         ws_pending: None,
@@ -6349,6 +6388,7 @@ pub fn run(
     let ws_miss = workspace.filter(|_| ws_source.is_none());
 
     let state = Box::new(WindowState {
+        caption_skin: None,
         restore: session,
         ws_source,
         ws_pending,
