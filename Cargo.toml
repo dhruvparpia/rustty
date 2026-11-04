@@ -2,7 +2,7 @@
 name = "rustty"
 version = "0.6.0"
 edition = "2024"
-rust-version = "1.99"
+rust-version = "1.99.1"
 description = "A fast, native-feeling, MIT-licensed terminal emulator for Windows (spec: docs/SPEC.md)"
 license = "MIT"
 readme = "README.md"
@@ -22,6 +22,7 @@ toml = "1"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_DirectWrite",

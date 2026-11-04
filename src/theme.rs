@@ -37,18 +37,48 @@ pub struct Theme {
     pub split_focus: Color,
     /// OSC 8 hyperlink text color (issue #41, SEC-022).
     pub link: Color,
+    /// Optional UI-only colors, independent of terminal text and ANSI output.
+    pub ui: UiOverrides,
     /// ANSI-16 palette (indices 0..=15).
     pub palette: [Color; 16],
 }
 
+/// UI-only color overrides. Missing colors follow the terminal theme's chrome.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UiOverrides {
+    /// Primary chrome text.
+    pub foreground: Option<Color>,
+    /// Secondary labels and disabled-state explanations.
+    pub muted: Option<Color>,
+    /// Positional focus indicators.
+    pub accent: Option<Color>,
+    /// Chrome separators.
+    pub border: Option<Color>,
+}
+
+/// Resolved semantic chrome colors; cheap to compute and allocation-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiColors {
+    /// Primary chrome text.
+    pub foreground: Color,
+    /// Secondary labels and disabled-state explanations.
+    pub muted: Color,
+    /// Positional focus indicators.
+    pub accent: Color,
+    /// Chrome separators.
+    pub border: Color,
+}
+
 /// Every built-in preset, in the order [`preset_names`] reports them.
-pub const PRESETS: [&str; 6] = [
+pub const PRESETS: [&str; 8] = [
     "predawn",
     "catppuccin-mocha",
     "gruvbox-dark",
     "one-dark",
     "solarized-dark",
     "solarized-light",
+    "copper-dark",
+    "copper-light",
 ];
 
 impl Theme {
@@ -57,6 +87,7 @@ impl Theme {
     pub fn predawn() -> Self {
         Self {
             name: String::from("predawn"),
+            ui: UiOverrides::default(),
             background: Color::from_hex(0x23212E),
             foreground: Color::from_hex(0xEAE6E3),
             cursor: Color::from_hex(0x61C0FF),
@@ -76,6 +107,7 @@ impl Theme {
     pub fn solarized_light() -> Self {
         Self {
             name: String::from("solarized-light"),
+            ui: UiOverrides::default(),
             background: Color::from_hex(0xFDF6E3),
             foreground: Color::from_hex(0x586E75),
             cursor: Color::from_hex(0x268BD2),
@@ -147,6 +179,7 @@ impl Theme {
     pub fn catppuccin_mocha() -> Self {
         Self {
             name: String::from("catppuccin-mocha"),
+            ui: UiOverrides::default(),
             background: Color::from_hex(0x1E1E2E),
             foreground: Color::from_hex(0xCDD6F4),
             cursor: Color::from_hex(0xF5E0DC),
@@ -183,6 +216,7 @@ impl Theme {
     pub fn gruvbox_dark() -> Self {
         Self {
             name: String::from("gruvbox-dark"),
+            ui: UiOverrides::default(),
             background: Color::from_hex(0x282828),
             foreground: Color::from_hex(0xEBDBB2),
             cursor: Color::from_hex(0xEBDBB2),
@@ -219,6 +253,7 @@ impl Theme {
     pub fn one_dark() -> Self {
         Self {
             name: String::from("one-dark"),
+            ui: UiOverrides::default(),
             background: Color::from_hex(0x282C34),
             foreground: Color::from_hex(0xABB2BF),
             cursor: Color::from_hex(0x528BFF),
@@ -255,6 +290,7 @@ impl Theme {
     pub fn solarized_dark() -> Self {
         Self {
             name: String::from("solarized-dark"),
+            ui: UiOverrides::default(),
             background: Color::from_hex(0x002B36),
             foreground: Color::from_hex(0x839496),
             cursor: Color::from_hex(0x93A1A1),
@@ -286,6 +322,81 @@ impl Theme {
         }
     }
 
+    /// Copper native: graphite surfaces, warm text and restrained copper accents.
+    #[must_use]
+    pub fn copper_dark() -> Self {
+        Self {
+            name: "copper-dark".into(),
+            background: Color::from_hex(0x17191C),
+            foreground: Color::from_hex(0xE7E2DB),
+            cursor: Color::from_hex(0xE0A477),
+            selection: Color::from_hex(0x41464F),
+            search_highlight: Color::from_hex(0x55402F),
+            tab_bar: Color::from_hex(0x202328),
+            tab_active: Color::from_hex(0x30353C),
+            split_border: Color::from_hex(0x3D424A),
+            split_focus: Color::from_hex(0xE0A477),
+            link: Color::from_hex(0x8CBCEB),
+            ui: UiOverrides {
+                foreground: Some(Color::from_hex(0xF0EAE2)),
+                muted: Some(Color::from_hex(0xB6B0A8)),
+                accent: Some(Color::from_hex(0xE0A477)),
+                border: Some(Color::from_hex(0x454B54)),
+            },
+            palette: [
+                0x25282D, 0xE58F88, 0xA3C58C, 0xDDBA79, 0x8CBCEB, 0xC5A2D6, 0x88C6C2, 0xD5D0C8,
+                0x92979F, 0xF3ABA3, 0xBCDBA5, 0xEED29B, 0xADD2F5, 0xDCC1E9, 0xA5DEDA, 0xF5F0E9,
+            ]
+            .map(Color::from_hex),
+        }
+    }
+
+    /// Copper native light: warm paper and ink with a deep copper focus accent.
+    #[must_use]
+    pub fn copper_light() -> Self {
+        Self {
+            name: "copper-light".into(),
+            background: Color::from_hex(0xFAF7F2),
+            foreground: Color::from_hex(0x292D32),
+            cursor: Color::from_hex(0x924923),
+            selection: Color::from_hex(0xD6DDE5),
+            search_highlight: Color::from_hex(0xE9CDAF),
+            tab_bar: Color::from_hex(0xF0EBE4),
+            tab_active: Color::from_hex(0xFFFCF8),
+            split_border: Color::from_hex(0xB9B1A6),
+            split_focus: Color::from_hex(0x924923),
+            link: Color::from_hex(0x245E91),
+            ui: UiOverrides {
+                foreground: Some(Color::from_hex(0x292D32)),
+                muted: Some(Color::from_hex(0x655D54)),
+                accent: Some(Color::from_hex(0x924923)),
+                border: Some(Color::from_hex(0xB9B1A6)),
+            },
+            palette: [
+                0x292D32, 0xA53236, 0x3E652C, 0x785817, 0x245E91, 0x754589, 0x1D6867, 0xD2CCC3,
+                0x69635C, 0xAF3539, 0x426D30, 0x805C14, 0x28679E, 0x814A94, 0x207171, 0xFFFCF8,
+            ]
+            .map(Color::from_hex),
+        }
+    }
+
+    /// Resolve UI colors without changing the terminal's ANSI palette or cursor.
+    #[must_use]
+    pub fn ui_colors(&self) -> UiColors {
+        let foreground = self.ui.foreground.unwrap_or(self.foreground);
+        let blend = |fg: u8, bg: u8| ((u16::from(fg) * 3 + u16::from(bg)) / 4) as u8;
+        UiColors {
+            foreground,
+            muted: self.ui.muted.unwrap_or(Color::rgb(
+                blend(foreground.r, self.tab_bar.r),
+                blend(foreground.g, self.tab_bar.g),
+                blend(foreground.b, self.tab_bar.b),
+            )),
+            accent: self.ui.accent.unwrap_or(self.split_focus),
+            border: self.ui.border.unwrap_or(self.split_border),
+        }
+    }
+
     /// Every built-in preset name.
     #[must_use]
     pub const fn preset_names() -> &'static [&'static str] {
@@ -302,6 +413,8 @@ impl Theme {
             "one-dark" => Some(Self::one_dark()),
             "solarized-dark" => Some(Self::solarized_dark()),
             "solarized-light" => Some(Self::solarized_light()),
+            "copper-dark" => Some(Self::copper_dark()),
+            "copper-light" => Some(Self::copper_light()),
             _ => None,
         }
     }
@@ -339,6 +452,26 @@ impl Theme {
         apply("split-border", &file.split_border, &mut self.split_border);
         apply("split-focus", &file.split_focus, &mut self.split_focus);
         apply("link", &file.link, &mut self.link);
+        // Preserve absent overrides so legacy themes continue to follow their
+        // terminal foreground. Resolve fallback colors only when drawing.
+        for (key, from, to) in [
+            (
+                "ui-foreground",
+                &file.ui_foreground,
+                &mut self.ui.foreground,
+            ),
+            ("ui-muted", &file.ui_muted, &mut self.ui.muted),
+            ("ui-accent", &file.ui_accent, &mut self.ui.accent),
+            ("ui-border", &file.ui_border, &mut self.ui.border),
+        ] {
+            if let Some(text) = from {
+                if let Some(color) = Color::parse_hex(text) {
+                    *to = Some(color);
+                } else {
+                    problems.push(format!("[theme] {key} = {text:?} is not #RRGGBB"));
+                }
+            }
+        }
         if let Some(palette) = &file.palette {
             // THEME-013: the palette is all-or-nothing, a short list would
             // silently repaint one ANSI color of the preset.
@@ -409,6 +542,14 @@ pub struct ThemeFile {
     pub split_focus: Option<String>,
     /// OSC 8 hyperlink text color (issue #41).
     pub link: Option<String>,
+    /// Primary chrome text, separate from terminal foreground (SKIN-002).
+    pub ui_foreground: Option<String>,
+    /// Secondary labels and disabled-state explanations.
+    pub ui_muted: Option<String>,
+    /// Positional focus indicators, separate from the terminal cursor.
+    pub ui_accent: Option<String>,
+    /// Chrome separators.
+    pub ui_border: Option<String>,
     /// ANSI-16 palette, 16 `#RRGGBB` strings.
     pub palette: Option<Vec<String>>,
 }
@@ -534,6 +675,62 @@ mod tests {
 
     fn table(text: &str) -> ThemeFile {
         toml::from_str(text).unwrap_or_else(|e| panic!("bad theme table: {e}"))
+    }
+
+    fn contrast(a: Color, b: Color) -> f64 {
+        let luminance = |c: Color| {
+            let linear = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b)
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn copper_text_and_focus_meet_contrast_contract() {
+        for theme in [Theme::copper_dark(), Theme::copper_light()] {
+            let ui = theme.ui_colors();
+            for bg in [theme.tab_bar, theme.tab_active] {
+                for fg in [ui.foreground, ui.muted] {
+                    assert!(contrast(fg, bg) >= 4.5, "{}: {fg} on {bg}", theme.name);
+                }
+                assert!(contrast(ui.accent, bg) >= 3.0, "{} focus", theme.name);
+            }
+            for bg in [theme.background, theme.selection, theme.search_highlight] {
+                assert!(
+                    contrast(theme.foreground, bg) >= 4.5,
+                    "{} terminal",
+                    theme.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ui_overrides_are_isolated_and_invalid_values_keep_the_preset() {
+        let mut theme = Theme::copper_dark();
+        let base = theme.clone();
+        let problems = theme.apply_overrides(&table(
+            "ui-foreground = '#112233'\nui-muted = '#445566'\nui-accent = '#778899'\nui-border = 'bad'",
+        ));
+        assert_eq!(problems.len(), 1);
+        assert_eq!(theme.ui_colors().foreground, Color::from_hex(0x112233));
+        assert_eq!(theme.ui_colors().muted, Color::from_hex(0x445566));
+        assert_eq!(theme.ui_colors().accent, Color::from_hex(0x778899));
+        assert_eq!(theme.ui_colors().border, base.ui_colors().border);
+        assert_eq!(theme.foreground, base.foreground);
+        assert_eq!(theme.cursor, base.cursor);
+        assert_eq!(theme.palette, base.palette);
+        let ui = theme.ui_colors();
+        theme.apply_overrides(&table("foreground = '#FFFFFF'\ncursor = '#000000'"));
+        assert_eq!(theme.ui_colors(), ui);
     }
 
     #[test]

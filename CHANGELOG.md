@@ -8,6 +8,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- Copper native dark/light skins, independent UI color overrides, native caption
+  colors and positional active-tab/palette/bookmark indicators. See
+  [Copper skin](docs/copper-skin.md) for configuration and Windows validation.
 - Session browser slice (#88): palette rows list live and exited host sessions with profile, cwd,
   controller/watcher counts, status, and a disabled reason for exited targets.
 - Project task runner slice (#89): `tasks.toml` schema, dependency validation, palette Run/Stop/Restart
@@ -19,6 +22,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- Tab icons and close controls are painted separately from Unicode titles.
+- Windows task-host adapter is gated to Windows so portable core checks compile.
 - Task runs now bootstrap the host when absent, use host-side task identity (`taskId`), launch transitive dependencies topologically, and idempotently return the same live run on concurrent create (#102–#105).
 - Host snapshots now serialize wide-cell text without continuation spaces and keep combining marks (#106).
 - Search resumes completed history during ordinary output and maps text offsets back to wide/combining grid columns (#107, #113).

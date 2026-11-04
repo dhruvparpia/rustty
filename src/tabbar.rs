@@ -20,6 +20,12 @@ pub const TAB_CHROME: f32 = 26.0;
 /// Width of the `+` new-tab button (DIPs).
 pub const PLUS_WIDTH: f32 = 34.0;
 
+/// Width of the close-control hit target and painted slot in DIPs.
+#[must_use]
+pub fn close_width(cell_width: f32) -> f32 {
+    cell_width * 1.5
+}
+
 /// What a click on the tab bar strip landed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
@@ -44,7 +50,9 @@ pub struct Layout {
 #[must_use]
 pub fn tab_width(title: &str, cell_width: f32) -> f32 {
     let chars = title.chars().filter(|c| !c.is_control()).count() as f32;
-    (chars * cell_width + TAB_CHROME).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
+    // Reserve separate icon and close slots; titles contain only user text.
+    (chars * cell_width + TAB_CHROME + cell_width * 1.6 + close_width(cell_width))
+        .clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
 }
 
 /// Lay out `titles` left to right inside a bar of `width` DIPs with tab

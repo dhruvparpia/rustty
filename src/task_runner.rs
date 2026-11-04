@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+#[cfg(windows)]
 use serde_json::{Value, json};
 
 use crate::tasks::{Store, Task};
@@ -199,6 +200,7 @@ fn plan_deps(
 }
 
 /// Parse one host `SessionRecord` from the session.list envelope.
+#[cfg(windows)]
 fn parse_record(v: &Value) -> crate::host::SessionRecord {
     crate::host::SessionRecord {
         id: v.get("id").and_then(Value::as_u64).unwrap_or(0),
@@ -266,6 +268,7 @@ fn parse_record(v: &Value) -> crate::host::SessionRecord {
 
 /// Real host adapter over the session host client.
 #[must_use]
+#[cfg(windows)]
 pub fn real_host_adapter() -> HostAdapter {
     HostAdapter {
         list: Arc::new(move || {
