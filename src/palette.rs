@@ -54,6 +54,8 @@ pub enum Command {
     SwitchTheme(usize),
     /// Open existing Git worktree `n` as a tab at its root.
     OpenWorktree(usize),
+    /// Open the native Preferences config editor.
+    OpenPreferences,
     /// Jump the viewport to command `n`'s block.
     JumpCommand(u64),
     /// Copy one command's output by canonical id.

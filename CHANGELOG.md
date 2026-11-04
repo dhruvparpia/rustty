@@ -27,6 +27,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Renderer fallback encodes cell text directly into the reused UTF-16 buffer instead of allocating a String per Unicode cell (#114).
 - Palette construction reuses one session snapshot for browser and task rows instead of one session-list query per task (#115).
 - Worktree discovery slice (#92): existing Git worktrees appear with branch/path/detached/available state and open as tabs at their roots. Task runs now carry a project root namespace, so same-name tasks in two worktrees stay isolated.
+- Settings provider slice (#91): palette rows expose global/profile setting values, source and restart flags, plus keybinding conflict diagnostics; selecting a row opens the native Preferences editor. Atomic in-place setting edits remain a later slice.
 
 ## [0.5.1] - 2026-11-03
 

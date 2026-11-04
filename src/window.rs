@@ -3577,6 +3577,32 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             command: Command::OpenWorktree(idx),
         });
     }
+    for st in crate::settings::settings(&s.cfg) {
+        items.push(PaletteItem {
+            label: st.label().to_string(),
+            group: "Settings",
+            shortcut: None,
+            disabled_reason: None,
+            command: Command::OpenPreferences,
+        });
+    }
+    let map = s.cfg.keymap();
+    let conflicts = crate::palette::keybinding_conflicts(&map);
+    for (key, action) in s.cfg.keybindings.iter() {
+        let conflict = conflicts.iter().find(|c| c.contains(&key.clone()));
+        let label = if let Some(c) = conflict {
+            format!("Keybinding: {} -> {} [{}]", key, action, c).to_string()
+        } else {
+            format!("Keybinding: {} -> {}", key, action).to_string()
+        };
+        items.push(PaletteItem {
+            label,
+            group: "Keybindings",
+            shortcut: None,
+            disabled_reason: None,
+            command: Command::OpenPreferences,
+        });
+    }
     let mut push = |label: &str, group: &'static str, action: KeyAction, disabled: Option<&str>| {
         items.push(PaletteItem {
             label: label.to_string(),
@@ -3793,6 +3819,7 @@ fn execute_palette_current(hwnd: HWND) {
         Command::OpenWorkspace(idx) => open_workspace_by_index(hwnd, idx),
         Command::SwitchTheme(idx) => set_theme(hwnd, idx),
         Command::OpenWorktree(idx) => open_worktree(hwnd, idx),
+        Command::OpenPreferences => open_preferences(hwnd),
         Command::JumpCommand(cmd_id) => jump_command(hwnd, cmd_id),
         Command::CopyCommand(cmd_id) => copy_command(hwnd, cmd_id),
         Command::ExportCommand(cmd_id) => export_command(hwnd, cmd_id),
