@@ -33,6 +33,8 @@ pub struct Task {
     #[serde(default)]
     pub layout: Option<String>,
     #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
     pub deps: Vec<u32>,
 }
 
@@ -229,6 +231,7 @@ mod tests {
                     cwd: Some("C:/src/web".into()),
                     profile: Some("Git Bash".into()),
                     layout: Some("web".into()),
+                    project: None,
                     deps: Vec::new(),
                 },
                 Task {
@@ -238,6 +241,7 @@ mod tests {
                     cwd: Some("C:/src/web".into()),
                     profile: None,
                     layout: None,
+                    project: None,
                     deps: vec![1],
                 },
             ],

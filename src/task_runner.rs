@@ -60,7 +60,7 @@ impl TaskRunner {
     /// Find the live session for `task` by canonical label.
     fn live_alias(&self, sessions: &[crate::host::SessionRecord], task: &Task) -> Option<u32> {
         for rec in sessions.iter() {
-            if rec.state == "live" && rec.task_id == Some(task.id) {
+            if rec.state == "live" && rec.task_id == Some(task.id) && rec.project == task.project {
                 return Some(rec.alias);
             }
         }
@@ -260,6 +260,7 @@ fn parse_record(v: &Value) -> crate::host::SessionRecord {
             .get("taskId")
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok()),
+        project: v.get("project").and_then(Value::as_str).map(str::to_string),
     }
 }
 
@@ -309,6 +310,7 @@ pub fn real_host_adapter() -> HostAdapter {
                     "rows": 30,
                     "persistent": true,
                     "taskId": task.id,
+                    "project": task.project,
                 }),
             ) else {
                 return Err("session host unavailable".to_string());
@@ -368,6 +370,7 @@ mod tests {
                     cwd: Some("C:/src/web".into()),
                     profile: None,
                     layout: None,
+                    project: None,
                     deps: Vec::new(),
                 },
                 Task {
@@ -377,6 +380,7 @@ mod tests {
                     cwd: Some("C:/src/web".into()),
                     profile: None,
                     layout: None,
+                    project: None,
                     deps: vec![1],
                 },
                 Task {
@@ -386,6 +390,7 @@ mod tests {
                     cwd: None,
                     profile: None,
                     layout: None,
+                    project: None,
                     deps: vec![2],
                 },
                 Task {
@@ -395,6 +400,7 @@ mod tests {
                     cwd: None,
                     profile: None,
                     layout: None,
+                    project: None,
                     deps: vec![99],
                 },
             ],
@@ -434,6 +440,7 @@ mod tests {
                     created_unix_secs: 0u64,
                     exit_code: None,
                     task_id: Some(task.id),
+                    project: task.project.clone(),
                 });
                 Ok(alias)
             }),
@@ -509,5 +516,42 @@ mod tests {
         assert!(matches!(started, Outcome::Started(_)));
         let missing = runner.stop(99);
         assert!(matches!(missing, Outcome::MissingTask(_)));
+    }
+    #[test]
+    fn project_root_isolates_same_name_tasks() {
+        let store = Store {
+            version: 1,
+            task: vec![
+                Task {
+                    id: 1,
+                    name: "dev".into(),
+                    argv: vec!["npm".into(), "run".into(), "dev".into()],
+                    cwd: Some("C:/repo/wt1".into()),
+                    profile: None,
+                    layout: None,
+                    project: Some("C:/repo/wt1".into()),
+                    deps: Vec::new(),
+                },
+                Task {
+                    id: 2,
+                    name: "dev".into(),
+                    argv: vec!["npm".into(), "run".into(), "dev".into()],
+                    cwd: Some("C:/repo/wt2".into()),
+                    profile: None,
+                    layout: None,
+                    project: Some("C:/repo/wt2".into()),
+                    deps: Vec::new(),
+                },
+            ],
+        };
+        let host = fake_host();
+        let runner = TaskRunner::with(&store, &host);
+        assert!(matches!(runner.run(1), Outcome::Started(_)));
+        assert!(matches!(runner.run(2), Outcome::Started(_)));
+        assert!(matches!(runner.stop(1), Outcome::Stopped(_)));
+        assert!(
+            matches!(runner.run(2), Outcome::AlreadyRunning(_)),
+            "wt2 stays live"
+        );
     }
 }

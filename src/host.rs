@@ -233,6 +233,8 @@ pub struct SessionRecord {
     pub exit_code: Option<u32>,
     /// Canonical task id for task-run identity, presentation-only name otherwise.
     pub task_id: Option<u32>,
+    /// Project root/namespace for the task run (issue #92).
+    pub project: Option<String>,
 }
 
 impl SessionRecord {
@@ -254,6 +256,7 @@ impl SessionRecord {
             "createdUnixSecs": self.created_unix_secs,
             "exitCode": self.exit_code,
             "taskId": self.task_id,
+            "project": self.project,
         })
     }
 }
@@ -813,13 +816,17 @@ pub mod server {
                 .get("persistent")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
+            let project = params
+                .get("project")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let task_id = params
                 .get("taskId")
                 .and_then(Value::as_u64)
                 .and_then(|v| u32::try_from(v).ok());
             if let Some(task_id) = task_id {
                 for m in g.live.values() {
-                    if m.record.task_id == Some(task_id) {
+                    if m.record.task_id == Some(task_id) && m.record.project == project {
                         return Ok(m.record.clone());
                     }
                 }
@@ -921,6 +928,7 @@ pub mod server {
                     .unwrap_or(0),
                 exit_code: None,
                 task_id,
+                project: project.clone(),
             };
 
             // Second process handle for the terminate path (poll/kill);
@@ -2592,6 +2600,7 @@ mod tests {
                 created_unix_secs: 0,
                 exit_code: Some(0),
                 task_id: None,
+                project: None,
             };
             app.push_exited(record);
         }
