@@ -26,13 +26,15 @@ individually with `cargo test --release -- --ignored --nocapture --exact <name>`
 ## Desktop benches (this machine, run individually)
 
 Suite runs AV at process teardown on this machine (pre-existing, present at
-clean HEAD); individual runs complete and report.
+clean HEAD); individual runs complete and report. Re-run on the available desktop
+on 2026-11-03: burst, allocations and dirty-row runs printed their results before the
+pre-existing teardown AV; device-loss and full-vs-damage comparisons exited clean.
 
 | Test | Numbers | Result |
 | --- | --- | --- |
-| `burst_of_10000_lines_paints_inside_the_budget` | 100 frames / 10 000 lines: 21.1 ms wall, 10.2 ms paint, 0.10 ms/frame, worst 0.22 ms, **0 allocations**; atlas 22 tiles, 50 416 glyph blits, 0 fallback runs; present floor 0.11 ms/frame | pass |
-| `damage_frames_allocate_nothing` | 20 frames / 2 000 lines: 0.12 ms/frame, worst 0.19 ms, **0 allocations** | pass |
-| `damage_frames_cover_only_the_dirty_rows` | one edited line + cursor move → 3 of 24 rows repainted; atlas 23 tiles, 23 rendered | pass |
+| `burst_of_10000_lines_paints_inside_the_budget` | 100 frames / 10 000 lines: 22.2 ms wall, 8.5 ms paint, 0.09 ms/frame, worst 0.57 ms, **0 allocations**; atlas 21 tiles, 41 216 glyph blits, 0 fallback runs; present floor 0.14 ms/frame | pass |
+| `damage_frames_allocate_nothing` | 20 frames / 2 000 lines: 0.19 ms/frame, worst 0.51 ms, **0 allocations**; atlas 21 tiles, 8 073 glyph blits, 0 fallback runs | pass |
+| `damage_frames_cover_only_the_dirty_rows` | one edited line + cursor move → 3 of 24 rows repainted; atlas 22 tiles, 22 rendered | pass |
 | `device_loss_recovery_repaints` | recreation forces a full repaint; atlas rebuilt; recovery frame blits cached glyphs | pass |
 | `damage_repaint_matches_full_paint` | damage frame captured via `PrintWindow(PW_RENDERFULLCONTENT)` is pixel-identical to the full repaint of the same content | pass |
 
