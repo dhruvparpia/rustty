@@ -16,6 +16,12 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::WriteFile;
 use windows::Win32::System::Console::*;
 
+/// Console mouse encoder state shared by input and reader.
+pub struct MouseState {
+    mode: String,
+    sgr: bool,
+}
+
 use crate::host::{
     EXIT_BUSY, EXIT_HOST_UNAVAILABLE, EXIT_NOT_FOUND, MAX_PAGE_BYTES, client::Client, read_frame,
 };
@@ -183,6 +189,11 @@ pub fn run(alias: u32, read_only: bool, take_control: bool, prefix: u8) -> io::R
         .and_then(|m| m.get("mouseSgr"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let mouse_state = Arc::new(Mutex::new(MouseState {
+        mode: mouse_mode.to_string(),
+        sgr: mouse_sgr,
+    }));
+    let mouse_state_for_reader = Arc::clone(&mouse_state);
 
     // Reader thread: PTY stream -> console. If the session/host dies
     // under us it restores the console and exits the process, because
@@ -221,6 +232,7 @@ pub fn run(alias: u32, read_only: bool, take_control: bool, prefix: u8) -> io::R
             initial_rev,
             control_for_reader,
             lock,
+            &mouse_state_for_reader,
             initial_pending,
         );
     });
@@ -232,14 +244,42 @@ pub fn run(alias: u32, read_only: bool, take_control: bool, prefix: u8) -> io::R
         alias,
         &control,
         prefix,
-        mouse_mode,
-        mouse_sgr,
+        &mouse_state,
     );
     // Normal detach: leave the alternate screen, then restore the caller's console.
     drop(client);
     write_out(out_h, b"\x1b[?1049l");
     saved.restore();
     code
+}
+
+/// Live mouse modes from a session.output frame (issue #108).
+fn apply_mouse_from_params(state: &Arc<Mutex<MouseState>>, params: &Value) {
+    let Ok(mut guard) = state.lock() else {
+        return;
+    };
+    if let Some(mode) = params.get("mouse").and_then(Value::as_str) {
+        guard.mode = mode.to_string();
+    }
+    if let Some(sgr) = params.get("mouseSgr").and_then(Value::as_bool) {
+        guard.sgr = sgr;
+    }
+}
+
+/// Live mouse modes from a host snapshot resync (issue #108).
+fn apply_mouse_from_snapshot(state: &Arc<Mutex<MouseState>>, snap: &Value) {
+    let Some(modes) = snap.get("modes") else {
+        return;
+    };
+    let Ok(mut guard) = state.lock() else {
+        return;
+    };
+    if let Some(mode) = modes.get("mouse").and_then(Value::as_str) {
+        guard.mode = mode.to_string();
+    }
+    if let Some(sgr) = modes.get("mouseSgr").and_then(Value::as_bool) {
+        guard.sgr = sgr;
+    }
 }
 
 /// Keystrokes/mouse/resize -> RPC frames; the detach-prefix state
@@ -252,8 +292,7 @@ fn input_loop(
     alias: u32,
     control: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     prefix: u8,
-    mouse_mode: &str,
-    mouse_sgr: bool,
+    mouse_state: &Arc<Mutex<MouseState>>,
 ) -> io::Result<u8> {
     use std::sync::atomic::Ordering;
     let mut recs = vec![INPUT_RECORD::default(); 32];
@@ -287,7 +326,12 @@ fn input_loop(
                     .ok();
             }
             let bytes = if rec.EventType == MOUSE_EVENT as u16 {
-                mouse_bytes(rec, &mut last_buttons, mouse_mode, mouse_sgr)
+                let Ok(guard) = mouse_state.lock() else {
+                    continue;
+                };
+                let mode = guard.mode.clone();
+                let sgr = guard.sgr;
+                mouse_bytes(rec, &mut last_buttons, &mode, sgr)
             } else {
                 key_bytes(rec, &mut pending_high)
             };
@@ -351,6 +395,7 @@ fn reader_loop(
     initial_rev: u64,
     control: std::sync::Arc<std::sync::atomic::AtomicBool>,
     lock: Arc<Mutex<u8>>,
+    mouse_state: &Arc<Mutex<MouseState>>,
     mut initial_pending: Vec<Value>,
 ) -> ! {
     let out_h = out_h.0;
@@ -436,6 +481,9 @@ fn reader_loop(
                         }
                         last_rev = rev;
                         if method == Some("session.output") {
+                            if let Some(p) = params {
+                                apply_mouse_from_params(mouse_state, p);
+                            }
                             let hex = params
                                 .and_then(|p| p.get("data"))
                                 .and_then(Value::as_str)
@@ -477,6 +525,7 @@ fn reader_loop(
                             .and_then(|r| r.get("snapshot"))
                             .filter(|v| v.is_object())
                         {
+                            apply_mouse_from_snapshot(mouse_state, snap);
                             write_out(out_h, &snapshot_ansi(snap));
                             installed = snap.get("revision").and_then(Value::as_u64).unwrap_or(0);
                         } else if let Some(r) = result
@@ -1131,5 +1180,31 @@ mod tests {
         assert!(s.contains("main"));
         assert!(s.contains("\x1b[?1049h"));
         assert!(s.contains("alt"));
+    }
+    #[test]
+    fn mouse_mode_tracks_live_frames_and_snapshot() {
+        let state = Arc::new(Mutex::new(MouseState {
+            mode: "off".to_string(),
+            sgr: false,
+        }));
+        let params = serde_json::json!({"mouse": "click", "mouseSgr": true});
+        apply_mouse_from_params(&state, &params);
+        {
+            let Ok(guard) = state.lock() else {
+                panic!("mouse state lock failed");
+            };
+            assert!(guard.mode == "click");
+            assert!(guard.sgr);
+        }
+
+        let snap = serde_json::json!({"modes": {"mouse": "off", "mouseSgr": false}});
+        apply_mouse_from_snapshot(&state, &snap);
+        {
+            let Ok(guard2) = state.lock() else {
+                panic!("mouse state lock failed");
+            };
+            assert!(guard2.mode == "off");
+            assert!(!guard2.sgr);
+        }
     }
 }

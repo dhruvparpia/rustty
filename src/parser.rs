@@ -185,6 +185,8 @@ pub struct Parser {
     pub link_ids: HashMap<String, u32>,
     /// Pending auto-wrap at the right edge.
     pub wrap_pending: bool,
+    /// Last printed base cell column, used for combining marks (issue #112).
+    pub last_base_col: Option<usize>,
 }
 
 /// OSC 8 URI table size limit (issue #41). Typical panes open a handful
@@ -226,6 +228,7 @@ impl Parser {
             link_uris: Vec::new(),
             link_ids: HashMap::new(),
             wrap_pending: false,
+            last_base_col: None,
         }
     }
 
@@ -553,6 +556,7 @@ impl Parser {
             0x0D => {
                 self.cursor_col = 0;
                 self.wrap_pending = false;
+                self.last_base_col = None;
             }
             0x07 => events.push(ParserEvent::Bell),
             0x00 | 0x0E..=0x1A | 0x1C..=0x1F | 0x7F => {}
@@ -620,26 +624,18 @@ impl Parser {
         let cols = grid.cols;
         let width = Parser::char_width(ch);
         if width == 0 {
-            if self.cursor_col > 0 {
-                let Some(prev) = grid.live_cell_mut(self.cursor_row, self.cursor_col - 1) else {
-                    return;
-                };
-                let mut base_col = self.cursor_col - 1;
-                if prev.continuation {
-                    if base_col == 0 {
-                        return;
-                    }
-                    base_col -= 1;
-                }
-                let Some(cell) = grid.live_cell_mut(self.cursor_row, base_col) else {
-                    return;
-                };
-                let existing = cell
-                    .combining
-                    .clone()
-                    .map_or(String::new(), |s| s.to_string());
-                cell.combining = Some(existing + &ch.to_string());
-            }
+            let Some(base_col) = self.last_base_col else {
+                return;
+            };
+            let Some(cell) = grid.live_cell_mut(self.cursor_row, base_col) else {
+                return;
+            };
+            let existing = cell
+                .combining
+                .clone()
+                .map_or(String::new(), |s| s.to_string());
+            let _ =
+                grid.write_combining(self.cursor_row, base_col, Some(existing + &ch.to_string()));
             return;
         }
         if self.wrap_pending {
@@ -652,6 +648,7 @@ impl Parser {
             self.cursor_col = 0;
             self.line_feed_quiet(grid);
         }
+        self.last_base_col = Some(self.cursor_col);
         let cell = Cell {
             char: ch,
             fg: self.pen_fg,
@@ -676,8 +673,12 @@ impl Parser {
             };
             grid.write_cell(self.cursor_row, self.cursor_col + 1, cont);
             self.cursor_col += 2;
-            if self.cursor_col >= cols && self.auto_wrap {
-                self.wrap_pending = true;
+            if self.cursor_col >= cols {
+                if self.auto_wrap {
+                    self.wrap_pending = true;
+                } else {
+                    self.cursor_col = cols - 1;
+                }
             }
         } else if width == 1 {
             if self.cursor_col + 1 < cols {
@@ -699,6 +700,7 @@ impl Parser {
 
     fn line_feed_quiet(&mut self, grid: &mut Grid) {
         self.wrap_pending = false;
+        self.last_base_col = None;
         if self.cursor_row >= self.scroll_bottom {
             grid.scroll_region_up(self.scroll_top, self.scroll_bottom);
             self.cursor_row = self.scroll_bottom;

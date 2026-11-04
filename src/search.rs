@@ -264,11 +264,12 @@ impl SearchState {
                     self.scanning = false;
                     break;
                 }
-                if let Some(line) = grid.line_text_abs(abs) {
+                if let Some(line) = grid.line_abs(abs) {
+                    let (text, bounds) = line_text_with_cell_bounds(line);
                     let found = match self.regex.as_ref() {
-                        Some(re) => regex_matches(re, &line, self.options.whole_word),
+                        Some(re) => regex_matches(re, &text, self.options.whole_word),
                         None => plain_matches(
-                            &line,
+                            &text,
                             &self.query,
                             self.options.case_sensitive,
                             self.options.whole_word,
@@ -280,11 +281,16 @@ impl SearchState {
                             self.scanning = false;
                             break;
                         }
+                        if lo >= bounds.len() || hi > bounds.len() {
+                            continue;
+                        }
+                        let (lo_col, _lo_end) = bounds[lo];
+                        let (_lo_start, hi_col) = bounds[hi - 1];
                         self.matches.push(SearchMatch {
                             pane: pane_idx,
                             abs,
-                            lo,
-                            hi,
+                            lo: lo_col,
+                            hi: hi_col,
                         });
                     }
                 }
@@ -407,6 +413,22 @@ fn plain_matches(
         out.push((start, end));
     }
     out
+}
+
+fn line_text_with_cell_bounds(line: &crate::grid::Line) -> (String, Vec<(usize, usize)>) {
+    let mut text = String::new();
+    let mut bounds = Vec::new();
+    for (i, cell) in line.cells.iter().enumerate() {
+        if cell.continuation {
+            continue;
+        }
+        let cell_text = crate::grid::cell_text(cell);
+        for ch in cell_text.chars() {
+            text.push(ch);
+            bounds.push((i, i + usize::from(cell.width)));
+        }
+    }
+    (text, bounds)
 }
 
 fn regex_matches(re: &Regex, line: &str, whole_word_mode: bool) -> Vec<(usize, usize)> {
@@ -761,5 +783,38 @@ mod tests {
         let ctx = context_lines(&grid, last, 3);
         assert_eq!(ctx.len(), 4);
         assert!(ctx[3].2);
+    }
+    #[test]
+    fn search_columns_are_grid_cells_after_wide_text() {
+        let mut tab = Tab::with_size(8, 2, 0);
+        tab.pane_mut().feed("界X".as_bytes());
+        let mut search = SearchState::new();
+        search.query = "X".to_string();
+        search.refresh(Some(&tab));
+        let Some(found) = search.current_match() else {
+            panic!("wide-text match must be found");
+        };
+        assert_eq!((found.lo, found.hi), (2, 3));
+    }
+
+    #[test]
+    fn continuous_output_reaches_live_tail_without_restart() {
+        let mut tab = Tab::with_size(30, 4, 10000);
+        for _ in 0..6500 {
+            tab.pane_mut().feed(b"old line\r\n");
+        }
+        tab.pane_mut().feed(b"NEEDLE\r\n");
+        let mut search = SearchState::new();
+        search.query = "NEEDLE".to_string();
+        search.refresh(Some(&tab));
+        for _ in 0..20 {
+            tab.pane_mut().feed(b"new line\r\n");
+            search.note_history(Some(&tab));
+            search.step(Some(&tab));
+        }
+        assert!(
+            !search.matches.is_empty(),
+            "tail starved after 20 scan ticks"
+        );
     }
 }

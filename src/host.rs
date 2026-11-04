@@ -231,6 +231,8 @@ pub struct SessionRecord {
     pub created_unix_secs: u64,
     /// Exit code once exited.
     pub exit_code: Option<u32>,
+    /// Canonical task id for task-run identity, presentation-only name otherwise.
+    pub task_id: Option<u32>,
 }
 
 impl SessionRecord {
@@ -251,6 +253,7 @@ impl SessionRecord {
             "state": self.state,
             "createdUnixSecs": self.created_unix_secs,
             "exitCode": self.exit_code,
+            "taskId": self.task_id,
         })
     }
 }
@@ -612,6 +615,9 @@ pub mod server {
         let mut cur = String::new();
         let mut style: Option<(Option<String>, Option<String>, u8)> = None;
         for cell in &line.cells {
+            if cell.continuation {
+                continue;
+            }
             let st = (
                 cell.fg.map(|c| c.to_string()),
                 cell.bg.map(|c| c.to_string()),
@@ -624,7 +630,8 @@ pub mod server {
                 }
                 style = Some(st);
             }
-            cur.push(cell.char);
+            let text = crate::grid::cell_text(cell);
+            cur.push_str(&text);
         }
         let (fg, bg, attrs) = style.unwrap_or_default();
         out.push(json!([cur, fg, bg, attrs]));
@@ -806,6 +813,17 @@ pub mod server {
                 .get("persistent")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
+            let task_id = params
+                .get("taskId")
+                .and_then(Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok());
+            if let Some(task_id) = task_id {
+                for m in g.live.values() {
+                    if m.record.task_id == Some(task_id) {
+                        return Ok(m.record.clone());
+                    }
+                }
+            }
             let profile_name = params.get("profile").and_then(Value::as_str);
             let mut opts = resolve_profile(&g.cfg, profile_name)?;
             if let Some(dir) = params.get("cwd").and_then(Value::as_str) {
@@ -902,6 +920,7 @@ pub mod server {
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
                 exit_code: None,
+                task_id,
             };
 
             // Second process handle for the terminate path (poll/kill);
@@ -962,6 +981,12 @@ pub mod server {
                             // (best effort: its queue is what is full)
                             // and then dropped; its pump closes that
                             // connection, so no client stalls the rest.
+                            let mouse = match m.model.parser.mouse_protocol {
+                                crate::parser::MouseProtocol::Off => "off",
+                                crate::parser::MouseProtocol::Click => "click",
+                                crate::parser::MouseProtocol::Drag => "drag",
+                                crate::parser::MouseProtocol::Any => "any",
+                            };
                             let note = json!({
                                 "jsonrpc": "2.0",
                                 "method": "session.output",
@@ -973,6 +998,9 @@ pub mod server {
                                     "rows": rows,
                                     "revision": rev,
                                     "schema": SCHEMA,
+                                    "mouse": mouse,
+                                    "mouseSgr": m.model.parser.mouse_sgr_coordinates,
+                                    "mouseUrxvt": m.model.parser.mouse_urxvt_coordinates,
                                 },
                             });
                             let resync = json!({
@@ -1937,6 +1965,28 @@ pub mod server {
                 "main"
             );
         }
+
+        #[test]
+        fn snapshot_keeps_wide_and_combining_text() {
+            let mut m = Model::new(10, 2);
+            m.feed("界e\u{301}X".as_bytes());
+            let s = m.snapshot();
+            let row_text = |snap: &Value| -> String {
+                snap["lines"][0]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|sp| sp[0].as_str().unwrap_or(""))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            };
+            assert_eq!(
+                row_text(&s),
+                "界e\u{301}X",
+                "wide continuation and combining stay"
+            );
+        }
     }
 }
 
@@ -2541,6 +2591,7 @@ mod tests {
                 state: "exited".to_string(),
                 created_unix_secs: 0,
                 exit_code: Some(0),
+                task_id: None,
             };
             app.push_exited(record);
         }

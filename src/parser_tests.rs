@@ -673,4 +673,43 @@ mod tests {
         assert_eq!(g.line_text(0).unwrap(), "ok");
         assert_eq!(cell(&g, 0, 0).link, 0);
     }
+    #[test]
+    fn overwriting_wide_lead_clears_continuation() {
+        let mut p = Parser::new();
+        let mut g = Grid::with_size(8, 2, 0);
+        feed(&mut p, &mut g, "界X\rA");
+        assert_eq!(g.line_text_abs(0).as_deref(), Some("A X"));
+        assert!(!g.line_abs(0).unwrap().cells[1].continuation);
+    }
+
+    #[test]
+    fn nonwrapping_wide_at_margin_does_not_drop_following_ascii() {
+        let mut p = Parser::new();
+        let mut g = Grid::with_size(4, 2, 0);
+        feed(&mut p, &mut g, "\x1b[?7lab界Z");
+        assert_eq!(g.line_abs(0).unwrap().cells[3].char, 'Z');
+    }
+
+    #[test]
+    fn delayed_combining_marks_dirty_the_row_and_revision() {
+        let mut p = Parser::new();
+        let mut g = Grid::with_size(8, 2, 0);
+        feed(&mut p, &mut g, "e");
+        g.clear_dirty_rows();
+        let rev = g.content_rev();
+        feed(&mut p, &mut g, "\u{301}");
+        assert!(
+            !g.dirty_rows().is_empty(),
+            "accent changed text without invalidating row"
+        );
+        assert!(g.content_rev() > rev, "search revision must change");
+    }
+
+    #[test]
+    fn combining_at_right_margin_attaches_to_last_printed_cell() {
+        let mut p = Parser::new();
+        let mut g = Grid::with_size(3, 2, 0);
+        feed(&mut p, &mut g, "abe\u{301}");
+        assert_eq!(g.line_text_abs(0).as_deref(), Some("abe\u{301}"));
+    }
 }

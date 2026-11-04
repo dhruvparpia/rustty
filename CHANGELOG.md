@@ -17,6 +17,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Command timeline slice (#90): palette rows expose retained command ids, exit status and duration; jump/copy/export actions use canonical command ids from the active pane.
 - TaskRunner seam (#89 architecture): task lifecycle moved from `window.rs` into a deep `TaskRunner` module with a `HostAdapter` seam, explicit outcomes, and synthetic host tests.
 
+### Fixed
+
+- Task runs now bootstrap the host when absent, use host-side task identity (`taskId`), launch transitive dependencies topologically, and idempotently return the same live run on concurrent create (#102–#105).
+- Host snapshots now serialize wide-cell text without continuation spaces and keep combining marks (#106).
+- Search resumes completed history during ordinary output and maps text offsets back to wide/combining grid columns (#107, #113).
+- Console attach tracks live mouse mode changes from output frames and resync snapshots (#108).
+- Wide-cell overwrite repair, no-wrap right-margin cursor handling, combining-mark dirty/revision bumps and right-margin attachment are covered by parser tests (#109–#112).
+- Renderer fallback encodes cell text directly into the reused UTF-16 buffer instead of allocating a String per Unicode cell (#114).
+- Palette construction reuses one session snapshot for browser and task rows instead of one session-list query per task (#115).
+
 ## [0.5.1] - 2026-11-03
 
 Compatible repair line; `v0.5.0` remains immutable and is not moved.

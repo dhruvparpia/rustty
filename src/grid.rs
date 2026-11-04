@@ -318,8 +318,13 @@ impl Grid {
             self.append_line(Line::blank(self.cols));
         }
         let slot = self.slot(virtual_index);
+        let had_content = existed
+            && self.lines[slot]
+                .cells
+                .iter()
+                .any(|c| c.char != ' ' || c.continuation || c.combining.is_some());
         self.lines[slot] = line;
-        if existed {
+        if had_content {
             self.content_revision += 1;
         }
         self.lines[slot].is_dirty = true;
@@ -343,11 +348,45 @@ impl Grid {
             self.append_line(Line::blank(self.cols));
         }
         let slot = self.slot(virtual_index);
-        if let Some(dest) = self.lines[slot].cells.get_mut(col) {
-            *dest = cell;
+        let Some(dest) = self.lines[slot].cells.get_mut(col) else {
+            return;
+        };
+        let old = dest.clone();
+        let was_wide = old.width == 2 && !old.continuation;
+        let was_continuation = old.continuation;
+        let new_width = usize::from(cell.width);
+        let mut changed =
+            existed && (old.char != ' ' || old.continuation || old.combining.is_some());
+        *dest = cell;
+        if was_wide
+            && new_width != 2
+            && let Some(cont) = self.lines[slot].cells.get_mut(col + 1)
+            && cont.continuation
+        {
+            *cont = Cell {
+                char: ' ',
+                fg: cont.fg,
+                bg: cont.bg,
+                attributes: cont.attributes,
+                link: cont.link,
+                width: 1,
+                continuation: false,
+                combining: None,
+            };
+            changed = true;
+        }
+        if was_continuation
+            && col > 0
+            && let Some(lead) = self.lines[slot].cells.get_mut(col - 1)
+            && lead.width == 2
+            && !lead.continuation
+        {
+            lead.width = 1;
+            lead.continuation = false;
+            changed = true;
         }
         self.lines[slot].is_dirty = true;
-        if existed {
+        if changed {
             self.content_revision += 1;
         }
     }
@@ -528,6 +567,25 @@ impl Grid {
         }
         let slot = self.slot(v);
         self.lines[slot].cells.get_mut(col)
+    }
+
+    /// Attach combining marks to a live cell, marking the row dirty and
+    /// bumping the search revision (issue #111).
+    #[must_use]
+    pub fn write_combining(&mut self, row: usize, col: usize, combining: Option<String>) -> bool {
+        let row = row.min(self.rows.saturating_sub(1));
+        let v = self.live_top() + row;
+        if v >= self.total {
+            return false;
+        }
+        let slot = self.slot(v);
+        let Some(cell) = self.lines[slot].cells.get_mut(col) else {
+            return false;
+        };
+        cell.combining = combining.clone();
+        self.lines[slot].is_dirty = true;
+        self.content_revision += 1;
+        true
     }
 
     /// Mutable viewport line at `row`. `None` when the row is empty.

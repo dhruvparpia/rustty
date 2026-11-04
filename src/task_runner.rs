@@ -2,6 +2,7 @@
 //! session reconnect/create, stop and restart behind one interface. The window
 //! layer is an adapter that renders palette rows and calls this seam.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -58,19 +59,39 @@ impl TaskRunner {
 
     /// Find the live session for `task` by canonical label.
     fn live_alias(&self, sessions: &[crate::host::SessionRecord], task: &Task) -> Option<u32> {
-        let label = task.session_label();
         for rec in sessions.iter() {
-            if rec.state == "live" && rec.name == label {
+            if rec.state == "live" && rec.task_id == Some(task.id) {
                 return Some(rec.alias);
             }
         }
         None
     }
 
+    /// Transitive dependency plan: deps first, target last, one store snapshot.
+    pub fn plan(&self, id: u32) -> Result<Vec<Task>, u32> {
+        let Some(task) = self.store.find(id).map(|i| self.store.task[i].clone()) else {
+            return Err(id);
+        };
+        let mut visited = std::collections::BTreeSet::new();
+        visited.insert(id);
+        let mut out = Vec::new();
+        if let Some(missing) = plan_deps(self, &task, &mut visited, &mut out) {
+            return Err(missing);
+        }
+        Ok(out)
+    }
+
     /// Run task `id`: start dependencies, reconnect or create the target.
     pub fn run(&self, id: u32) -> Outcome {
-        let Some(task) = self.store.find(id).map(|i| self.store.task[i].clone()) else {
+        if self.store.find(id).is_none() {
             return Outcome::MissingTask(id);
+        }
+        let plan_result = self.plan(id);
+        if let Err(dep_id) = plan_result {
+            return Outcome::DependencyFailed(dep_id, "missing dependency task".to_string());
+        }
+        let Ok(plan) = plan_result else {
+            return Outcome::HostFailed("dependency plan failed".to_string());
         };
         let list_result = (self.host.list)();
         if let Err(e) = list_result {
@@ -79,22 +100,24 @@ impl TaskRunner {
         let Ok(sessions) = list_result else {
             return Outcome::HostFailed("session list failed".to_string());
         };
-        for dep in task.deps.iter() {
-            let dep_id = *dep;
-            let Some(dep_task) = self.store.find(dep_id).map(|i| self.store.task[i].clone()) else {
-                return Outcome::DependencyFailed(dep_id, "missing dependency task".to_string());
-            };
-            if self.live_alias(sessions.as_slice(), &dep_task).is_none() {
-                let dep_result = (self.host.create)(&dep_task);
+        let Some(target) = plan.last() else {
+            return Outcome::MissingTask(id);
+        };
+        if let Some(alias) = self.live_alias(sessions.as_slice(), target) {
+            return Outcome::AlreadyRunning(alias);
+        }
+        for (i, dep) in plan.iter().enumerate() {
+            if i == plan.len() - 1 {
+                continue;
+            }
+            if self.live_alias(sessions.as_slice(), dep).is_none() {
+                let dep_result = (self.host.create)(dep);
                 if let Err(e) = dep_result {
-                    return Outcome::DependencyFailed(dep_id, e);
+                    return Outcome::DependencyFailed(dep.id, e);
                 }
             }
         }
-        if let Some(alias) = self.live_alias(sessions.as_slice(), &task) {
-            return Outcome::AlreadyRunning(alias);
-        }
-        let target_result = (self.host.create)(&task);
+        let target_result = (self.host.create)(target);
         if let Err(e) = target_result {
             return Outcome::HostFailed(e);
         }
@@ -146,6 +169,33 @@ impl TaskRunner {
         }
         self.run(id)
     }
+}
+
+fn plan_deps(
+    runner: &TaskRunner,
+    task: &Task,
+    visited: &mut BTreeSet<u32>,
+    out: &mut Vec<Task>,
+) -> Option<u32> {
+    for dep in task.deps.iter() {
+        let dep_id = *dep;
+        if visited.contains(&dep_id) {
+            continue;
+        }
+        visited.insert(dep_id);
+        let Some(dep_task) = runner
+            .store
+            .find(dep_id)
+            .map(|i| runner.store.task[i].clone())
+        else {
+            return Some(dep_id);
+        };
+        if let Some(missing) = plan_deps(runner, &dep_task, visited, out) {
+            return Some(missing);
+        }
+    }
+    out.push(task.clone());
+    None
 }
 
 /// Parse one host `SessionRecord` from the session.list envelope.
@@ -206,6 +256,10 @@ fn parse_record(v: &Value) -> crate::host::SessionRecord {
             .get("exitCode")
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok()),
+        task_id: v
+            .get("taskId")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok()),
     }
 }
 
@@ -215,7 +269,7 @@ pub fn real_host_adapter() -> HostAdapter {
     HostAdapter {
         list: Arc::new(move || {
             let Ok(mut client) = crate::host::client::Client::connect_existing() else {
-                return Err("session host unavailable".to_string());
+                return Ok(Vec::new());
             };
             let Ok(resp) = client.call("session.list", json!({})) else {
                 return Err("session host unavailable".to_string());
@@ -234,7 +288,7 @@ pub fn real_host_adapter() -> HostAdapter {
             Ok(out)
         }),
         create: Arc::new(move |task| {
-            let Ok(mut client) = crate::host::client::Client::connect_existing() else {
+            let Ok(mut client) = crate::host::client::Client::connect() else {
                 return Err("session host unavailable".to_string());
             };
             let argv = task.argv.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -254,6 +308,7 @@ pub fn real_host_adapter() -> HostAdapter {
                     "cols": 120,
                     "rows": 30,
                     "persistent": true,
+                    "taskId": task.id,
                 }),
             ) else {
                 return Err("session host unavailable".to_string());
@@ -326,6 +381,15 @@ mod tests {
                 },
                 Task {
                     id: 3,
+                    name: "all".into(),
+                    argv: vec!["all".into()],
+                    cwd: None,
+                    profile: None,
+                    layout: None,
+                    deps: vec![2],
+                },
+                Task {
+                    id: 4,
                     name: "bad".into(),
                     argv: vec!["bad".into()],
                     cwd: None,
@@ -369,6 +433,7 @@ mod tests {
                     state: "live".to_string(),
                     created_unix_secs: 0u64,
                     exit_code: None,
+                    task_id: Some(task.id),
                 });
                 Ok(alias)
             }),
@@ -396,8 +461,20 @@ mod tests {
         let store = fixture_store();
         let host = fake_host();
         let runner = TaskRunner::with(&store, &host);
-        let outcome = runner.run(3);
+        let outcome = runner.run(4);
         assert!(matches!(outcome, Outcome::DependencyFailed(_, _)));
+    }
+
+    #[test]
+    fn transitive_dependency_plan_is_topological() {
+        let store = fixture_store();
+        let host = fake_host();
+        let runner = TaskRunner::with(&store, &host);
+        let Ok(plan) = runner.plan(3) else {
+            panic!("plan must be valid");
+        };
+        let ids = plan.iter().map(|t| t.id).collect::<Vec<_>>();
+        assert_eq!(ids, vec![1, 2, 3], "deps before target");
     }
 
     #[test]

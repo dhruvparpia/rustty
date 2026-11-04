@@ -3367,7 +3367,8 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             command: Command::TerminateView,
         });
     }
-    for rec in session_records() {
+    let sessions = session_records();
+    for rec in &sessions {
         let alias = rec
             .get("alias")
             .and_then(serde_json::Value::as_u64)
@@ -3420,12 +3421,9 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
         });
     }
     for task in crate::tasks::tasks() {
-        let live = session_records().iter().any(|rec| {
+        let live = sessions.iter().any(|rec| {
             rec.get("state").and_then(serde_json::Value::as_str) == Some("live")
-                && rec
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|n| n == task.session_label())
+                && rec.get("taskId").and_then(serde_json::Value::as_u64) == Some(u64::from(task.id))
         });
         items.push(PaletteItem {
             label: format!("Run Task {}: {}", task.id, task.name).to_string(),

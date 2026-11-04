@@ -2364,13 +2364,15 @@ impl Renderer {
             let mut run_width = 0usize;
             for cell in &cells[i..end] {
                 run_width += usize::from(cell.width);
-                let text: String = crate::grid::cell_text(cell);
-                for ch in text.chars() {
-                    // `encode_utf16` writes into the stack buffer and reports how
-                    // many units it wrote: surrogates included, no allocation.
-                    let mut buf = [0u16; 2];
-                    let count = ch.encode_utf16(&mut buf).len();
-                    units.extend_from_slice(&buf[..count]);
+                let mut buf = [0u16; 2];
+                let count = cell.char.encode_utf16(&mut buf).len();
+                units.extend_from_slice(&buf[..count]);
+                if let Some(ref comb) = cell.combining {
+                    for ch in comb.chars() {
+                        let mut buf2 = [0u16; 2];
+                        let count2 = ch.encode_utf16(&mut buf2).len();
+                        units.extend_from_slice(&buf2[..count2]);
+                    }
                 }
             }
             let rect = D2D_RECT_F {
