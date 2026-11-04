@@ -1,6 +1,8 @@
 //! Settings provider slice (#91): searchable setting names with effective
 //! values and source. The palette opens `config.toml` through the native
-//! Preferences editor; applying/canceling individual values is a later slice.
+//! Preferences editor; atomic in-place edits are the next slice.
+
+use std::path::Path;
 
 use crate::config::Config;
 
@@ -290,20 +292,6 @@ pub fn settings(cfg: &Config) -> Vec<Setting> {
         );
         add(
             &mut out,
-            &format!("profile.{}.font-size", profile.name.clone()),
-            format!("{}", profile.font_size.unwrap_or(0.0)),
-            &source,
-            true,
-        );
-        add(
-            &mut out,
-            &format!("profile.{}.line-height", profile.name.clone()),
-            format!("{}", profile.line_height.unwrap_or(0.0)),
-            &source,
-            true,
-        );
-        add(
-            &mut out,
             &format!("profile.{}.confirm-close", profile.name.clone()),
             format!("{}", profile.confirm_close.unwrap_or(false)),
             &source,
@@ -311,6 +299,29 @@ pub fn settings(cfg: &Config) -> Vec<Setting> {
         );
     }
     out
+}
+
+/// Atomic text exchange for the future settings editor (issue #91).
+/// The editor supplies the text; comments are preserved if the text keeps them.
+///
+/// # Errors
+///
+/// Any I/O failure; the original file remains on disk.
+#[allow(dead_code, reason = "settings editor writes exchanged text")]
+pub fn write_text_atomic(path: &Path, text: String) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_file_name("config.toml.tmp");
+    let backup = path.with_file_name("config.toml.old");
+    std::fs::remove_file(&backup).ok();
+    std::fs::write(&tmp, text)?;
+    if path.exists() {
+        std::fs::rename(path, &backup)?;
+    }
+    std::fs::rename(&tmp, path)?;
+    std::fs::remove_file(&backup).ok();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -357,5 +368,34 @@ mod tests {
         };
         let out = settings(&cfg);
         assert!(out.iter().any(|s| s.source.starts_with("profile ")));
+    }
+
+    #[test]
+    fn atomic_text_exchange_round_trips() {
+        let dir = std::env::temp_dir().join(format!("rustty-config-atomic-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("config.toml");
+        let text = "# comment\nfont = \"Cascadia Mono\"\n".to_string();
+        write_text_atomic(&path, text.clone()).expect("write");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_failure_keeps_the_original() {
+        let dir = std::env::temp_dir().join(format!("rustty-config-fail-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("config.toml");
+        let original = "theme = \"one-dark\"\n".to_string();
+        std::fs::write(&path, &original).expect("seed");
+        let tmp = path.with_file_name("config.toml.tmp");
+        std::fs::remove_file(&tmp).ok();
+        std::fs::remove_dir(&tmp).ok();
+        std::fs::create_dir_all(&tmp).expect("tmp directory");
+        assert!(write_text_atomic(&path, "font = \"Cascadia Mono\"\n".to_string()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), original);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
