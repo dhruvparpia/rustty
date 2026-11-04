@@ -3,6 +3,7 @@
 //! layer is an adapter that renders palette rows and calls this seam.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
 
 #[cfg(windows)]
@@ -82,6 +83,27 @@ impl TaskRunner {
         Ok(out)
     }
 
+    /// Resolve a task cwd relative to its project/worktree root. Absolute
+    /// cwd is unchanged; a relative cwd with no project stays relative.
+    fn resolve_cwd(&self, task: &Task) -> Task {
+        let mut out = task.clone();
+        if let Some(cwd) = &out.cwd {
+            let cwd_text = cwd.clone();
+            let p = Path::new(&cwd_text);
+            if !p.is_absolute() && out.project.is_some() {
+                let root_text = out.project.clone().unwrap_or_default();
+                let root = Path::new(&root_text);
+                out.cwd = Some(
+                    root.join(&cwd_text)
+                        .as_os_str()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+        out
+    }
+
     /// Run task `id`: start dependencies, reconnect or create the target.
     pub fn run(&self, id: u32) -> Outcome {
         if self.store.find(id).is_none() {
@@ -112,13 +134,15 @@ impl TaskRunner {
                 continue;
             }
             if self.live_alias(sessions.as_slice(), dep).is_none() {
-                let dep_result = (self.host.create)(dep);
+                let dep_task = self.resolve_cwd(dep);
+                let dep_result = (self.host.create)(&dep_task);
                 if let Err(e) = dep_result {
                     return Outcome::DependencyFailed(dep.id, e);
                 }
             }
         }
-        let target_result = (self.host.create)(target);
+        let target_task = self.resolve_cwd(target);
+        let target_result = (self.host.create)(&target_task);
         if let Err(e) = target_result {
             return Outcome::HostFailed(e);
         }
@@ -520,6 +544,38 @@ mod tests {
         let missing = runner.stop(99);
         assert!(matches!(missing, Outcome::MissingTask(_)));
     }
+    #[test]
+    fn relative_cwd_resolves_against_project() {
+        let task = Task {
+            id: 7,
+            name: "dev".into(),
+            argv: vec!["npm".into(), "run".into(), "dev".into()],
+            cwd: Some("src/web".into()),
+            profile: None,
+            layout: None,
+            project: Some("C:/repo/wt".into()),
+            deps: Vec::new(),
+        };
+        let resolved = TaskRunner::with(&Store::default(), &fake_host()).resolve_cwd(&task);
+        assert_eq!(resolved.cwd, Some(r"C:/repo/wt\src/web".to_string()));
+    }
+
+    #[test]
+    fn absolute_cwd_is_not_joined_to_project() {
+        let task = Task {
+            id: 8,
+            name: "dev".into(),
+            argv: vec!["npm".into(), "run".into(), "dev".into()],
+            cwd: Some("C:/src/web".into()),
+            profile: None,
+            layout: None,
+            project: Some("C:/repo/wt".into()),
+            deps: Vec::new(),
+        };
+        let resolved = TaskRunner::with(&Store::default(), &fake_host()).resolve_cwd(&task);
+        assert_eq!(resolved.cwd, Some("C:/src/web".to_string()));
+    }
+
     #[test]
     fn project_root_isolates_same_name_tasks() {
         let store = Store {

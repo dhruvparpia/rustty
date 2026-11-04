@@ -32,7 +32,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Wide-cell overwrite repair, no-wrap right-margin cursor handling, combining-mark dirty/revision bumps and right-margin attachment are covered by parser tests (#109–#112).
 - Renderer fallback encodes cell text directly into the reused UTF-16 buffer instead of allocating a String per Unicode cell (#114).
 - Palette construction reuses one session snapshot for browser and task rows instead of one session-list query per task (#115).
-- Worktree discovery slice (#92): existing Git worktrees appear with branch/path/detached/available state and open as tabs at their roots. Task runs now carry a project root namespace, so same-name tasks in two worktrees stay isolated.
+- Worktree discovery slice (#92): existing Git worktrees appear with branch/path/detached/available state and open as tabs at their roots. Task runs now carry a project root namespace, so same-name tasks in two worktrees stay isolated. Relative task `cwd` is resolved against the project/worktree root.
 - Settings provider slice (#91): palette rows expose global/profile setting values, source and restart flags, plus keybinding conflict diagnostics; selecting a row opens the native Preferences editor. A `write_text_atomic` helper preserves comments when the editor supplies them and keeps the original on failure.
 
 ## [0.5.1] - 2026-11-03
