@@ -1295,6 +1295,9 @@ struct WindowState {
     settings_sel: usize,
     /// Typed TOML value for the selected setting, applied on Enter.
     settings_input: String,
+    /// Config mtime captured when the settings overlay opened; an external
+    /// edit makes Enter refuse the stale write.
+    settings_mtime: Option<std::time::SystemTime>,
     /// #88: poll ticks between palette registry refreshes.
     palette_refresh_tick: usize,
     /// PALETTE-005: recently run palette labels, newest first, capped.
@@ -2175,6 +2178,7 @@ fn create_quick_window() {
         settings_open: false,
         settings_sel: 0,
         settings_input: String::new(),
+        settings_mtime: None,
         palette_refresh_tick: 0,
         recent: Vec::new(),
         profile: 0,
@@ -3031,6 +3035,12 @@ fn open_settings_overlay(hwnd: HWND, idx: usize) {
     let n = crate::settings::settings(&s.cfg).len();
     s.settings_sel = idx.min(n.saturating_sub(1));
     s.settings_input = String::new();
+    s.settings_mtime = None;
+    if let Some(path) = crate::config::config_path()
+        && let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified())
+    {
+        s.settings_mtime = Some(mtime);
+    }
     if let Some(r) = &mut s.renderer {
         r.set_overlay(SETTINGS_TITLE, SETTINGS_HINT);
     }
@@ -3134,6 +3144,16 @@ fn handle_settings_keydown(hwnd: HWND, vk: u16) {
                 show_message(hwnd, "no config path");
                 return;
             };
+            let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+                show_message(hwnd, "config file unreadable");
+                return;
+            };
+            if s.settings_mtime != Some(mtime) {
+                s.settings_input = String::new();
+                reload_config(s, hwnd);
+                show_message(hwnd, "config changed externally; reloaded; retry the edit");
+                return;
+            }
             let value = s.settings_input.clone();
             let result = if name == "tab-bar.visible" {
                 crate::settings::replace_plain(&path, "tab-bar".to_string(), value.clone())
@@ -6697,6 +6717,7 @@ pub fn run(
         settings_open: false,
         settings_sel: 0,
         settings_input: String::new(),
+        settings_mtime: None,
         palette_refresh_tick: 0,
         recent: Vec::new(),
         // CONFIG-013: `starting-profile` picks the initial shell.
