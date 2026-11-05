@@ -21,18 +21,15 @@ git rev-parse --verify $Tag > $null 2>&1
 if ($LASTEXITCODE -ne 0) { throw "tag $Tag does not exist" }
 
 $tagVersion = $Tag -replace '^v', ''
-$text = git show "${Tag}:Cargo.toml" 2>$null
-if ($LASTEXITCODE -ne 0) { throw "tag $Tag has no Cargo.toml" }
-$match = [regex]::Match($text, '^\s*version\s*=\s*"([^"]+)"', 'Multiline')
-if (!$match.Success) { throw "tag $Tag has no version line" }
-$version = $match.Groups[1].Value
+$line = git show "${Tag}:Cargo.toml" 2>$null | Select-String -Pattern '^\s*version\s*=\s*"([^"]+)"' | Select-Object -First 1
+if (!$line) { throw "tag $Tag has no version line" }
+$version = $line.Matches[0].Groups[1].Value
 if ($version -ne $tagVersion) {
     throw "tag/version mismatch: tag $Tag -> Cargo.toml $version"
 }
 
 # Report duplicate tag names (immutable-release hygiene).
-$tags = git tag -l
-$dups = $tags | Group-Object | Where-Object { $_.Count -gt 1 }
+$dups = git tag -l | Group-Object | Where-Object { $_.Count -gt 1 }
 if ($dups) {
     throw "duplicate tag names: " + ($dups | ForEach-Object { $_.Name } | Join-String -Separator ', ')
 }
