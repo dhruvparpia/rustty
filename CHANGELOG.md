@@ -14,6 +14,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   [Copper skin](docs/copper-skin.md) for configuration and Windows validation.
 - Session browser slice (#88): palette rows list live and exited host sessions with profile, cwd,
   controller/watcher counts, status, and a disabled reason for exited targets. The palette registry refreshes every ~3 s while open, keeping the selected command and typed query.
+- Settings overlay UIA node (#91): `Node::Settings` exposes overlay bounds, selected setting/count and the typed TOML value, with keyboard focus and help text.
 - Project task runner slice (#89): `tasks.toml` schema, dependency validation, palette Run/Stop/Restart
   actions, host explicit program/args, and canonical `task#<id> <name>` session labels.
 - Palette providers slice (#93): focus pane, open saved workspace, and switch theme rows reuse the

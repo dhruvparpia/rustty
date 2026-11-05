@@ -6409,11 +6409,23 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
         .palette
         .as_ref()
         .map_or(0, |p| p.hits().len().min(crate::palette::VISIBLE_ROWS));
+    let overlay_rows = if state.bookmarks_open {
+        bookmark_rows(state).len().min(crate::palette::VISIBLE_ROWS)
+    } else if state.settings_open {
+        crate::settings::settings(&state.cfg)
+            .len()
+            .min(crate::palette::VISIBLE_ROWS)
+    } else {
+        0
+    };
     let strip = if state.palette.is_some() {
         let row_h = palette_row_height(m.cell_height);
         (row_h * (1 + palette_rows) as f32).min(client_h.max(0.0))
     } else if state.search.is_some() || state.renaming.is_some() {
         SEARCH_BAR_HEIGHT.min(client_h.max(0.0))
+    } else if overlay_rows > 0 {
+        let row_h = palette_row_height(m.cell_height);
+        (row_h * (1 + overlay_rows) as f32).min(client_h.max(0.0))
     } else {
         0.0
     };
@@ -6442,6 +6454,10 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
         palette_bounds: None,
         palette_query: None,
         palette_matches: None,
+        settings_bounds: None,
+        settings_selected: None,
+        settings_input: None,
+        settings_label: None,
     };
     let mut caption = [0u16; 512];
     let n = usize::try_from(unsafe { GetWindowTextW(hwnd, &mut caption) }).unwrap_or(0);
@@ -6521,6 +6537,15 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
         snap.palette_bounds = Some((0.0, (client_h - strip).max(0.0), client_w, client_h));
         snap.palette_query = Some(p.query.clone());
         snap.palette_matches = Some((p.current, p.hits().len()));
+    }
+    if state.settings_open {
+        let settings = crate::settings::settings(&state.cfg);
+        let total = settings.len();
+        let sel = state.settings_sel.min(total.saturating_sub(1));
+        snap.settings_bounds = Some((0.0, (client_h - strip).max(0.0), client_w, client_h));
+        snap.settings_selected = Some((sel, total));
+        snap.settings_input = Some(state.settings_input.clone());
+        snap.settings_label = settings.get(sel).map(|st| st.label().clone());
     }
     Some(snap)
 }
