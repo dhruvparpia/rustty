@@ -6,6 +6,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [0.6.0] - unreleased feature work
 
+Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. Feature work targets minors. `packaging/check-release.ps1` checks tag/version/SHA and CI fetches tags and runs it for `v0.5.1`.
+
 ### Added
 
 - Copper native dark/light skins, independent UI color overrides, native caption

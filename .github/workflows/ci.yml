@@ -37,6 +37,12 @@ jobs:
       - name: Linux cross-check
         run: cargo check --target x86_64-unknown-linux-gnu --all-targets
 
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      - name: Release tag check
+        run: pwsh packaging/check-release.ps1 -Tag v0.5.1
+
       - name: Portable ZIP
         run: pwsh packaging/build-portable.ps1
 

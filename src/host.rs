@@ -2720,4 +2720,12 @@ mod tests {
         let v = json!({"method": "session.terminate", "params": {"alias": alias}, "id": 2});
         server::handle(&app, &v, &conn);
     }
+    #[test]
+    fn protocol_and_persistence_versions_are_independent() {
+        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(SCHEMA, "host-session/v1".to_string());
+        assert_eq!(SNAPSHOT_SCHEMA, "host-snapshot/v1".to_string());
+        assert_eq!(crate::tasks::VERSION, 1);
+        assert_eq!(crate::workspace::VERSION, 1);
+    }
 }
