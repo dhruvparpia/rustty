@@ -42,6 +42,11 @@ Compatible repair line; `v0.5.0` remains immutable and is not moved.
 
 ### Added
 
+- Cross-platform desktop requirements baseline (#95–#100): SPEC §9.33 incorporates
+  a normative platform SRS with Unix PTY/session, frontend, integration and release
+  contracts; acceptance traceability records unrun macOS/Linux qualification.
+  This documentation amendment preserves Windows MVP scope and adds no backend.
+
 - Large-output slice 2 (#53): search result context lines (`[search] context-lines`),
   a bookmark overlay anchored to absolute history lines with eviction marking,
   and streaming selection/last-command export through a native Save As dialog.

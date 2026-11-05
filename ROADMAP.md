@@ -7,6 +7,16 @@ The owner-approved next-work sequence is recorded in
 [Post-v0.5 — Daily-driver excellence and project workflows](#post-v05--daily-driver-excellence-and-project-workflows)
 and [master backlog #45](https://github.com/dhruvparpia/rustty/issues/45).
 
+## Cross-platform desktop feature track (post-MVP)
+
+Owner-requested epic [#95](https://github.com/dhruvparpia/rustty/issues/95) is a
+separate unscheduled track: #96 platform boundaries, #97 Unix PTY/host/attach,
+#98 macOS frontend, #99 macOS qualification and #100 Linux desktop support.
+Requirements are in [the platform SRS](docs/srs-cross-platform.md); acceptance
+evidence is tracked in [its validation matrix](docs/validation-cross-platform.md).
+Windows 1.0 qualification (#94) remains independent. Branch creation, portable
+tests and historical stretch labels do not establish a working platform port.
+
 ## v0.1 — MVP
 
 A native Windows terminal that developers use daily.
