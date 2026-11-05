@@ -25,6 +25,7 @@ A changed candidate gets a new identifier, e.g. `0.6.0-beta.1`, `0.6.0-beta.2`, 
 - tag exists;
 - tag version matches `Cargo.toml` at that commit;
 - no duplicate tag names;
-- optional local ZIP SHA matches its `.sha256`.
+- optional local ZIP SHA matches its `.sha256`;
+- with `-Remote`, GitHub reports the release immutable and the asset digest matches.
 
 CI fetches tags and runs this check for `v0.5.1`. It does not replace or retag an immutable release.
