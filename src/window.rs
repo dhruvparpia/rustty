@@ -3018,18 +3018,6 @@ fn settings_rows(s: &WindowState) -> Vec<(bool, String)> {
         .collect()
 }
 
-/// Plain top-level scalar key for a setting; table/profile rows stay later.
-fn plain_key(setting: &crate::settings::Setting) -> Option<String> {
-    let name = setting.name.clone();
-    if name == "tab-bar.visible" {
-        return Some("tab-bar".to_string());
-    }
-    if name.contains('.') {
-        return None;
-    }
-    Some(name.clone())
-}
-
 /// #91: open the in-app settings overlay at setting `idx`.
 fn open_settings_overlay(hwnd: HWND, idx: usize) {
     let Some(s) = state_mut(hwnd) else {
@@ -3141,16 +3129,47 @@ fn handle_settings_keydown(hwnd: HWND, vk: u16) {
                 return;
             }
             let st = settings[s.settings_sel].clone();
-            let Some(key) = plain_key(&st) else {
-                show_message(hwnd, "table/profile settings are a later slice");
-                return;
-            };
+            let name = st.name.clone();
             let Some(path) = crate::config::config_path() else {
                 show_message(hwnd, "no config path");
                 return;
             };
             let value = s.settings_input.clone();
-            let result = crate::settings::replace_plain(&path, key.clone(), value);
+            let result = if name == "tab-bar.visible" {
+                crate::settings::replace_plain(&path, "tab-bar".to_string(), value.clone())
+            } else if let Some(stripped) = name.strip_prefix("profile.") {
+                let rest = stripped.to_string();
+                let Some(profile) = s.cfg.profiles.iter().find(|p| {
+                    let prefix = format!("{}.", p.name).to_string();
+                    rest.starts_with(&prefix)
+                }) else {
+                    show_message(hwnd, "profile setting target not found");
+                    return;
+                };
+                let prefix = format!("{}.", profile.name).to_string();
+                let field = rest[prefix.len()..].to_string();
+                crate::settings::replace_profile(
+                    &path,
+                    profile.name.clone(),
+                    field.clone(),
+                    value.clone(),
+                )
+            } else if name.contains('.') {
+                let Some(dot) = name.find('.') else {
+                    show_message(hwnd, "setting has no table key");
+                    return;
+                };
+                let section = name[..dot].to_string();
+                let field = name[dot + 1..].to_string();
+                crate::settings::replace_section(
+                    &path,
+                    format!("[{}]", section).to_string(),
+                    field.clone(),
+                    value.clone(),
+                )
+            } else {
+                crate::settings::replace_plain(&path, name.clone(), value.clone())
+            };
             if let Err(e) = result {
                 show_message(hwnd, &format!("settings write failed: {e}"));
                 return;

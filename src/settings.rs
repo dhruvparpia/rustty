@@ -370,6 +370,156 @@ pub fn replace_plain(path: &Path, key: String, value: String) -> std::io::Result
     write_text_atomic(path, new_text)
 }
 
+/// Atomic `[section] key` edit for table settings (#91).
+#[allow(
+    dead_code,
+    clippy::cmp_owned,
+    clippy::needless_range_loop,
+    reason = "line editor compares borrowed strings and indexes lines"
+)]
+pub fn replace_section(
+    path: &Path,
+    header: String,
+    key: String,
+    value: String,
+) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let lines = text.lines().map(|s| s.to_string()).collect::<Vec<String>>();
+    let Some(start) = lines
+        .iter()
+        .position(|line| line.trim().to_string() == header)
+    else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("section {} not found", header).to_string(),
+        ));
+    };
+    let mut end = start + 1;
+    while end < lines.len() && !lines[end].trim().starts_with('[') {
+        end += 1;
+    }
+    let mut found = false;
+    let mut out = Vec::new();
+    for i in 0..lines.len() {
+        let line = lines[i].clone();
+        if i > start && i < end {
+            let Some(eq) = line.find('=') else {
+                out.push(line.clone());
+                continue;
+            };
+            let name = line[..eq].to_string().trim().to_string();
+            if !found && name == key {
+                found = true;
+                let rest = line[eq + 1..].to_string();
+                let comment = match rest.find('#') {
+                    Some(c) => rest[c..].to_string(),
+                    None => String::new(),
+                };
+                let head = line[..eq + 1].to_string().trim_end().to_string();
+                out.push(
+                    format!("{} {} {}", head, value, comment)
+                        .trim_end()
+                        .to_string(),
+                );
+            } else {
+                out.push(line.clone());
+            }
+        } else {
+            out.push(line.clone());
+        }
+    }
+    if !found {
+        out.insert(start + 1, format!("{} = {}", key, value).to_string());
+    }
+    let new_text = format!("{}\n", out.join("\n")).to_string();
+    write_text_atomic(path, new_text)
+}
+
+/// Atomic `[[profile]]` key edit for profile settings (#91).
+#[allow(
+    dead_code,
+    clippy::cmp_owned,
+    clippy::needless_range_loop,
+    reason = "line editor compares borrowed strings and indexes lines"
+)]
+pub fn replace_profile(
+    path: &Path,
+    profile: String,
+    key: String,
+    value: String,
+) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let lines = text.lines().map(|s| s.to_string()).collect::<Vec<String>>();
+    let profile_line = format!("name = {:?}", profile).to_string();
+    let mut block_start = None;
+    let mut block_end = None;
+    let mut i = 0usize;
+    while i < lines.len() {
+        if lines[i].trim().to_string() == "[[profile]]" {
+            let mut end = i + 1;
+            while end < lines.len() && !lines[end].trim().starts_with('[') {
+                end += 1;
+            }
+            let mut has_name = false;
+            for j in i + 1..end {
+                if lines[j].trim().to_string() == profile_line {
+                    has_name = true;
+                    break;
+                }
+            }
+            if has_name {
+                block_start = Some(i);
+                block_end = Some(end);
+                break;
+            }
+        }
+        i += 1;
+    }
+    if block_start.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("profile {:?} not found", profile).to_string(),
+        ));
+    }
+    let start = block_start.unwrap_or(0);
+    let end = block_end.unwrap_or(lines.len());
+    let mut found = false;
+    let mut out = Vec::new();
+    for i in 0..lines.len() {
+        let line = lines[i].clone();
+        if i > start && i < end {
+            let Some(eq) = line.find('=') else {
+                out.push(line.clone());
+                continue;
+            };
+            let name = line[..eq].to_string().trim().to_string();
+            if !found && name == key {
+                found = true;
+                let rest = line[eq + 1..].to_string();
+                let comment = match rest.find('#') {
+                    Some(c) => rest[c..].to_string(),
+                    None => String::new(),
+                };
+                let head = line[..eq + 1].to_string().trim_end().to_string();
+                out.push(
+                    format!("{} {} {}", head, value, comment)
+                        .trim_end()
+                        .to_string(),
+                );
+            } else {
+                out.push(line.clone());
+            }
+        } else {
+            out.push(line.clone());
+        }
+    }
+    if !found {
+        out.insert(start + 1, format!("{} = {}", key, value).to_string());
+    }
+    let new_text = format!("{}\n", out.join("\n")).to_string();
+    write_text_atomic(path, new_text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,6 +621,49 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).expect("read"),
             "# head\nfont = \"Cascadia Mono\"\n[window]\ncols = 80\n",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn replace_section_preserves_the_comment() {
+        let dir =
+            std::env::temp_dir().join(format!("rustty-settings-section-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[window]\ncols = 80 # keep\nrows = 24\n").expect("seed");
+        replace_section(
+            &path,
+            "[window]".to_string(),
+            "cols".to_string(),
+            "120".to_string(),
+        )
+        .expect("edit");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "[window]\ncols = 120 # keep\nrows = 24\n",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replace_profile_preserves_the_comment() {
+        let dir =
+            std::env::temp_dir().join(format!("rustty-settings-profile-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[[profile]]\nname = \"Git Bash\"\nconfirm-close = false # keep\n\n[[profile]]\nname = \"PowerShell\"\n").expect("seed");
+        replace_profile(
+            &path,
+            "Git Bash".to_string(),
+            "confirm-close".to_string(),
+            "true".to_string(),
+        )
+        .expect("edit");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "[[profile]]\nname = \"Git Bash\"\nconfirm-close = true # keep\n\n[[profile]]\nname = \"PowerShell\"\n",
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
