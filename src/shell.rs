@@ -97,7 +97,54 @@ pub struct SpawnOptions {
     pub env: BTreeMap<String, String>,
 }
 
+/// `current` with `dir` added last, or `None` when `dir` is already there.
+/// Letter case and a trailing backslash don't count as a difference.
+#[must_use]
+pub fn path_with_dir(current: &str, dir: &str) -> Option<String> {
+    let same = |entry: &str| {
+        entry
+            .trim_end_matches('\\')
+            .eq_ignore_ascii_case(dir.trim_end_matches('\\'))
+    };
+    if current.split(';').any(same) {
+        return None;
+    }
+    let current = current.trim_end_matches(';');
+    if current.is_empty() {
+        Some(dir.to_string())
+    } else {
+        Some(format!("{current};{dir}"))
+    }
+}
+
+/// The folder holding the running executable.
+#[must_use]
+pub fn own_exe_dir() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.to_string_lossy().into_owned())
+}
+
 impl SpawnOptions {
+    /// Add `dir` to the end of this shell's PATH, so the `rustty` commands work
+    /// inside it without installing anything. Only this shell's environment
+    /// changes. A profile's own PATH is extended rather than replaced, and
+    /// `inherited_path` is the starting point otherwise.
+    pub fn add_own_dir(&mut self, dir: &str, inherited_path: &str) {
+        let key = self
+            .env
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case("PATH"))
+            .cloned();
+        let current = key
+            .as_ref()
+            .and_then(|key| self.env.get(key))
+            .map_or(inherited_path, String::as_str);
+        if let Some(path) = path_with_dir(current, dir) {
+            self.env
+                .insert(key.unwrap_or_else(|| "PATH".to_string()), path);
+        }
+    }
+
     /// Options for `program` (no args) at `cols` x `rows`.
     pub fn new(program: impl Into<String>, cols: usize, rows: usize) -> Self {
         Self {
@@ -458,6 +505,12 @@ impl Shell {
     /// `Spawning`/`Running`/`Inactive` transitions.
     #[cfg(windows)]
     fn attach_console(&mut self, opts: &SpawnOptions) -> Result<(), ShellError> {
+        // Every local shell passes through here: tabs, splits and restored panes.
+        let mut opts = opts.clone();
+        if let Some(dir) = own_exe_dir() {
+            opts.add_own_dir(&dir, &std::env::var("PATH").unwrap_or_default());
+        }
+        let opts = &opts;
         let spawn_err = |e: std::io::Error| ShellError::Spawn {
             program: opts.program.clone(),
             source: e,
@@ -1216,5 +1269,64 @@ mod tests {
             quote_for_drop(ShellFamily::Other, r"C:\x y\file.txt"),
             r" C:\x y\file.txt"
         );
+    }
+
+    #[test]
+    fn dir_is_appended_last() {
+        // Break caught: rustty's folder shadowing a rustty the user installed.
+        assert_eq!(
+            path_with_dir(r"C:\a;C:\b", r"C:\r"),
+            Some(r"C:\a;C:\b;C:\r".to_string())
+        );
+    }
+
+    #[test]
+    fn existing_dir_is_not_added_twice() {
+        // Break caught: PATH growing in every nested shell.
+        assert_eq!(path_with_dir(r"C:\A\;C:\b", r"c:\a"), None);
+        assert_eq!(path_with_dir(r"C:\a;C:\b", r"C:\B\"), None);
+    }
+
+    #[test]
+    fn empty_path_gets_just_the_dir() {
+        assert_eq!(path_with_dir("", r"C:\r"), Some(r"C:\r".to_string()));
+    }
+
+    #[test]
+    fn a_trailing_separator_does_not_leave_an_empty_entry() {
+        assert_eq!(
+            path_with_dir(r"C:\a;", r"C:\r"),
+            Some(r"C:\a;C:\r".to_string())
+        );
+    }
+
+    #[test]
+    fn profile_path_is_extended_whatever_its_case() {
+        // Break caught: a second Path variable, or losing the profile's own.
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.env.insert("Path".to_string(), r"C:\mine".to_string());
+        opts.add_own_dir(r"C:\r", r"C:\inherited");
+        assert_eq!(opts.env.len(), 1);
+        assert_eq!(
+            opts.env.get("Path").map(String::as_str),
+            Some(r"C:\mine;C:\r")
+        );
+    }
+
+    #[test]
+    fn without_a_profile_path_the_inherited_one_is_extended() {
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.add_own_dir(r"C:\r", r"C:\inherited");
+        assert_eq!(
+            opts.env.get("PATH").map(String::as_str),
+            Some(r"C:\inherited;C:\r")
+        );
+    }
+
+    #[test]
+    fn a_path_that_already_has_the_dir_is_left_alone() {
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.add_own_dir(r"C:\r", r"C:\inherited;C:\r");
+        assert!(opts.env.is_empty());
     }
 }

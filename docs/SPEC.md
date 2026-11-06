@@ -498,6 +498,7 @@ Splits are not MVP, but are required for Ghostty-like parity.
 | SHELL-019 | The terminal shall support starting shell in a user-defined working directory. | P0 |
 | SHELL-020 | The terminal shall support `~`, `%USERPROFILE%`, and Windows paths appropriately. | P0 |
 | SHELL-021 | The terminal shall pass environment variables to the shell. | P0 |
+| SHELL-029 | The terminal shall add its own folder to the end of the PATH of every shell it starts, unless already present, without changing any persistent setting. | P1 |
 | SHELL-022 | The terminal shall avoid injecting unsafe environment variables into shells. | P0 |
 
 Recommended shell defaults:

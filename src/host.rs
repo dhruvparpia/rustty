@@ -878,6 +878,10 @@ pub mod server {
             // Self-attach prevention (attach ADR): a shell started by the
             // host knows its alias and refuses to attach to its own session.
             opts.env.insert("RUSTTY_SESSION".into(), alias.to_string());
+            // The host sits beside rustty.exe, so its shells get the same PATH.
+            if let Some(dir) = crate::shell::own_exe_dir() {
+                opts.add_own_dir(&dir, &std::env::var("PATH").unwrap_or_default());
+            }
             let job = create_kill_job().map_err(|e| Fail::Code("internal", e.to_string()))?;
             let spawned = ConPty::spawn(
                 &opts.program,

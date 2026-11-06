@@ -40,6 +40,8 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Added
 
+- Shells started by rustty get its folder at the end of their PATH, so `rustty` commands
+  work inside them with a portable install. Nothing persistent changes.
 - Symbols Nerd Font Mono v3.5.1 is embedded as a fallback, so prompt icons work with no
   setup. It adds about 2.6 MB to the executable. A chosen font that has the glyph keeps it.
 
