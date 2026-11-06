@@ -43,6 +43,8 @@ pub(super) struct Binding {
     /// `automation-writes` as it was when the window started. A file edit can't
     /// grant anything to a running window (AUTO-007).
     writes: bool,
+    /// `automation-reads`, the same way.
+    reads: bool,
 }
 
 /// Start this window's server. A failure only costs this window its automation:
@@ -50,7 +52,7 @@ pub(super) struct Binding {
 pub(super) fn start(hwnd: HWND) {
     let Some(s) = state_mut(hwnd) else { return };
     let id = next_id();
-    let writes = s.cfg.automation_writes;
+    let (writes, reads) = (s.cfg.automation_writes, s.cfg.automation_reads);
     match Server::start(id, s.quick, discovery_dir_from_env()) {
         Ok(server) => {
             s.app.set_window_id(Some(id));
@@ -61,6 +63,7 @@ pub(super) fn start(hwnd: HWND) {
                 id,
                 epoch: Instant::now(),
                 writes,
+                reads,
             });
         }
         Err(e) => eprintln!("rustty: automation is off for this window: {e}"),
@@ -69,7 +72,11 @@ pub(super) fn start(hwnd: HWND) {
 
 /// What the sidebar's heading says about this window's automation grants.
 pub(super) fn rail_heading(s: &WindowState) -> &'static str {
-    crate::rail::heading(s.automation.as_ref().is_some_and(|b| b.writes))
+    let (writes, reads) = s
+        .automation
+        .as_ref()
+        .map_or((false, false), |b| (b.writes, b.reads));
+    crate::rail::heading(writes, reads)
 }
 
 /// The dispatcher's view of this window. It holds no borrow of the window state:
@@ -79,6 +86,7 @@ struct WindowHost {
     id: u64,
     token: Option<Arc<Token>>,
     writes: bool,
+    reads: bool,
 }
 
 fn window_closed(id: u64) -> RpcError {
@@ -100,6 +108,10 @@ impl WindowOps for WindowHost {
 
     fn writes_allowed(&self) -> bool {
         self.writes
+    }
+
+    fn reads_allowed(&self) -> bool {
+        self.reads
     }
 
     fn token(&self) -> Option<&Token> {
@@ -381,6 +393,7 @@ pub(super) fn tick(hwnd: HWND) {
         id: binding.id,
         token: binding.token.clone(),
         writes: binding.writes,
+        reads: binding.reads,
     };
     let epoch = binding.epoch;
     server.reap();

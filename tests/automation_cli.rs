@@ -84,6 +84,11 @@ fn ctl_help_succeeds_and_documents_the_exit_codes() {
         text.contains("target-stale") && text.contains("watch"),
         "{text}"
     );
+    // A refused `list` must leave someone able to find out why.
+    assert!(
+        text.contains("automation-reads") && text.contains("automation-writes"),
+        "{text}"
+    );
 }
 
 #[test]

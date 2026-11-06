@@ -923,7 +923,7 @@ impl Renderer {
             caption_height: 0.0,
             rail_width: 0.0,
             rail_rows: Vec::new(),
-            rail_heading: rail::heading(false),
+            rail_heading: rail::heading(false, false),
             board: None,
             rail_placed: Vec::new(),
             rail_hover: rail::Hit::None,

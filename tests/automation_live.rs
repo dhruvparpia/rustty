@@ -445,7 +445,10 @@ fn a_boss_can_run_a_session_with_the_sidebar_off() {
 fn editing_the_config_never_turns_writes_on() {
     // Break caught: an agent that can write a file granting itself writes, with
     // no restart and nothing for the person to notice (AUTO-007).
-    let window = TestWindow::start("hot-reload", BASE_CONFIG);
+    let window = TestWindow::start(
+        "hot-reload",
+        &format!("{BASE_CONFIG}automation-reads = true\n"),
+    );
     window.entry();
     let refused = window.ctl(&["open"]);
     assert_eq!(refused.status.code(), Some(4), "{refused:?}");
@@ -575,7 +578,48 @@ fn stale_and_wrong_tokens_get_no_writes_on_a_real_window() {
     assert_eq!(init["window"], entry.id);
     let error = transport.call("tab.open", json!({})).expect_err("refused");
     assert_eq!(error.code, ErrorCode::DeniedGrant);
-    assert!(transport.call("list", json!({})).is_ok());
+    let error = transport.call("list", json!({})).expect_err("refused");
+    assert_eq!(error.code, ErrorCode::DeniedGrant);
+}
+
+#[test]
+#[ignore = "opens a window; run by hand"]
+fn reads_need_a_grant_on_a_real_window_and_editing_the_file_doesnt_give_one() {
+    // Break caught: anything running as this user reading every session's screen.
+    let window = TestWindow::start("reads", BASE_CONFIG);
+    window.entry();
+    let refused = window.ctl(&["list"]);
+    assert_eq!(refused.status.code(), Some(4), "{refused:?}");
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(said.contains("automation-reads"), "{said}");
+    assert_eq!(said.lines().count(), 1, "{said}");
+    assert!(window.ctl(&["capabilities"]).status.success());
+    let refused = window.ctl(&["watch"]);
+    assert_eq!(refused.status.code(), Some(4), "{refused:?}");
+
+    // Two seconds is many polls of the file; the writes test proves one lands.
+    write_config(
+        &window.scratch,
+        &format!("{BASE_CONFIG}automation-reads = true\n"),
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    let refused = window.ctl(&["list"]);
+    assert_eq!(refused.status.code(), Some(4), "{refused:?}");
+
+    // A window started with the key has it.
+    let granted = TestWindow::start(
+        "reads-on",
+        &format!("{BASE_CONFIG}automation-reads = true\n"),
+    );
+    granted.entry();
+    let listed = json_of(&granted.ctl(&["--json", "list"]));
+    assert!(
+        listed["tabs"]
+            .as_array()
+            .is_some_and(|tabs| !tabs.is_empty())
+    );
+    let refused = granted.ctl(&["open"]);
+    assert_eq!(refused.status.code(), Some(4), "{refused:?}");
 }
 
 #[test]

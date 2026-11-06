@@ -303,9 +303,11 @@ pub fn project_of(cwd: Option<&str>) -> String {
 /// The sidebar's heading. While a config key has opened this window to every
 /// local client, it says so where the person can see it (AUTO-007).
 #[must_use]
-pub const fn heading(writes: bool) -> &'static str {
+pub const fn heading(writes: bool, reads: bool) -> &'static str {
     if writes {
         "rustty \u{b7} automation on"
+    } else if reads {
+        "rustty \u{b7} automation reads on"
     } else {
         "rustty"
     }
@@ -780,8 +782,10 @@ mod tests {
     fn the_heading_says_when_a_config_key_opened_this_window() {
         // Break caught: a window every local client can write to, looking like any
         // other window.
-        assert_eq!(heading(false), "rustty");
-        assert!(heading(true).contains("automation on"));
+        assert_eq!(heading(false, false), "rustty");
+        assert!(heading(true, false).contains("automation on"));
+        assert!(heading(true, true).contains("automation on"));
+        assert!(heading(false, true).contains("reads on"));
     }
 
     #[test]

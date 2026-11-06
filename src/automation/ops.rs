@@ -13,9 +13,9 @@ use serde_json::{Value, json};
 
 use super::events::{Subscriptions, Tracker};
 use super::{
-    ErrorCode, OPERATIONS, OpSpec, PAGE_TEXT_BYTES, PROTOCOL_VERSION, READ_TIME_BUDGET, RpcError,
-    SEND_BURST_BYTES, Token, TokenBucket, can_write, capabilities, decode_cursor, encode_cursor,
-    error_frame, negotiate, read_lines, read_lines_while, time_box,
+    ErrorCode, Grant, OPERATIONS, OpSpec, PAGE_TEXT_BYTES, PROTOCOL_VERSION, READ_TIME_BUDGET,
+    RpcError, SEND_BURST_BYTES, Token, TokenBucket, can_read, can_write, capabilities,
+    decode_cursor, encode_cursor, error_frame, negotiate, read_lines, read_lines_while, time_box,
 };
 use crate::app::App;
 use crate::pane::Pane;
@@ -54,6 +54,9 @@ pub trait WindowOps {
     /// The `automation-writes` config key, as it was when the window started. It
     /// never changes while the window runs (AUTO-007).
     fn writes_allowed(&self) -> bool;
+    /// The `automation-reads` config key, as it was when the window started. It
+    /// never changes while the window runs (AUTO-007).
+    fn reads_allowed(&self) -> bool;
     /// This window's write token, when one could be generated.
     fn token(&self) -> Option<&Token>;
     /// The project heading for a pane whose folder is unknown.
@@ -223,11 +226,22 @@ impl Dispatcher {
             return Err(RpcError::bad_params("send initialize first"));
         }
         // The grant comes first, so a refused client learns nothing about targets.
-        if op.write && !can_write(win.writes_allowed(), state.token_ok) {
+        if op.grant == Grant::Write && !can_write(win.writes_allowed(), state.token_ok) {
             return Err(RpcError::new(
                 ErrorCode::DeniedGrant,
                 format!(
-                    "{method} needs a write grant: set automation-writes = true, \
+                    "{method} needs a write grant: start the window with automation-writes = \
+                     true, or connect with this window's token"
+                ),
+            ));
+        }
+        if op.grant == Grant::Read
+            && !can_read(win.reads_allowed(), win.writes_allowed(), state.token_ok)
+        {
+            return Err(RpcError::new(
+                ErrorCode::DeniedGrant,
+                format!(
+                    "{method} needs a read grant: start the window with automation-reads = true, \
                      or connect with this window's token"
                 ),
             ));
@@ -235,7 +249,7 @@ impl Dispatcher {
         check_params(op, params)?;
         let token_ok = state.token_ok;
         // Only the config key reaches everything; a token reaches what it opened.
-        let token_only = op.write && !win.writes_allowed();
+        let token_only = op.grant == Grant::Write && !win.writes_allowed();
         if token_only {
             self.check_token_scope(op, params)?;
         }
@@ -362,7 +376,10 @@ impl Dispatcher {
             "serverProtocolVersion": PROTOCOL_VERSION,
             "capabilities": capabilities(),
             "window": win.window_id(),
-            "grants": {"writes": can_write(win.writes_allowed(), state.token_ok)},
+            "grants": {
+                "writes": can_write(win.writes_allowed(), state.token_ok),
+                "reads": can_read(win.reads_allowed(), win.writes_allowed(), state.token_ok),
+            },
             "serverVersion": env!("CARGO_PKG_VERSION"),
         }))
     }
@@ -766,6 +783,7 @@ pub(crate) mod testkit {
     pub(crate) struct FakeWindow {
         pub app: App,
         pub allow_writes: bool,
+        pub allow_reads: bool,
         pub token: Option<Token>,
         pub sent: Vec<(u64, Vec<u8>)>,
         pub opened: Vec<SpawnRequest>,
@@ -785,6 +803,7 @@ pub(crate) mod testkit {
             Self {
                 app: App::with_size(cols, rows, scrollback),
                 allow_writes: false,
+                allow_reads: true,
                 token: None,
                 sent: Vec::new(),
                 opened: Vec::new(),
@@ -812,6 +831,10 @@ pub(crate) mod testkit {
 
         fn writes_allowed(&self) -> bool {
             self.allow_writes
+        }
+
+        fn reads_allowed(&self) -> bool {
+            self.allow_reads
         }
 
         fn token(&self) -> Option<&Token> {

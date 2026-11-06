@@ -26,6 +26,8 @@ usage: rustty ctl [--window <id>] [--json] <verb>
   read <pane> [--scrollback [--cursor <c>] [--all]]
   send <pane> [--enter] <text>... | send <pane> [--enter] --stdin
   watch [--pane <pane>] [--events <a,b>]
+Reading needs a window started with automation-reads = true or automation-writes =
+true, and writing the second. A window reads these once, when it starts.
 With no --window and several windows open it fails and lists them, unless
 RUSTTY_WINDOW names one. Exit codes: 0 ok, 1 internal, 2 usage/bad-params,
 3 target-stale, 4 denied-grant, 5 no-instance, 6 protocol-mismatch,

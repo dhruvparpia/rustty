@@ -843,6 +843,10 @@ pub struct Config {
     /// it starts: a reload never changes what a running window grants.
     #[serde(rename = "automation-writes", default)]
     pub automation_writes: bool,
+    /// AUTO-007: let any local client of this user list sessions, read their
+    /// screens and subscribe to their events. Read once, as `automation-writes` is.
+    #[serde(rename = "automation-reads", default)]
+    pub automation_reads: bool,
     /// WELCOME-001: show the crab banner when rustty starts.
     #[serde(default = "default_true")]
     pub welcome: bool,
@@ -908,6 +912,7 @@ impl Default for Config {
             welcome: true,
             session_rail: true,
             automation_writes: false,
+            automation_reads: false,
             shell_integration: false,
             command_notify_ms: default_notify_ms(),
             detach_prefix: default_detach_prefix(),
@@ -944,6 +949,7 @@ impl PartialEq for Config {
             && self.welcome == other.welcome
             && self.session_rail == other.session_rail
             && self.automation_writes == other.automation_writes
+            && self.automation_reads == other.automation_reads
             && self.shell_integration == other.shell_integration
             && self.command_notify_ms == other.command_notify_ms
             && self.detach_prefix == other.detach_prefix

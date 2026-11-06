@@ -400,6 +400,125 @@ fn the_config_key_can_answer_a_wait() {
     ok(&send_to(&mut d, &mut w, pane));
 }
 
+/// A connection with no grant of any kind.
+fn no_grant() -> (Dispatcher, FakeWindow) {
+    let mut d = Dispatcher::new();
+    let mut w = FakeWindow::new();
+    w.allow_reads = false;
+    connect(&mut d, &mut w, CLIENT);
+    (d, w)
+}
+
+fn read_ops(w: &FakeWindow) -> [(&'static str, Value); 3] {
+    [
+        ("list", json!({})),
+        ("pane.read", json!({"pane": first_pane(w)})),
+        ("events.subscribe", json!({})),
+    ]
+}
+
+#[test]
+fn reads_need_a_grant_and_the_handshake_doesnt() {
+    // Break caught: anything running as this user reading every session's screen,
+    // which can hold anything ever printed there.
+    let (mut d, mut w) = no_grant();
+    for (method, params) in read_ops(&w) {
+        let error = err(&call(&mut d, &mut w, CLIENT, method, params));
+        assert_eq!(error.code, ErrorCode::DeniedGrant, "{method}");
+        assert!(
+            error.message.contains("automation-reads"),
+            "{method}: {}",
+            error.message
+        );
+        assert_eq!(error.message.lines().count(), 1, "{method}");
+    }
+    assert!(!d.has_subscribers());
+    for method in ["capabilities", "events.unsubscribe"] {
+        let frame = call(&mut d, &mut w, CLIENT, method, json!({}));
+        assert!(frame.get("result").is_some(), "{method}: {frame}");
+    }
+}
+
+#[test]
+fn a_refused_read_learns_nothing_about_targets() {
+    let (mut d, mut w) = no_grant();
+    let error = err(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "pane.read",
+        json!({"pane": 987_654}),
+    ));
+    assert_eq!(error.code, ErrorCode::DeniedGrant);
+    let error = err(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "pane.read",
+        json!({"nonsense": true}),
+    ));
+    assert_eq!(error.code, ErrorCode::DeniedGrant);
+}
+
+#[test]
+fn the_reads_key_grants_reads_and_nothing_else() {
+    let (mut d, mut w) = no_grant();
+    w.allow_reads = true;
+    for (method, params) in read_ops(&w) {
+        let frame = call(&mut d, &mut w, CLIENT, method, params);
+        assert!(frame.get("result").is_some(), "{method}: {frame}");
+    }
+    let error = err(&call(&mut d, &mut w, CLIENT, "tab.open", json!({})));
+    assert_eq!(error.code, ErrorCode::DeniedGrant);
+}
+
+#[test]
+fn the_writes_key_also_grants_reads() {
+    let (mut d, mut w) = no_grant();
+    w.allow_writes = true;
+    for (method, params) in read_ops(&w) {
+        let frame = call(&mut d, &mut w, CLIENT, method, params);
+        assert!(frame.get("result").is_some(), "{method}: {frame}");
+    }
+}
+
+#[test]
+fn the_token_grants_reads_of_the_whole_window() {
+    // A boss has to see the sessions it didn't open to report on them.
+    let (mut d, mut w) = token_only();
+    w.allow_reads = false;
+    for (method, params) in read_ops(&w) {
+        let frame = call(&mut d, &mut w, CLIENT, method, params);
+        assert!(frame.get("result").is_some(), "{method}: {frame}");
+    }
+}
+
+#[test]
+fn initialize_reports_the_read_grant() {
+    let mut d = Dispatcher::new();
+    let mut w = FakeWindow::new();
+    w.allow_reads = false;
+    let result = ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "initialize",
+        json!({"protocolVersion": 1}),
+    ));
+    assert_eq!(result["grants"]["reads"], false);
+    assert_eq!(result["grants"]["writes"], false);
+    let mut d = Dispatcher::new();
+    w.allow_writes = true;
+    let result = ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "initialize",
+        json!({"protocolVersion": 1}),
+    ));
+    assert_eq!(result["grants"]["reads"], true);
+}
+
 #[test]
 fn a_session_cant_be_handed_the_token_through_env() {
     // Break caught: a boss passing its grant to every worker it starts, in any
@@ -442,7 +561,7 @@ fn a_connection_initializes_once() {
 }
 
 #[test]
-fn every_read_works_with_no_grant_and_every_write_is_refused() {
+fn the_reads_key_allows_every_read_and_every_write_is_refused() {
     let (mut d, mut w) = setup();
     let (pane, tab) = (first_pane(&w), first_tab(&w));
     for (method, params) in [
@@ -475,19 +594,20 @@ fn every_read_works_with_no_grant_and_every_write_is_refused() {
 fn the_grant_check_covers_every_write_in_the_table() {
     // Break caught: a new write op added to the table but not gated.
     let (mut d, mut w) = setup();
-    for op in OPERATIONS.iter().filter(|op| op.write) {
+    for op in OPERATIONS.iter().filter(|op| op.grant == Grant::Write) {
         let frame = call(&mut d, &mut w, CLIENT, op.name, json!({}));
         assert_eq!(err(&frame).code, ErrorCode::DeniedGrant, "{}", op.name);
     }
 }
 
 #[test]
-fn the_config_key_grants_every_connection_and_can_be_turned_off() {
+fn the_config_key_grants_every_connection_and_is_asked_on_every_request() {
     let (mut d, mut w) = setup();
     w.allow_writes = true;
     let frame = call(&mut d, &mut w, CLIENT, "tab.open", json!({}));
     assert!(frame.get("result").is_some(), "{frame}");
-    // It takes effect on the next request, including for existing connections.
+    // A real window's answer never changes while it runs (AUTO-007); this only
+    // shows that nothing here remembers one.
     w.allow_writes = false;
     let frame = call(&mut d, &mut w, CLIENT, "tab.open", json!({}));
     assert_eq!(err(&frame).code, ErrorCode::DeniedGrant);

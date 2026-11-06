@@ -166,3 +166,11 @@ JSON-RPC 2.0 (same base as MCP, so the adapter is a thin encoder):
     meaning. A token alone can't `pane.send-text` while the pane shows a permission,
     trust or auth wait; a program reporting one falsely only blocks a write, which is
     the safe direction, and `kind=question` stays answerable.
+15. **Reads need a grant** (§4, which this replaces). A screen can hold anything ever
+    printed in it, so implicit reads let anything running as this user read every
+    session. `list`, `pane.read` and `events.subscribe` now need the token,
+    `automation-reads = true` or `automation-writes = true`; `initialize` and
+    `capabilities` stay open, and so does `events.unsubscribe`, which gives nothing
+    away. `automation-reads` defaults to false and is read once, as in amendment 11.
+    Denied calls get `denied-grant` with one line naming the key. `capabilities`
+    reports each operation's grant as `none`, `read` or `write`.

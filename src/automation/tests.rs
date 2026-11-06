@@ -109,7 +109,15 @@ fn capabilities_list_every_operation_once_with_its_grant() {
             "pane.send-text",
         ]
         .contains(&name);
-        assert_eq!(op["grant"], if write { "write" } else { "none" }, "{name}");
+        let read = ["list", "pane.read", "events.subscribe"].contains(&name);
+        let wanted = if write {
+            "write"
+        } else if read {
+            "read"
+        } else {
+            "none"
+        };
+        assert_eq!(op["grant"], wanted, "{name}");
         assert_eq!(is_write_op(name), write, "{name}");
         assert_eq!(op["params"]["type"], "object", "{name}");
         assert!(

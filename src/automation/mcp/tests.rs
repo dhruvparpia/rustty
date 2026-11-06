@@ -247,7 +247,7 @@ fn every_operation_but_the_handshake_is_a_tool_with_its_own_schema() {
         assert_eq!(tool["description"], op["description"]);
         assert_eq!(
             tool["annotations"]["readOnlyHint"],
-            op["grant"] == "none",
+            op["grant"] != "write",
             "{}",
             tool["name"]
         );

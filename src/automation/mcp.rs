@@ -421,7 +421,7 @@ impl<C: Connector> McpServer<C> {
                     "title": name,
                     "description": op.get("description").cloned().unwrap_or(Value::Null),
                     "inputSchema": op.get("params").cloned().unwrap_or_else(|| json!({"type": "object"})),
-                    "annotations": {"readOnlyHint": op.get("grant").and_then(Value::as_str) == Some("none")},
+                    "annotations": {"readOnlyHint": op.get("grant").and_then(Value::as_str) != Some("write")},
                 })
             })
             .collect()
