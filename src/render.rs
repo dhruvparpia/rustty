@@ -3015,7 +3015,7 @@ impl Renderer {
 fn format_index(attrs: CellAttribute) -> usize {
     let bold = usize::from(attrs.contains(CellAttribute::BOLD));
     let italic = usize::from(attrs.contains(CellAttribute::ITALIC));
-    bold * 2 + italic
+    bold + italic * 2
 }
 
 #[cfg(test)]
@@ -3236,5 +3236,16 @@ mod tests {
         };
         let cell = super::measure_cells(96, &font).expect("metrics").cell_width;
         assert_eq!(cell, cell.ceil());
+    }
+
+    #[test]
+    fn bold_and_italic_pick_the_matching_format() {
+        // Break caught: bold text drawn italic and italic drawn bold. The
+        // formats are built in the order plain, bold, italic, bold-italic.
+        use super::{CellAttribute, format_index};
+        assert_eq!(format_index(CellAttribute::empty()), 0);
+        assert_eq!(format_index(CellAttribute::BOLD), 1);
+        assert_eq!(format_index(CellAttribute::ITALIC), 2);
+        assert_eq!(format_index(CellAttribute::BOLD | CellAttribute::ITALIC), 3);
     }
 }

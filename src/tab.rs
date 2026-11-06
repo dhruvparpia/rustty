@@ -154,6 +154,12 @@ impl Tab {
         self.active.borrow()
     }
 
+    /// A handle to the focused pane that does not keep it alive.
+    #[must_use]
+    pub fn focused_pane_weak(&self) -> std::rc::Weak<RefCell<Pane>> {
+        Rc::downgrade(&self.active)
+    }
+
     /// The focused pane, mutably.
     ///
     /// # Panics

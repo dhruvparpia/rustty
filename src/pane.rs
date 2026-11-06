@@ -376,6 +376,8 @@ pub struct Pane {
     /// Main screen kept while the alternate screen is active (TTY-018).
     main_grid: Option<Grid>,
     in_alt: bool,
+    /// The user has sent input (see [`Pane::input_seen`]).
+    input_seen: bool,
     /// Grid changed since the renderer last asked (repaint hint).
     dirty: bool,
     /// Mouse text selection, in absolute grid coordinates (WIN-004).
@@ -413,6 +415,7 @@ impl Pane {
             bell: false,
             main_grid: None,
             in_alt: false,
+            input_seen: false,
             dirty: true,
             selection: None,
             bookmarks: Vec::new(),
@@ -441,6 +444,7 @@ impl Pane {
             bell: false,
             main_grid: None,
             in_alt: false,
+            input_seen: false,
             dirty: true,
             selection: None,
             bookmarks: Vec::new(),
@@ -766,10 +770,12 @@ impl Pane {
         }
     }
 
-    /// Size the grid before a shell exists, so text can be written at the
-    /// window's real size ahead of the spawn.
+    /// Size a pane nothing has been written to yet, so text can go in at the
+    /// window's real size ahead of the shell. It rebuilds the grid: resizing
+    /// would push the empty top line into scrollback when shrinking, and a
+    /// later grow would bring it back above that text.
     pub fn fit_grid(&mut self, cols: usize, rows: usize) {
-        self.grid.resize(cols, rows);
+        self.grid = Grid::with_size(cols, rows, self.grid.scrollback());
         self.parser.fit(&self.grid);
         self.dirty = true;
     }
@@ -859,7 +865,26 @@ impl Pane {
 
     /// Send keyboard/paste bytes to the shell (TTY-004..TTY-017).
     pub fn send_input(&mut self, bytes: &[u8]) -> Result<(), ShellError> {
+        self.input_seen = true;
         self.shell.write_input(bytes)
+    }
+
+    /// Whether the user has sent this pane any input. Terminal replies do not
+    /// count.
+    #[must_use]
+    pub const fn input_seen(&self) -> bool {
+        self.input_seen
+    }
+
+    /// Whether the pane is showing the alternate screen.
+    #[must_use]
+    pub const fn in_alt(&self) -> bool {
+        self.in_alt
+    }
+
+    /// Ask for a repaint after writing to the grid directly.
+    pub const fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 
     /// Ask the shell to exit cleanly (TTY-024); the exit code arrives later
@@ -1248,6 +1273,17 @@ mod tests {
         pane.grid_mut().scroll_up(2);
         pane.update_follow();
         pane
+    }
+
+    #[test]
+    fn text_written_after_fit_grid_stays_at_the_top_when_the_window_grows() {
+        // Break caught: a shrink pushes the empty top line into scrollback,
+        // and a later grow brings it back above the banner.
+        let mut pane = Pane::with_size(80, 24, 100);
+        pane.fit_grid(77, 23);
+        pane.feed(b"first\r\n");
+        let _ = pane.resize(77, 25);
+        assert_eq!(pane.grid().line_text(0).as_deref(), Some("first"));
     }
 
     #[test]

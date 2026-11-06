@@ -2129,6 +2129,21 @@ pub mod client {
             Self::handshake(open_pipe()?)
         }
 
+        /// How many sessions a running host has live. `None` when no host is
+        /// running or it does not answer: this never starts one.
+        #[must_use]
+        pub fn live_session_count() -> Option<usize> {
+            let mut client = Self::connect_existing().ok()?;
+            let result = client.call("session.list", json!({})).ok()?;
+            let sessions = result.get("sessions")?.as_array()?;
+            Some(
+                sessions
+                    .iter()
+                    .filter(|s| s.get("state").and_then(Value::as_str) == Some("live"))
+                    .count(),
+            )
+        }
+
         /// Connect to the live host, spawning one when none answers;
         /// 50 ms poll, 5 s budget (ADR §1 ready handshake).
         ///

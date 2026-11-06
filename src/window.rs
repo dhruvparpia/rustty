@@ -28,9 +28,12 @@ use std::os::windows::ffi::OsStrExt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
+use std::cell::RefCell;
+use std::rc::Weak;
 use windows::Data::Xml::Dom::XmlDocument;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, ClientToScreen, EndPaint, GetMonitorInfoW, InvalidateRect,
@@ -40,6 +43,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetTickCount64;
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Accessibility::{
     IRawElementProviderSimple, UiaReturnRawElementProvider, UiaRootObjectId,
 };
@@ -65,7 +69,6 @@ use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP,
     SetCurrentProcessExplicitAppUserModelID, ShellExecuteW,
 };
-use windows::Win32::UI::WindowsAndMessaging::WM_SYSKEYUP;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW,
     CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreatePopupMenu, CreateWindowExW, DLGPROC,
@@ -97,6 +100,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_CYSIZEFRAME, SWP_NOMOVE, SWP_NOSIZE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
     WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    WM_SYSKEYUP,
+};
 use windows::core::{ComObject, PCWSTR, Result};
 
 use crate::app::{App, PaneClose};
@@ -123,6 +130,7 @@ use crate::shell::{ShellFamily, SpawnOptions, quote_for_drop, shell_family};
 use crate::split::{Dir, Rect, Side};
 use crate::tabbar::TAB_BAR_HEIGHT;
 use crate::theme::{self, Theme};
+use crate::welcome;
 
 /// SKIN-006: let DWM color the frame and border around the drawn title strip.
 /// Unsupported attributes (Windows 10) fail harmlessly to the system frame.
@@ -163,6 +171,12 @@ const POLL_MS: u32 = 33;
 
 /// Timer id for the shell-output poll.
 const POLL_TIMER: usize = 1;
+
+/// Per-session name of the mutex a GUI process holds.
+const INSTANCE_MUTEX: &str = "Local\\rustty-gui";
+
+/// Timer id for the crab animation.
+const CLACK_TIMER: usize = 21;
 
 /// Timer id for the cursor blink (CONFIG-009).
 const BLINK_TIMER: usize = 2;
@@ -1296,6 +1310,10 @@ struct WindowState {
     menu: Option<HMENU>,
     /// Watches for a lone tap of Alt.
     alt_tap: AltTap,
+    /// This launch shows the banner; cleared once it has.
+    greet: bool,
+    /// The running crab animation and the pane it draws in.
+    clack: Option<(welcome::Clack, Weak<RefCell<Pane>>)>,
     /// Issue #25: high half of a UTF-16 surrogate pair from `WM_CHAR`
     /// (VK_PACKET/IME deliver non-BMP characters as two messages).
     pending_surrogate: Option<u16>,
@@ -1613,7 +1631,14 @@ unsafe extern "system" fn wnd_proc(
         WM_GETMINMAXINFO => {
             let mm = lparam.0 as *mut MINMAXINFO;
             if let (true, Some(s)) = (!mm.is_null(), state_ref(hwnd)) {
-                let (w, h) = px_size(s.metrics, MIN_COLS, MIN_ROWS, s.total_chrome());
+                let (w, h) = px_size(
+                    s.metrics,
+                    MIN_COLS,
+                    MIN_ROWS,
+                    s.total_chrome(),
+                    s.pad_x(),
+                    s.pad_y(),
+                );
                 unsafe { (*mm).ptMinTrackSize = POINT { x: w, y: h } };
             }
             LRESULT(0)
@@ -1903,7 +1928,9 @@ unsafe extern "system" fn wnd_proc(
             }
         }
         WM_TIMER => {
-            if wparam.0 == BLINK_TIMER {
+            if wparam.0 == CLACK_TIMER {
+                clack_tick(hwnd);
+            } else if wparam.0 == BLINK_TIMER {
                 blink_cursor(hwnd);
             } else if wparam.0 == BELL_TIMER {
                 // BELL-003/004: one flash, for a fixed time.
@@ -2101,6 +2128,16 @@ fn init_window(hwnd: HWND) {
     if let Some(s) = state_mut(hwnd) {
         s.renderer = renderer;
         sync_chrome(s);
+        // The renderer starts from the grid size it was asked for. The window
+        // exists by now, so the first shell and banner get its real size.
+        let mut client = RECT::default();
+        if unsafe { GetClientRect(hwnd, &mut client) }.is_ok()
+            && let Some(r) = &mut s.renderer
+            && client.right > 0
+            && client.bottom > 0
+        {
+            r.resize(client.right as u32, client.bottom as u32);
+        }
         s.app.set_palette(s.theme.palette);
         if s.restore.is_some() {
             // TAB-026: rebuild saved tabs; shells spawn after the tab bar
@@ -2124,7 +2161,12 @@ fn init_window(hwnd: HWND) {
                 tab.set_profile(spec.name.clone());
                 tab.set_auto_title(spec.name.clone());
                 tab.set_color(spec.color);
+                if s.greet {
+                    // The banner is written at the window's real size.
+                    tab.pane_mut().fit_grid(cols, rows);
+                }
             }
+            greet_focused_pane(s, &spec.program);
             // Spawn first, then resize: a resize must reach a live ConPTY, and
             // the shell must start at the window's real grid size (NFR-216:
             // these failures are logged, never fatal).
@@ -2157,6 +2199,7 @@ fn init_window(hwnd: HWND) {
         set_title(hwnd, &s.app);
         let _ = unsafe { SetFocus(Some(hwnd)) };
     }
+    clack_tick(hwnd);
     apply_opacity(hwnd);
 }
 
@@ -2229,7 +2272,14 @@ fn dock_quick(quick: HWND, cfg: &Config) {
     }
     let work = info.rcWork;
     // The window rect gets no frame (WS_POPUP), so it is pure grid.
-    let (_, height) = px_size(metrics, 1, cfg.quick_terminal.height, 0.0);
+    let (_, height) = px_size(
+        metrics,
+        1,
+        cfg.quick_terminal.height,
+        0.0,
+        0.0,
+        cfg.window.padding.y as f32,
+    );
     let y = match cfg.quick_terminal.edge {
         QuickEdge::Top => work.top,
         QuickEdge::Bottom => work.bottom - height,
@@ -2307,6 +2357,8 @@ fn create_quick_window() {
         caption_pressed: None,
         menu: None,
         alt_tap: AltTap::default(),
+        greet: false,
+        clack: None,
         search: None,
         palette: None,
         hint: None,
@@ -2531,6 +2583,8 @@ fn spawn_restored(s: &mut WindowState) {
     if let Err(e) = s.app.resize_all_tabs(cols, rows) {
         eprintln!("rustty: restored tab resize failed: {e}");
     }
+    let program = tab_profile(s).program;
+    greet_focused_pane(s, &program);
     for (i, st) in session.tabs.iter().enumerate() {
         let spec = profile_spec_named(s, &st.profile);
         let mut cwds = Vec::new();
@@ -2628,6 +2682,121 @@ fn sync_active_tab_geometry(hwnd: HWND) {
     let width = (rect.right - rect.left).max(0) as u32;
     let height = (rect.bottom - rect.top).max(0) as u32;
     resize_window(hwnd, width, height);
+}
+
+/// Holds a per-user named mutex for the life of the GUI process, so a later
+/// launch can tell another rustty window is open. Each window is its own process.
+struct InstanceGuard(HANDLE);
+
+impl InstanceGuard {
+    /// `None` when another holder exists or the mutex cannot be created.
+    fn acquire(name: &str) -> Option<Self> {
+        let wide = windows::core::HSTRING::from(name);
+        let handle = unsafe { CreateMutexW(None, false, &wide) }.ok()?;
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            let _ = unsafe { CloseHandle(handle) };
+            return None;
+        }
+        Some(Self(handle))
+    }
+}
+
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Whether Windows has animation effects on. Assume yes if it will not say.
+fn animations_enabled() -> bool {
+    let mut enabled = windows::core::BOOL(1);
+    let _ = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(core::ptr::from_mut(&mut enabled).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    enabled.as_bool()
+}
+
+/// Write the banner to the focused pane if this launch greets, and start the
+/// session-count query and the animation. Runs before the pane's shell starts.
+fn greet_focused_pane(s: &mut WindowState, program: &str) {
+    if !std::mem::take(&mut s.greet) {
+        return;
+    }
+    let colors = welcome::Colors::from_theme(&s.theme);
+    let animate = animations_enabled();
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos().into());
+    let Some(tab) = s.app.active_tab_mut() else {
+        return;
+    };
+    let weak = tab.focused_pane_weak();
+    let mut pane = tab.pane_mut();
+    let banner = welcome::Banner {
+        version: env!("CARGO_PKG_VERSION"),
+        cols: pane.grid().cols,
+        rows: pane.grid().rows,
+        exe: welcome::exe_for_program(program),
+        tip: welcome::pick_tip(seed),
+        colors,
+        frame: if animate {
+            welcome::Frame::Open
+        } else {
+            welcome::Frame::Closed
+        },
+    };
+    let Some(text) = banner.render() else {
+        return;
+    };
+    let anchor = pane.grid().live_abs(pane.parser().cursor_row).unwrap_or(0);
+    pane.feed(text.as_bytes());
+    let status_at = (anchor, banner.status_column());
+    drop(pane);
+    // Never delays the shell: the answer is picked up during the animation,
+    // and a late one is dropped.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("rustty-welcome-status".to_string())
+        .spawn(move || {
+            let _ = tx.send(crate::host::client::Client::live_session_count());
+        });
+    let clack = welcome::Clack::new(
+        anchor,
+        colors.foreground,
+        animate,
+        Some(rx),
+        status_at,
+        colors,
+    );
+    s.clack = Some((clack, weak));
+}
+
+/// Advance the crab animation, and remove its timer when it is over.
+fn clack_tick(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some((mut clack, weak)) = s.clack.take() else {
+        let _ = unsafe { KillTimer(Some(hwnd), CLACK_TIMER) };
+        return;
+    };
+    let next = weak
+        .upgrade()
+        .and_then(|pane| clack.step(&mut pane.borrow_mut()));
+    match next {
+        Some(delay) => {
+            s.clack = Some((clack, weak));
+            let ms = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX);
+            let _ = unsafe { SetTimer(Some(hwnd), CLACK_TIMER, ms, None) };
+        }
+        None => {
+            let _ = unsafe { KillTimer(Some(hwnd), CLACK_TIMER) };
+        }
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
 /// Tell the Alt-tap detector about a key press.
@@ -6785,9 +6954,16 @@ fn set_title(hwnd: HWND, app: &App) {
 }
 
 /// Client-area pixel size for a `cols` x `rows` grid plus the tab bar.
-fn px_size(metrics: CellMetrics, cols: usize, rows: usize, bar_height: f32) -> (i32, i32) {
-    let w = (cols.max(1) as f32 * metrics.cell_width).ceil() as i32;
-    let h = (rows.max(1) as f32 * metrics.cell_height + bar_height).ceil() as i32;
+fn px_size(
+    metrics: CellMetrics,
+    cols: usize,
+    rows: usize,
+    chrome: f32,
+    pad_x: f32,
+    pad_y: f32,
+) -> (i32, i32) {
+    let w = (cols.max(1) as f32 * metrics.cell_width + 2.0 * pad_x).ceil() as i32;
+    let h = (rows.max(1) as f32 * metrics.cell_height + chrome + 2.0 * pad_y).ceil() as i32;
     (w.max(16), h.max(16))
 }
 
@@ -7015,6 +7191,16 @@ pub fn run(
     spawn: SpawnOptions,
     workspace: Option<&str>,
 ) -> anyhow::Result<()> {
+    // Held until this process exits, so a later launch knows a window is open.
+    let instance = InstanceGuard::acquire(INSTANCE_MUTEX);
+    let greet = welcome::should_show(&welcome::Launch {
+        quick: false,
+        workspace: workspace.is_some(),
+        attach: false,
+        view: false,
+        welcome_enabled: cfg.welcome,
+        first_instance: instance.is_some(),
+    });
     // Per-monitor DPI v2 before any window metrics exist (WIN-002).
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     // Roadmap v0.2 "Windows Jump List": taskbar right-click gets a plain
@@ -7041,7 +7227,14 @@ pub fn run(
     };
     let tabs_on_top = cfg.tab_bar.placement != TabBarPlacement::Bottom;
     let chrome = caption::total_chrome(tabs_on_top, bar, caption::STRIP_HEIGHT);
-    let (cell_w, cell_h) = px_size(metrics, cols, rows, chrome);
+    let (cell_w, cell_h) = px_size(
+        metrics,
+        cols,
+        rows,
+        chrome,
+        cfg.window.padding.x as f32,
+        cfg.window.padding.y as f32,
+    );
     let mut rect = RECT {
         left: 0,
         top: 0,
@@ -7144,6 +7337,8 @@ pub fn run(
         caption_pressed: None,
         menu: None,
         alt_tap: AltTap::default(),
+        greet,
+        clack: None,
         search: None,
         palette: None,
         hint: None,
@@ -7416,5 +7611,42 @@ mod profile_tests {
             "no workspace open to overwrite"
         );
         assert!(disabled(MENU_WS_RENAME), "no workspace open to rename");
+    }
+
+    #[test]
+    fn instance_mutex_is_in_the_session_namespace() {
+        // Break caught: "Local\r" written as a carriage return.
+        let (namespace, name) = INSTANCE_MUTEX
+            .split_once(char::from(92))
+            .expect("namespace");
+        assert_eq!(namespace, "Local");
+        assert_eq!(name, "rustty-gui");
+    }
+
+    #[test]
+    fn second_instance_is_refused_until_the_first_is_gone() {
+        // Break caught: the crab on every extra window, or never again after
+        // the first window closes.
+        let name = format!("Local\\rustty-test-{}", std::process::id());
+        let first = InstanceGuard::acquire(&name);
+        assert!(first.is_some());
+        assert!(InstanceGuard::acquire(&name).is_none());
+        drop(first);
+        assert!(InstanceGuard::acquire(&name).is_some());
+    }
+
+    #[test]
+    fn window_size_fits_the_configured_grid_with_padding() {
+        // Break caught: padding eating into the grid, so the default window
+        // comes up under 80 columns and the banner loses its crab.
+        let metrics = CellMetrics {
+            cell_width: 8.6,
+            cell_height: 21.0,
+            text_height: 18.0,
+        };
+        let (w, h) = px_size(metrics, 80, 24, 36.0, 12.0, 10.0);
+        let cols = ((w as f32 - 24.0) / 8.6).floor() as usize;
+        let rows = ((h as f32 - 36.0 - 20.0) / 21.0).floor() as usize;
+        assert_eq!((cols, rows), (80, 24));
     }
 }

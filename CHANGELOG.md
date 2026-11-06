@@ -40,6 +40,8 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Added
 
+- A welcome banner when rustty starts with no other rustty window open: your crab snaps its
+  claws twice beside the session status, key commands and a tip. `welcome = false` removes it.
 - Shells started by rustty get its folder at the end of their PATH, so `rustty` commands
   work inside them with a portable install. Nothing persistent changes.
 - Symbols Nerd Font Mono v3.5.1 is embedded as a fallback, so prompt icons work with no
@@ -47,6 +49,8 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Fixed
 
+- Bold text is bold and italic text is italic. They were swapped.
+- The window is sized so the configured columns and rows fit inside the padding.
 - Words are evenly spaced. The grid now matches the font's own advance instead of rounding
   it up, which stretched the gaps between words.
 - Block characters and Powerline separators are drawn as geometry, so rows and prompt

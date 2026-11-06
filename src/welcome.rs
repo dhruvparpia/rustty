@@ -4,8 +4,12 @@
 //! so it scrolls, selects and searches like any other output. Pure: this module
 //! builds the text, and the window decides when to show it.
 
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::Duration;
+
 use crate::color::Color;
 use crate::grid::Cell;
+use crate::pane::Pane;
 use crate::theme::Theme;
 
 /// Which pose the crab's claws are in.
@@ -268,6 +272,145 @@ fn half_cell(top: Option<Color>, bottom: Option<Color>) -> Cell {
     }
 }
 
+/// The status text that follows the version on the first row.
+#[must_use]
+pub fn status_text(sessions: usize) -> String {
+    let noun = if sessions == 1 { "session" } else { "sessions" };
+    format!(" \u{b7} session host running \u{b7} {sessions} {noun}")
+}
+
+/// The claws' poses and how long each is held, in milliseconds. The last pose
+/// stays for good.
+const CLACK_SEQUENCE: [(Frame, Option<u64>); 6] = [
+    (Frame::Open, Some(420)),
+    (Frame::Closed, Some(130)),
+    (Frame::Open, Some(170)),
+    (Frame::Closed, Some(130)),
+    (Frame::Open, Some(170)),
+    (Frame::Closed, None),
+];
+
+/// Cell rows of the crab that differ between poses.
+const CLAW_ROWS: usize = 3;
+
+/// The running animation: it rewrites the crab's claw cells over about a
+/// second, and stops for good as soon as those cells are no longer what it
+/// wrote, so it can never paint over other text.
+#[derive(Debug)]
+pub struct Clack {
+    anchor_abs: usize,
+    c_color: Color,
+    animate: bool,
+    shown: Frame,
+    next: usize,
+    status: Option<Receiver<Option<usize>>>,
+    status_at: (usize, usize),
+    colors: Colors,
+}
+
+impl Clack {
+    /// Start after a banner rendered at absolute line `anchor_abs`. It rendered
+    /// `Open` when `animate` is set and `Closed` otherwise. `status` delivers
+    /// the session count for the text at (`status_at`: absolute line, column).
+    #[must_use]
+    pub fn new(
+        anchor_abs: usize,
+        c_color: Color,
+        animate: bool,
+        status: Option<Receiver<Option<usize>>>,
+        status_at: (usize, usize),
+        colors: Colors,
+    ) -> Self {
+        Self {
+            anchor_abs,
+            c_color,
+            animate,
+            shown: if animate { Frame::Open } else { Frame::Closed },
+            next: 0,
+            status,
+            status_at,
+            colors,
+        }
+    }
+
+    /// Advance one step. Returns how long until the next step, or `None` when
+    /// the animation is over.
+    pub fn step(&mut self, pane: &mut Pane) -> Option<Duration> {
+        if pane.in_alt() || pane.input_seen() || !self.crab_intact(pane) {
+            return None;
+        }
+        self.poll_status(pane);
+        let &(frame, hold) = CLACK_SEQUENCE.get(self.next)?;
+        self.next += 1;
+        if self.animate && frame != self.shown {
+            self.write_frame(pane, frame);
+        }
+        hold.map(Duration::from_millis)
+    }
+
+    /// Whether the claw cells are still exactly what was last written.
+    fn crab_intact(&self, pane: &Pane) -> bool {
+        let want = crab_cells(self.shown, self.c_color);
+        want.iter().take(CLAW_ROWS).enumerate().all(|(r, row)| {
+            pane.grid()
+                .line_abs(self.anchor_abs + r)
+                .and_then(|line| line.cells.get(..CRAB_COLS))
+                .is_some_and(|cells| cells == row.as_slice())
+        })
+    }
+
+    fn write_frame(&mut self, pane: &mut Pane, frame: Frame) {
+        let want = crab_cells(frame, self.c_color);
+        for (r, row) in want.iter().take(CLAW_ROWS).enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                if let Some(dest) = pane.grid_mut().cell_abs_mut(self.anchor_abs + r, c) {
+                    dest.clone_from(cell);
+                }
+            }
+        }
+        self.shown = frame;
+        pane.mark_dirty();
+    }
+
+    fn poll_status(&mut self, pane: &mut Pane) {
+        let Some(status) = &self.status else {
+            return;
+        };
+        match status.try_recv() {
+            Ok(Some(sessions)) => {
+                self.status = None;
+                self.write_status(pane, &status_text(sessions));
+            }
+            Ok(None) | Err(TryRecvError::Disconnected) => self.status = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Write the status text if those cells are still blank.
+    fn write_status(&self, pane: &mut Pane, text: &str) {
+        let (abs, col) = self.status_at;
+        let count = text.chars().count();
+        let free = pane
+            .grid()
+            .line_abs(abs)
+            .and_then(|line| line.cells.get(col..col + count))
+            .is_some_and(|cells| cells.iter().all(|cell| *cell == Cell::blank()));
+        if !free {
+            return;
+        }
+        for (i, ch) in text.chars().enumerate() {
+            if let Some(dest) = pane.grid_mut().cell_abs_mut(abs, col + i) {
+                *dest = Cell {
+                    char: ch,
+                    fg: Some(self.colors.muted),
+                    ..Cell::blank()
+                };
+            }
+        }
+        pane.mark_dirty();
+    }
+}
+
 /// The crab's cells for `frame`, with the `>_` in `c_color`.
 #[must_use]
 pub fn crab_cells(frame: Frame, c_color: Color) -> [[Cell; CRAB_COLS]; CRAB_ROWS] {
@@ -350,7 +493,6 @@ pub const fn should_show(launch: &Launch) -> bool {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::pane::Pane;
 
     const TIP: &str = "Ctrl+Shift+K labels links and paths so you can open them by keyboard.";
 
@@ -737,5 +879,226 @@ mod tests {
     fn status_column_is_just_after_the_version() {
         assert_eq!(banner(78, 24).status_column(), 28 + "rustty 0.6.0".len());
         assert_eq!(banner(60, 24).status_column(), "rustty 0.6.0".len());
+    }
+
+    /// A pane showing the animated banner, and its clack.
+    fn clacking(scrollback: usize) -> (Pane, Clack) {
+        let b = Banner {
+            frame: Frame::Open,
+            ..banner(78, 24)
+        };
+        let mut pane = Pane::with_size(78, 24, scrollback);
+        pane.feed(b.render().expect("fits").as_bytes());
+        let clack = Clack::new(
+            0,
+            colors().foreground,
+            true,
+            None,
+            (0, b.status_column()),
+            colors(),
+        );
+        (pane, clack)
+    }
+
+    /// The crab's top three rows as they are in the grid now.
+    fn claw_rows(pane: &Pane) -> Vec<Vec<Cell>> {
+        (0..3)
+            .map(|r| pane.grid().line_abs(r).expect("line").cells[..CRAB_COLS].to_vec())
+            .collect()
+    }
+
+    fn claw_frame(frame: Frame) -> Vec<Vec<Cell>> {
+        crab_cells(frame, colors().foreground)[..3]
+            .iter()
+            .map(|row| row.to_vec())
+            .collect()
+    }
+
+    fn ms(n: u64) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_millis(n))
+    }
+
+    #[test]
+    fn sequence_is_open_closed_open_closed_open_closed() {
+        let (mut pane, mut clack) = clacking(100);
+        let expected = [
+            (ms(420), Frame::Open),
+            (ms(130), Frame::Closed),
+            (ms(170), Frame::Open),
+            (ms(130), Frame::Closed),
+            (ms(170), Frame::Open),
+            (None, Frame::Closed),
+        ];
+        for (delay, frame) in expected {
+            assert_eq!(clack.step(&mut pane), delay);
+            assert_eq!(claw_rows(&pane), claw_frame(frame));
+        }
+    }
+
+    #[test]
+    fn scrolling_shell_output_does_not_stop_the_clack() {
+        // Break caught: the shell's first output cancelling the animation, so
+        // the claws never move.
+        let (mut pane, mut clack) = clacking(100);
+        for delay in [ms(420), ms(130), ms(170), ms(130), ms(170), None] {
+            assert_eq!(clack.step(&mut pane), delay);
+            pane.feed(b"shell output\r\nmore output\r\nand more\r\n");
+        }
+        assert_eq!(claw_rows(&pane), claw_frame(Frame::Closed));
+    }
+
+    #[test]
+    fn overwritten_crab_stops_and_is_left_alone() {
+        // Break caught: the animation painting over the user's text.
+        let (mut pane, mut clack) = clacking(100);
+        assert_eq!(clack.step(&mut pane), ms(420));
+        pane.feed(b"\x1b[1;4HX");
+        assert_eq!(clack.step(&mut pane), None);
+        assert_eq!(pane.grid().line_abs(0).expect("line").cells[3].char, 'X');
+    }
+
+    #[test]
+    fn burst_that_evicts_the_crab_stops_safely() {
+        // Review focus: a profile script printing thousands of lines.
+        let (mut pane, mut clack) = clacking(10);
+        assert_eq!(clack.step(&mut pane), ms(420));
+        for i in 0..10_000 {
+            pane.feed(format!("line {i}\r\n").as_bytes());
+        }
+        let last = pane.grid().line_text(22);
+        assert_eq!(clack.step(&mut pane), None);
+        assert_eq!(pane.grid().line_text(22), last, "later lines intact");
+    }
+
+    #[test]
+    fn cleared_screen_stops_the_clack() {
+        let (mut pane, mut clack) = clacking(100);
+        assert_eq!(clack.step(&mut pane), ms(420));
+        pane.feed(b"\x1b[2J\x1b[H");
+        assert_eq!(clack.step(&mut pane), None);
+        for r in 0..3 {
+            assert_eq!(pane.grid().line_text(r).as_deref(), Some(""), "row {r}");
+        }
+    }
+
+    #[test]
+    fn alt_screen_stops_the_clack() {
+        let (mut pane, mut clack) = clacking(100);
+        assert_eq!(clack.step(&mut pane), ms(420));
+        pane.feed(b"\x1b[?1049h");
+        assert_eq!(clack.step(&mut pane), None);
+        pane.feed(b"\x1b[?1049l");
+        assert_eq!(
+            claw_rows(&pane),
+            claw_frame(Frame::Open),
+            "main screen untouched"
+        );
+    }
+
+    #[test]
+    fn typing_stops_the_clack() {
+        let (mut pane, mut clack) = clacking(100);
+        assert_eq!(clack.step(&mut pane), ms(420));
+        let _ = pane.send_input(b"x");
+        assert_eq!(clack.step(&mut pane), None);
+    }
+
+    #[test]
+    fn without_animation_the_frame_never_changes() {
+        // Break caught: motion with Windows animation effects off.
+        let b = banner(78, 24);
+        let mut pane = fed(&b);
+        let mut clack = Clack::new(
+            0,
+            colors().foreground,
+            false,
+            None,
+            (0, b.status_column()),
+            colors(),
+        );
+        for delay in [ms(420), ms(130), ms(170), ms(130), ms(170), None] {
+            assert_eq!(clack.step(&mut pane), delay);
+            assert_eq!(claw_rows(&pane), claw_frame(Frame::Closed));
+        }
+    }
+
+    #[test]
+    fn status_text_counts_sessions() {
+        assert_eq!(
+            status_text(2),
+            " \u{b7} session host running \u{b7} 2 sessions"
+        );
+        assert_eq!(
+            status_text(1),
+            " \u{b7} session host running \u{b7} 1 session"
+        );
+        assert_eq!(
+            status_text(0),
+            " \u{b7} session host running \u{b7} 0 sessions"
+        );
+    }
+
+    fn with_status(answer: Option<usize>) -> Pane {
+        let b = Banner {
+            frame: Frame::Open,
+            ..banner(78, 24)
+        };
+        let mut pane = fed(&b);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(answer).expect("send");
+        let mut clack = Clack::new(
+            0,
+            colors().foreground,
+            true,
+            Some(rx),
+            (0, b.status_column()),
+            colors(),
+        );
+        assert_eq!(clack.step(&mut pane), ms(420));
+        pane
+    }
+
+    #[test]
+    fn status_is_filled_in_when_it_arrives() {
+        let pane = with_status(Some(2));
+        let line = pane.grid().line_text_abs(0).expect("line");
+        assert!(
+            line.ends_with("rustty 0.6.0 \u{b7} session host running \u{b7} 2 sessions"),
+            "{line}"
+        );
+        let cells = &pane.grid().line_abs(0).expect("line").cells;
+        assert_eq!(cells[28 + 12].fg, Some(colors().muted));
+    }
+
+    #[test]
+    fn no_host_leaves_the_version_alone() {
+        let pane = with_status(None);
+        let line = pane.grid().line_text_abs(0).expect("line");
+        assert!(line.ends_with("rustty 0.6.0"), "{line}");
+    }
+
+    #[test]
+    fn status_is_not_written_over_other_text() {
+        let b = Banner {
+            frame: Frame::Open,
+            ..banner(78, 24)
+        };
+        let mut pane = fed(&b);
+        // Something else already wrote where the status would go.
+        pane.feed(b"\x1b[1;50HZ");
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Some(2)).expect("send");
+        let mut clack = Clack::new(
+            0,
+            colors().foreground,
+            true,
+            Some(rx),
+            (0, b.status_column()),
+            colors(),
+        );
+        assert_eq!(clack.step(&mut pane), ms(420));
+        let line = pane.grid().line_text_abs(0).expect("line");
+        assert!(line.contains('Z'), "{line}");
+        assert!(!line.contains("session host"), "{line}");
     }
 }

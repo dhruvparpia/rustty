@@ -491,6 +491,20 @@ impl Grid {
         self.evicted + self.total.saturating_sub(1)
     }
 
+    /// Mutable cell of the line with absolute id `abs`, marking it dirty. For
+    /// chrome-like text that rewrites itself; it does not count as an edit for
+    /// search. `None` once the line is evicted.
+    pub fn cell_abs_mut(&mut self, abs: usize, col: usize) -> Option<&mut Cell> {
+        let v = abs.checked_sub(self.evicted)?;
+        if v >= self.total {
+            return None;
+        }
+        let slot = self.slot(v);
+        let line = &mut self.lines[slot];
+        line.is_dirty = true;
+        line.cells.get_mut(col)
+    }
+
     /// Reference to the line with absolute id `abs`, `None` once evicted.
     #[must_use]
     pub fn line_abs(&self, abs: usize) -> Option<&Line> {
