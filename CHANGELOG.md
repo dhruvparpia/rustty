@@ -49,6 +49,9 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Fixed
 
+- A normal launch no longer crashes. After a GUI launch released its console, printing any
+  diagnostic could panic, or land in whatever now held that handle number. A portable install
+  hit this on every start through the jump list error.
 - Bold text is bold and italic text is italic. They were swapped.
 - The window is sized so the configured columns and rows fit inside the padding.
 - Words are evenly spaced. The grid now matches the font's own advance instead of rounding

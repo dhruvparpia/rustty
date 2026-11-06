@@ -165,14 +165,31 @@ pub fn attach_parent_console() {
 
 /// Detach this process from its console: a GUI launch under the console
 /// subsystem gets a window the subsystem allocates at startup; closing
-/// the console hides it (writes to the freed handles fail harmlessly).
+/// the console hides it. The standard handles are cleared with it: a write to
+/// a freed console handle fails, and `eprintln!` panics on a failed write, while
+/// Rust treats a missing handle as a sink.
 #[cfg(windows)]
 #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
 pub fn free_console() {
-    use windows::Win32::System::Console::FreeConsole;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{
+        CONSOLE_MODE, FreeConsole, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
 
-    // Safety: FFI boundary (NFR-401); detaches this process from its console.
-    unsafe { FreeConsole() }.ok();
+    // Safety: FFI boundary (NFR-401); all calls act on this process's own
+    // console and standard handles. Handles redirected to a file or pipe are not
+    // console handles and stay usable, so they are kept.
+    unsafe {
+        for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let handle = GetStdHandle(id).unwrap_or_default();
+            let mut mode = CONSOLE_MODE::default();
+            if GetConsoleMode(handle, &mut mode).is_ok() {
+                SetStdHandle(id, HANDLE::default()).ok();
+            }
+        }
+        FreeConsole().ok();
+    }
 }
 
 #[cfg(test)]

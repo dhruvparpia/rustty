@@ -69,6 +69,7 @@ Driven through the real window, with screenshots read by hand.
 | Hit tests | Tab, `+`, empty strip, top edge, min, max, close report correctly; the corner of a maximized window is close |
 | Caption button messages | Maximize, restore and minimize work; press and release on different buttons does nothing; close reaches the WINDOW-014 prompt, as before |
 | Many tabs, fullscreen and back, Alt popup | Work |
+| Launch through Explorer and `Start-Process` | Stays up. Before the fix it panicked on every start from the portable folder |
 | Startup | Window in about 62 ms, same as `fix/ci-and-scrollback` |
 | Idle CPU over 30 s | 16-47 ms, against 31-94 ms before: no difference beyond noise |
 | Memory | About 5-6 MB more, from the embedded font |
