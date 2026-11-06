@@ -36,6 +36,10 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory, IDWriteFactory5, IDWriteFontCollection, IDWriteFontFallback, IDWriteTextFormat,
     IDWriteTextFormat1, IDWriteTextLayout, IDWriteTypography,
 };
+use windows::Win32::Graphics::DirectWrite::{
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_WICPixelFormat32bppBGRA, IWICBitmapSource, IWICImagingFactory,
@@ -448,6 +452,41 @@ fn build_symbol_fallback(dwrite: &IDWriteFactory) -> Option<IDWriteFontFallback>
     }
 }
 
+/// Tab title size in DIPs.
+const TAB_FONT_SIZE: f32 = 12.5;
+
+/// The tab title format and the centred format for the close and `+` glyphs.
+fn make_tab_formats(
+    dwrite: &IDWriteFactory,
+) -> anyhow::Result<(IDWriteTextFormat, IDWriteTextFormat)> {
+    let make = |size: f32| {
+        make_format(
+            dwrite,
+            "Segoe UI",
+            size,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+        )
+    };
+    let title = make(TAB_FONT_SIZE)?;
+    let glyph = make(TAB_FONT_SIZE)?;
+    unsafe {
+        title.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        title.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        let trimming = DWRITE_TRIMMING {
+            granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+            delimiter: 0,
+            delimiterCount: 0,
+        };
+        let sign = dwrite.CreateEllipsisTrimmingSign(&title)?;
+        title.SetTrimming(&trimming, &sign)?;
+        glyph.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        glyph.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+        glyph.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+    }
+    Ok((title, glyph))
+}
+
 /// Icon-only text face for the tab bar: the system icon font carrying the
 /// shell glyph (U+E756 CommandPrompt). `None` when no icon font is present.
 fn make_icon_format(dwrite: &IDWriteFactory, size: f32) -> Option<IDWriteTextFormat> {
@@ -473,27 +512,6 @@ fn make_icon_format(dwrite: &IDWriteFactory, size: f32) -> Option<IDWriteTextFor
         }
     }
     None
-}
-
-/// Tab-bar shell icon: the CommandPrompt glyph tinted per shell family.
-fn shell_icon(profile: &str) -> Option<(char, Color)> {
-    let p = profile.to_ascii_lowercase();
-    let rgb = if p.contains("powershell") || p.contains("pwsh") {
-        (74, 143, 217) // PowerShell blue
-    } else if p.contains("cmd") || p.contains("command") {
-        (204, 204, 204)
-    } else if p.contains("bash") || p.contains("git") {
-        (92, 184, 92)
-    } else if p.contains("wsl") {
-        (242, 166, 51)
-    } else if p.contains("nushell") {
-        (153, 102, 204)
-    } else if p.contains("rust") {
-        (200, 100, 50) // rust orange
-    } else {
-        return None;
-    };
-    Some(('\u{e756}', Color::rgb(rgb.0, rgb.1, rgb.2)))
 }
 
 /// Measure the cell box for `format`: width = advance of `M` (rounded up),
@@ -541,8 +559,14 @@ pub struct Renderer {
     /// Powerline separators in cell coordinates, built on first use. They
     /// belong to the factory, so they survive render-target recreation.
     powerline: Option<[ID2D1PathGeometry; 4]>,
-    /// Tab-bar shell icon face ("Segoe Fluent Icons" / "Segoe MDL2 Assets");
-    /// `None` when neither is installed, which disables tab icons.
+    /// Tab titles: the Windows UI font, centred in the strip, trimmed with
+    /// an ellipsis.
+    tab_format: IDWriteTextFormat,
+    /// Tab close and `+` glyphs: the UI font, centred both ways.
+    tab_close_format: IDWriteTextFormat,
+    /// Icon face ("Segoe Fluent Icons" / "Segoe MDL2 Assets"); `None` when
+    /// neither is installed.
+    #[allow(dead_code, reason = "read by the caption buttons in the next change")]
     icon_format: Option<IDWriteTextFormat>,
     metrics: CellMetrics,
     dpi: f32,
@@ -798,6 +822,7 @@ impl Renderer {
         let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
         // Family name is diagnostics-only; the formats carry the chosen face.
         let (_family, formats, metrics) = build_font_resources(&dwrite, dpi, font)?;
+        let (tab_format, tab_close_format) = make_tab_formats(&dwrite)?;
         let icon_format = make_icon_format(&dwrite, metrics.text_height);
         let typography = build_typography(&dwrite, font)?;
         let width = dips_to_px(cols.max(1) as f32 * metrics.cell_width, dpi).max(1);
@@ -835,6 +860,8 @@ impl Renderer {
             typography,
             formats,
             powerline: None,
+            tab_format,
+            tab_close_format,
             icon_format,
             metrics,
             dpi,
@@ -2210,11 +2237,10 @@ impl Renderer {
         let ui = theme.ui_colors();
         let bar_top = self.tab_bar_top(height);
         let bar_bottom = bar_top + self.tab_bar_height;
-        self.fill_rect(0.0, bar_top, width, bar_bottom, theme.tab_bar);
-        self.fill_rect(0.0, bar_bottom - 1.0, width, bar_bottom, ui.border);
+        self.fill_rect(0.0, bar_top, width, bar_bottom, theme.strip_color());
         // Titles: fill the reused slots with the reused scratch String,
         // swapping buffers so each slot keeps its own capacity.
-        let cw = self.metrics.cell_width;
+        let cw = tabbar::UI_CHAR_WIDTH;
         let mut label = std::mem::take(&mut self.label);
         let mut units = std::mem::take(&mut self.utf16);
         let titles = &mut self.titles;
@@ -2237,12 +2263,11 @@ impl Renderer {
         tabbar::layout_into(
             &self.titles,
             width,
-            self.metrics.cell_width,
+            cw,
             app.active_index(),
             &mut self.layout,
         );
         let active = app.active_index();
-        let y_top = bar_top + (self.tab_bar_height - self.metrics.text_height) / 2.0;
         let plus = self.layout.plus;
         let tabs = std::mem::take(&mut self.layout.tabs);
         for (i, &(lo, hi)) in tabs.iter().enumerate() {
@@ -2271,36 +2296,24 @@ impl Renderer {
                 );
             }
             if i == active {
-                self.fill_rect(lo, bar_top, hi, bar_top + 3.0, ui.accent);
+                self.fill_rect(lo, bar_top, hi, bar_top + 2.0, ui.accent);
             }
             let close_w = if self.tab_close_button {
                 tabbar::close_width(cw)
             } else {
                 0.0
             };
-            let icon = shell_icon(tab.profile());
-            // Reserve the icon slot only when a profile icon is drawn; otherwise
-            // the title starts at the tab's left chrome and leaves no blank band.
-            let icon_w = if icon.is_some() { cw * 1.6 } else { 0.0 };
             let marquee = self.marquee_tab == Some(i);
-            tabbar::fit_title_into(
-                &self.titles[i],
-                (hi - lo) - TAB_CHROME - close_w - icon_w,
-                cw,
-                &mut label,
-            );
-            if marquee {
-                // Signboard: show the whole title, not the ellipsised fit.
-                label.clear();
-                label.extend(self.titles[i].chars().filter(|c| !c.is_control()));
-            }
+            // DirectWrite trims with an ellipsis against the real text width.
+            label.clear();
+            label.extend(self.titles[i].chars().filter(|c| !c.is_control()));
             units.clear();
             units.extend(label.encode_utf16());
             let rect = D2D_RECT_F {
-                left: lo + TAB_CHROME / 2.0 + icon_w,
-                top: y_top,
-                right: (hi - TAB_CHROME / 2.0 - close_w).max(lo + TAB_CHROME / 2.0 + icon_w),
-                bottom: y_top + self.metrics.text_height,
+                left: lo + TAB_CHROME / 2.0,
+                top: bar_top,
+                right: (hi - TAB_CHROME / 2.0 - close_w).max(lo + TAB_CHROME / 2.0),
+                bottom: bar_bottom,
             };
             let color = if i == active { ui.foreground } else { ui.muted };
             let Some(brush) = self.brush(color) else {
@@ -2316,21 +2329,7 @@ impl Renderer {
                 self.target
                     .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED)
             };
-            if let Some((glyph, icon_color)) = icon
-                && hi - lo >= TAB_CHROME + icon_w + close_w
-                && let (Some(icon_brush), Some(icon_format)) =
-                    (self.brush(icon_color), self.icon_format.as_ref())
-            {
-                let icon_units = [glyph as u16]; // icon glyph is BMP
-                let icon_rect = D2D_RECT_F {
-                    left: lo + TAB_CHROME / 2.0,
-                    top: y_top,
-                    right: lo + TAB_CHROME / 2.0 + icon_w,
-                    bottom: y_top + self.metrics.text_height,
-                };
-                self.draw_units(&icon_units, icon_format, icon_rect, &icon_brush);
-            }
-            let format = &self.formats[0];
+            let format = &self.tab_format;
             if marquee {
                 // Ticker: the title enters from the tab's right edge,
                 // scrolls across, exits left, and the loop restarts.
@@ -2350,35 +2349,33 @@ impl Renderer {
                 self.draw_units(&units, format, rect, &brush);
             }
             if self.tab_close_button {
-                let close_w = tabbar::close_width(cw);
                 units.clear();
-                units.extend("\u{d7}".encode_utf16());
+                units.extend("\u{2715}".encode_utf16());
                 let close_rect = D2D_RECT_F {
-                    left: (hi - close_w).max(lo),
-                    top: y_top,
-                    right: hi,
-                    bottom: y_top + self.metrics.text_height,
+                    left: (hi - close_w - TAB_CHROME / 4.0).max(lo),
+                    top: bar_top,
+                    right: hi - TAB_CHROME / 4.0,
+                    bottom: bar_bottom,
                 };
-                self.draw_units(&units, format, close_rect, &brush);
+                if let Some(close_brush) = self.brush(ui.muted) {
+                    self.draw_units(&units, &self.tab_close_format, close_rect, &close_brush);
+                }
             }
             unsafe { self.target.PopAxisAlignedClip() };
         }
         self.layout.tabs = tabs;
         let (lo, hi) = plus;
         if hi > lo {
-            let cx = (lo + hi) / 2.0;
             units.clear();
             units.push(u16::from(b'+'));
             let rect = D2D_RECT_F {
-                left: cx - self.metrics.cell_width / 2.0,
-                top: y_top,
-                right: cx + self.metrics.cell_width / 2.0,
-                bottom: y_top + self.metrics.text_height,
+                left: lo,
+                top: bar_top,
+                right: hi,
+                bottom: bar_bottom,
             };
-            let color = ui.muted;
-            if let Some(brush) = self.brush(color) {
-                let format = &self.formats[0];
-                self.draw_units(&units, format, rect, &brush);
+            if let Some(brush) = self.brush(ui.muted) {
+                self.draw_units(&units, &self.tab_close_format, rect, &brush);
             }
         }
         units.clear();

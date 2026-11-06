@@ -6,7 +6,12 @@
 //! whole tab-bar interaction is unit-testable.
 
 /// Height of the tab bar strip, in DIPs.
-pub const TAB_BAR_HEIGHT: f32 = 28.0;
+pub const TAB_BAR_HEIGHT: f32 = 36.0;
+
+/// Estimated advance of one Segoe UI character at the tab title size, passed
+/// wherever these functions take a `cell_width`. Sizing tabs from an estimate
+/// leaves some spare room; DirectWrite trims the text that does not fit.
+pub const UI_CHAR_WIDTH: f32 = 7.0;
 
 /// Narrowest tab (short or empty title).
 pub const TAB_MIN_WIDTH: f32 = 96.0;
@@ -23,7 +28,7 @@ pub const PLUS_WIDTH: f32 = 34.0;
 /// Width of the close-control hit target and painted slot in DIPs.
 #[must_use]
 pub fn close_width(cell_width: f32) -> f32 {
-    cell_width * 1.5
+    cell_width * 3.0
 }
 
 /// What a click on the tab bar strip landed on.
@@ -50,9 +55,7 @@ pub struct Layout {
 #[must_use]
 pub fn tab_width(title: &str, cell_width: f32) -> f32 {
     let chars = title.chars().filter(|c| !c.is_control()).count() as f32;
-    // Reserve separate icon and close slots; titles contain only user text.
-    (chars * cell_width + TAB_CHROME + cell_width * 1.6 + close_width(cell_width))
-        .clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
+    (chars * cell_width + TAB_CHROME + close_width(cell_width)).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
 }
 
 /// Lay out `titles` left to right inside a bar of `width` DIPs with tab
@@ -90,7 +93,6 @@ pub fn layout_into(
 ) {
     out.tabs.clear();
     let width = width.max(0.0);
-    out.plus = (0.0, PLUS_WIDTH.min(width));
     let avail = (width - PLUS_WIDTH).max(0.0);
     let n = titles.len();
     let natural_total: f32 = titles.iter().map(|t| tab_width(t, cell_width)).sum();
@@ -110,7 +112,7 @@ pub fn layout_into(
     } else {
         active.min(n - visible)
     };
-    let mut x = PLUS_WIDTH;
+    let mut x = 0.0_f32;
     for (i, title) in titles.iter().enumerate() {
         if i < start || i >= start + visible {
             out.tabs.push((0.0, 0.0));
@@ -121,9 +123,11 @@ pub fn layout_into(
         } else {
             w
         };
-        out.tabs.push((x, (x + tw).min(width.max(x))));
-        x += tw;
+        let end = (x + tw).min(avail.max(x));
+        out.tabs.push((x, end));
+        x = end;
     }
+    out.plus = (x, (x + PLUS_WIDTH).min(width));
 }
 
 /// Hit-test a pointer x (DIPs) against a laid-out bar. The caller has
@@ -171,15 +175,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plus_is_pinned_left_then_tabs_left_to_right() {
+    fn plus_follows_the_last_tab() {
+        // Break caught: the + button back at the left of the strip.
         let titles = vec!["bash".to_string(), "pwsh".to_string()];
         let l = layout(&titles, 800.0, 10.0);
         assert_eq!(l.tabs.len(), 2);
-        assert_eq!(l.plus, (0.0, PLUS_WIDTH));
-        assert_eq!(l.tabs[0].0, PLUS_WIDTH);
+        assert_eq!(l.tabs[0].0, 0.0);
         assert!(l.tabs[0].0 < l.tabs[0].1);
         assert_eq!(l.tabs[0].1, l.tabs[1].0);
-        assert!(l.tabs[1].1 <= 800.0);
+        assert_eq!(l.plus, (l.tabs[1].1, l.tabs[1].1 + PLUS_WIDTH));
+        assert!(l.plus.1 <= 800.0);
+    }
+
+    #[test]
+    fn plus_stays_inside_the_bar_when_tabs_overflow() {
+        // Break caught: overflowing tabs pushing the + button out of reach.
+        let titles = vec!["bash".to_string(); 8];
+        let l = layout_active(&titles, 500.0, 10.0, 7);
+        assert!(l.plus.1 <= 500.0);
+        assert!(l.plus.1 - l.plus.0 >= PLUS_WIDTH);
+        let last = l.tabs.iter().map(|t| t.1).fold(0.0_f32, f32::max);
+        assert_eq!(l.plus.0, last, "the + button sits right after the tabs");
     }
 
     #[test]
@@ -208,12 +224,11 @@ mod tests {
         assert_eq!(hit_test(&l, l.plus.0), Hit::Plus);
         let (lo, hi) = l.tabs[7];
         assert!(hi > lo, "the active tab must be visible");
-        assert!(lo >= PLUS_WIDTH);
-        assert!(hi <= 500.0);
+        assert!(hi <= 500.0 - PLUS_WIDTH);
         assert_eq!(hit_test(&l, lo), Hit::Tab(7));
         // Hidden tabs have zero ranges the renderer and hit test skip.
         for &(lo, hi) in l.tabs.iter().filter(|t| t.1 > t.0) {
-            assert!(lo >= PLUS_WIDTH && hi <= 500.0);
+            assert!(lo >= 0.0 && hi <= 500.0 - PLUS_WIDTH);
         }
         // The visible tabs form one contiguous run.
         let shown: Vec<usize> = (0..8).filter(|i| l.tabs[*i].1 > l.tabs[*i].0).collect();

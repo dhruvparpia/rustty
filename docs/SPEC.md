@@ -777,7 +777,7 @@ The product must support common terminal/TUI applications.
 | THEME-015 | Themes shall support 256-color palette remapping. | P1 |
 | SKIN-001 | RusTTY shall offer paired `copper-dark` and `copper-light` native skins with charcoal/warm-paper surfaces and restrained copper focus accents. Existing themes and explicit profile overrides remain selectable. | P1 |
 | SKIN-002 | UI foreground, secondary text, accent and separator colors shall be independently overrideable from terminal foreground/cursor/ANSI colors using `ui-foreground`, `ui-muted`, `ui-accent` and `ui-border`. Omitted keys shall derive compatible colors from the selected theme. | P1 |
-| SKIN-003 | Tabs, palette, search, bookmark and pane-title chrome shall use shared semantic UI colors. Active tabs and selected palette/bookmark rows shall have a visible positional indicator as well as a changed background. | P1 |
+| SKIN-003 | Tabs, palette, search, bookmark and pane-title chrome shall use shared semantic UI colors. Active tabs and selected palette/bookmark rows shall have a visible positional indicator as well as a changed background. The `+` button follows the last tab, and tab titles use the Windows UI font. | P1 |
 | SKIN-004 | Copper presets shall meet 4.5:1 normal/secondary text contrast against their chrome surfaces and 3:1 focus-indicator contrast. Selection/search text shall remain readable. Custom colors remain user-controlled and are validated for syntax. | P1 |
 | SKIN-005 | Skin changes shall use the existing theme resolution and reload paths, preserve terminal content/actions and reuse render buffers. Validation shall include dark/light, top/bottom tabs, mixed DPI, narrow windows, keyboard focus and Unicode fallback on Windows. | P1 |
 | SKIN-006 | The native caption shall follow the effective skin using supported DWM attributes, retain native window controls/drag/resize, and fall back to system rendering when an attribute is unsupported. Tab titles, profile icons and close controls shall be drawn separately. | P1 |
@@ -973,7 +973,7 @@ COLORTERM
 | WINDOW-008 | The terminal shall support high DPI scaling. | P0 |
 | WINDOW-009 | The terminal shall support window snapping. | P0 |
 | WINDOW-010 | The terminal shall support window opacity. | P1 |
-| WINDOW-011 | The terminal shall support window padding. | P0 |
+| WINDOW-011 | The terminal shall support window padding, 12 by 10 DIPs by default. | P0 |
 | WINDOW-012 | The terminal shall support background color. | P0 |
 | WINDOW-013 | The terminal shall support system theme integration. | P1 |
 | WINDOW-014 | The terminal shall support window close confirmation for multiple tabs. | P0 |

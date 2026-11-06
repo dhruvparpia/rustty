@@ -26,6 +26,9 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Changed
 
+- The tab strip is quieter: taller, with no divider line, Windows UI font titles, the `+`
+  button after the last tab, and no default shell icon. The window has 12 by 10 DIPs of
+  padding by default.
 - Copper is the default skin: `copper-dark` on a dark system and `copper-light` on a light
   one. An explicit theme in config still wins. The tab strip now matches the terminal
   background unless `tab-bar` is set explicitly.

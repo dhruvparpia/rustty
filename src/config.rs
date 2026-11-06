@@ -254,7 +254,7 @@ fn default_rows() -> usize {
 }
 
 /// Window padding.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Padding {
     /// Left/right padding in pixels.
@@ -263,6 +263,12 @@ pub struct Padding {
     /// Top/bottom padding in pixels.
     #[serde(default)]
     pub y: u32,
+}
+
+impl Default for Padding {
+    fn default() -> Self {
+        Self { x: 12, y: 10 }
+    }
 }
 
 /// Split settings (`[split]`, CONFIG-013).
@@ -1435,5 +1441,20 @@ background = \"#000000\"
                 Err(e) => panic!("{e}"),
             }
         }
+    }
+
+    #[test]
+    fn default_padding_is_twelve_by_ten() {
+        // Break caught: text flush against the window edges by default.
+        assert_eq!(Padding::default(), Padding { x: 12, y: 10 });
+        let cfg = Config::parse("").expect("empty config");
+        assert_eq!(cfg.window.padding, Padding { x: 12, y: 10 });
+    }
+
+    #[test]
+    fn explicit_zero_padding_is_honoured() {
+        // Break caught: the new default overriding what the user set.
+        let cfg = Config::parse("[window]\npadding = { x = 0, y = 0 }\n").expect("config");
+        assert_eq!(cfg.window.padding, Padding { x: 0, y: 0 });
     }
 }

@@ -1498,7 +1498,7 @@ impl WindowState {
         }
         for (idx, &(lo, hi)) in layout.tabs.iter().enumerate() {
             if x >= lo && x < hi {
-                let close_w = crate::tabbar::close_width(self.metrics.cell_width);
+                let close_w = crate::tabbar::close_width(crate::tabbar::UI_CHAR_WIDTH);
                 if self.cfg.tab_bar.close_button && x >= hi - close_w {
                     return TabHit::Close(idx);
                 }
