@@ -30,8 +30,8 @@ use super::client::{CALL_TIMEOUT, Transport};
 use super::ops::ClientId;
 use super::{
     CLIENT_INBOX_CAP, DiscoveryEntry, ErrorCode, MAX_CLIENTS, MAX_PAGE_BYTES, MAX_REQUEST_BYTES,
-    OUTBOUND_CAP, Outbox, Push, RpcError, Token, error_frame, load_discovery, pipe_name,
-    write_discovery,
+    OUTBOUND_CAP, Outbox, Push, RpcError, Token, entry_problem, error_frame, load_discovery,
+    pipe_name, write_discovery,
 };
 use crate::host::client::{DupHandle, open_named_pipe};
 use crate::host::pipe::{ClientPipe, connect, create_instance};
@@ -122,7 +122,8 @@ pub fn process_start_time(pid: u32) -> Option<u64> {
 
 /// Whether a discovery file's window could still be running: its process exists
 /// and is the same process, not a later one given the same pid. When that can't
-/// be checked the file stays; the connection's identity check still applies.
+/// be checked the file stays; a client won't trust it (`entry_problem`) and the
+/// connection's identity check still applies.
 #[must_use]
 pub fn alive(entry: &DiscoveryEntry) -> bool {
     match probe_process(entry.pid) {
@@ -557,7 +558,8 @@ fn connection_ended() -> RpcError {
 ///
 /// # Errors
 ///
-/// `no-instance` when the window is gone or the pipe isn't really its.
+/// `no-instance` when the entry can't be trusted, the window is gone or the pipe
+/// isn't really its.
 pub fn open(entry: &DiscoveryEntry) -> Result<PipeTransport, RpcError> {
     let flags = SECURITY_SQOS_PRESENT.0 | SECURITY_IDENTIFICATION.0;
     let unreachable = |why: String| {
@@ -566,6 +568,10 @@ pub fn open(entry: &DiscoveryEntry) -> Result<PipeTransport, RpcError> {
             format!("window {} can't be reached: {why}", entry.id),
         )
     };
+    // Before the pipe is touched: opening a name is itself something a server sees.
+    if let Some(problem) = entry_problem(entry, process_start_time(entry.pid)) {
+        return Err(unreachable(problem.to_string()));
+    }
     let start = Instant::now();
     let pipe = loop {
         match open_named_pipe(&entry.pipe, flags) {

@@ -87,8 +87,8 @@ pub const ENV_TOKEN: &str = "RUSTTY_AUTOMATION_TOKEN";
 
 // ---- identities ---------------------------------------------------------
 
-/// Bits below the process id in an [`next_id`] value.
-const ID_PID_SHIFT: u32 = 21;
+/// Bits below the process id in a [`next_id`] value.
+pub const ID_PID_SHIFT: u32 = 21;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A new window, tab or pane id (AUTO-001): from one process-wide counter,
@@ -942,6 +942,57 @@ pub fn load_discovery(dir: &Path, alive: &dyn Fn(&DiscoveryEntry) -> bool) -> Ve
     entries
 }
 
+/// How every window's pipe name starts. Nothing else is trusted: no other host,
+/// no other device form, no other pipe.
+const PIPE_PREFIX: &str = r"\\.\pipe\rustty.";
+
+/// Why a client must not trust a discovery entry, if it must not. Discovery is a
+/// folder anything running as this user can write to, and a client may be about to
+/// send a token to what it finds there (AUTO-004). `live_start` is the start time of
+/// the process `entry.pid` names right now, `None` if that can't be told.
+///
+/// A pipe name is one component, so a `..` can't walk it to another host: Windows
+/// folds those before it looks at what the path names.
+#[must_use]
+pub fn entry_problem(entry: &DiscoveryEntry, live_start: Option<u64>) -> Option<&'static str> {
+    if entry.id >> ID_PID_SHIFT != u64::from(entry.pid) {
+        return Some("its id does not belong to its process");
+    }
+    if entry.start_time == 0 || live_start != Some(entry.start_time) {
+        return Some("its process start time does not match a running process");
+    }
+    let name_is_ours = entry.pipe.strip_prefix(PIPE_PREFIX).is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    });
+    if !name_is_ours {
+        return Some("its pipe is not a local rustty pipe");
+    }
+    None
+}
+
+/// The entries a client may consider, with `live_start` giving a process's start
+/// time. An entry sharing its id with another stays whatever else is wrong with it,
+/// so [`select_window`] sees the duplicate and fails closed.
+#[must_use]
+pub fn trusted_entries(
+    entries: Vec<DiscoveryEntry>,
+    live_start: &dyn Fn(u32) -> Option<u64>,
+) -> Vec<DiscoveryEntry> {
+    let shared = |entry: &DiscoveryEntry| entries.iter().filter(|e| e.id == entry.id).count() > 1;
+    let keep: Vec<bool> = entries
+        .iter()
+        .map(|entry| shared(entry) || entry_problem(entry, live_start(entry.pid)).is_none())
+        .collect();
+    entries
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(entry, keep)| keep.then_some(entry))
+        .collect()
+}
+
 /// The pipe name (ADR §2): `\\.\pipe\rustty.<user>.<pid>.<window-seq>`. The
 /// user is only there to keep names apart; the DACL is the real boundary.
 #[must_use]
@@ -966,8 +1017,9 @@ pub fn pipe_name(user: &str, pid: u32, seq: u64) -> String {
 ///
 /// # Errors
 ///
-/// `no-instance` with no windows, `target-stale` for a named window that is
-/// gone, `bad-params` for a malformed `RUSTTY_WINDOW` or several candidates.
+/// `no-instance` with no windows or with two entries claiming the named window,
+/// `target-stale` for a named window that is gone, `bad-params` for a malformed
+/// `RUSTTY_WINDOW` or several candidates.
 pub fn select_window(
     entries: &[DiscoveryEntry],
     explicit: Option<u64>,
@@ -987,11 +1039,18 @@ pub fn select_window(
         (None, None) => None,
     };
     if let Some(id) = named {
-        return entries
-            .iter()
-            .find(|entry| entry.id == id)
+        let mut matching = entries.iter().filter(|entry| entry.id == id);
+        let found = matching
+            .next()
             .cloned()
-            .ok_or_else(|| RpcError::stale(id));
+            .ok_or_else(|| RpcError::stale(id))?;
+        if matching.next().is_some() {
+            return Err(RpcError::new(
+                ErrorCode::NoInstance,
+                format!("window {id} is published more than once, so none can be trusted"),
+            ));
+        }
+        return Ok(found);
     }
     let main: Vec<&DiscoveryEntry> = entries.iter().filter(|entry| !entry.quick).collect();
     match main.as_slice() {

@@ -153,3 +153,10 @@ JSON-RPC 2.0 (same base as MCP, so the adapter is a thin encoder):
     `--strict-mcp-config` and `--permission-mode default`. Anything the boss session
     starts itself still inherits the variable and can read it: this scopes a grant,
     and is not a boundary against code running as this user.
+13. **Discovery is a claim to check** (§2, amendment 5). The folder is writable by
+    anything running as this user, and a client holding a token believed whatever it
+    named. A client now accepts an entry only if the pid is the one in the id's high
+    bits, the start time is non-zero and matches the live process, and the pipe is a
+    local `\\.\pipe\rustty.` name with no separators. Two entries with one id fail
+    closed. A true pid with a false pipe was already stopped by the server identity
+    check, and still is.

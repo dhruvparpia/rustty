@@ -445,20 +445,54 @@ fn a_taken_pipe_name_is_refused_rather_than_shared() {
 
 #[test]
 fn a_client_wont_talk_to_a_pipe_run_by_the_wrong_process() {
+    // Every field is true of the other process, except the pipe, which is ours.
     let rig = Rig::new("wrongpid");
+    let mut other = std::process::Command::new("cmd.exe")
+        .args(["/c", "pause"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("started");
     let mut entry = rig.entry();
-    entry.pid += 4;
+    entry.pid = other.id();
+    entry.id = u64::from(other.id()) << crate::automation::ID_PID_SHIFT;
+    entry.start_time = process_start_time(other.id()).expect("its start time");
+    assert_eq!(
+        crate::automation::entry_problem(&entry, Some(entry.start_time)),
+        None
+    );
     let error = open(&entry).map(|_| ()).expect_err("refused");
+    let _ = other.kill();
+    let _ = other.wait();
     assert_eq!(error.code, ErrorCode::NoInstance, "{error}");
+    assert!(error.message.contains("not the window"), "{error}");
+}
+
+#[test]
+fn opening_refuses_an_entry_a_client_must_not_trust() {
+    // `open` is the last check before a pipe is touched, whoever picked the entry.
+    let rig = Rig::new("untrusted");
+    let mut entry = rig.entry();
+    entry.start_time = 0;
+    assert_eq!(
+        open(&entry).map(|_| ()).expect_err("refused").code,
+        ErrorCode::NoInstance
+    );
+    let mut entry = rig.entry();
+    entry.id = 1;
+    assert_eq!(
+        open(&entry).map(|_| ()).expect_err("refused").code,
+        ErrorCode::NoInstance
+    );
 }
 
 #[test]
 fn a_pipe_that_is_not_there_is_no_instance() {
     let entry = DiscoveryEntry {
-        id: 1,
+        id: crate::automation::next_id(),
         pipe: r"\\.\pipe\rustty.test-absent.0.0".to_string(),
         pid: std::process::id(),
-        start_time: 0,
+        start_time: process_start_time(std::process::id()).expect("own start time"),
         quick: false,
         version: String::new(),
     };

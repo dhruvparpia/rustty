@@ -4,7 +4,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -23,7 +23,7 @@ fn scratch() -> PathBuf {
     dir
 }
 
-fn rustty(dir: &PathBuf, args: &[&str]) -> Command {
+fn rustty(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rustty"));
     command
         .args(args)
@@ -108,8 +108,11 @@ mod token {
     use std::process::{Child, Stdio};
     use std::time::{Duration, Instant};
 
-    use rustty::automation::pipe::Server;
-    use rustty::automation::{RpcError, discovery_dir, error_frame, next_id};
+    use rustty::automation::pipe::{Server, process_start_time};
+    use rustty::automation::{
+        DiscoveryEntry, ID_PID_SHIFT, RpcError, discovery_dir, error_frame, load_discovery,
+        next_id, write_discovery,
+    };
     use serde_json::{Value, json};
 
     use super::{rustty, scratch};
@@ -133,6 +136,113 @@ mod token {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Runs `rustty mcp` holding the token, asks it to reach window `id`, and says
+    /// whether anything it sent arrived at `attacker`. Answers the attacker's
+    /// connection so a client that fell for it would go on to send its token.
+    fn mcp_reaches_the_attacker(dir: &Path, id: u64, attacker: &Server) -> bool {
+        let mut child = rustty(dir, &["mcp"])
+            .env("RUSTTY_WINDOW", id.to_string())
+            .env("RUSTTY_AUTOMATION_TOKEN", SECRET)
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("started");
+        let mut stdin = child.stdin.take().expect("stdin");
+        for message in [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list", "arguments": {}}}),
+        ] {
+            writeln!(stdin, "{message}").expect("written");
+        }
+        drop(stdin);
+        let mut reached = false;
+        let start = Instant::now();
+        while child.try_wait().expect("polled").is_none() {
+            if let Some((client, request)) = attacker.next_request(&|_| true) {
+                reached = true;
+                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                attacker.send(client, &error_frame(id, &RpcError::bad_params("got you")));
+            }
+            assert!(start.elapsed() < Duration::from_secs(30), "mcp never ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        reached || attacker.next_request(&|_| true).is_some()
+    }
+
+    /// A pipe this test controls, as an attacker's would be: its name, and its
+    /// server. The server's own discovery file goes in a folder clients don't read.
+    fn attacker_pipe(dir: &Path) -> (Server, String) {
+        let private = dir.join("attacker");
+        let server = Server::start(next_id(), false, Some(private.clone())).expect("server");
+        let own = load_discovery(&private, &|_| true);
+        let pipe = own.first().expect("published").pipe.clone();
+        (server, pipe)
+    }
+
+    /// A process to play the real window: its pid is what the id says.
+    fn victim() -> Child {
+        std::process::Command::new("cmd.exe")
+            .args(["/c", "pause"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("started")
+    }
+
+    fn victim_id(pid: u32) -> u64 {
+        (u64::from(pid) << ID_PID_SHIFT) + 1
+    }
+
+    #[test]
+    fn a_fake_file_with_a_windows_id_and_the_attackers_pid_gets_nothing() {
+        // The attack: write a discovery file naming the real window's id, with
+        // this process's own pid, start time and pipe. A client whose RUSTTY_WINDOW
+        // is that id would connect here and hand over its token.
+        let dir = scratch();
+        let mut window = victim();
+        let (attacker, pipe) = attacker_pipe(&dir);
+        let own_pid = std::process::id();
+        let fake = DiscoveryEntry {
+            id: victim_id(window.id()),
+            pipe,
+            pid: own_pid,
+            start_time: process_start_time(own_pid).expect("own start time"),
+            quick: false,
+            version: "0".to_string(),
+        };
+        write_discovery(&discovery_dir(&dir), &fake).expect("planted");
+        let reached = mcp_reaches_the_attacker(&dir, fake.id, &attacker);
+        let _ = window.kill();
+        let _ = window.wait();
+        drop(attacker);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!reached, "the attacker's pipe was told something");
+    }
+
+    #[test]
+    fn a_fake_file_with_the_windows_own_pid_and_the_attackers_pipe_gets_nothing() {
+        // The same attack with every field true but the pipe: the identity check
+        // on the connection is what stops this one.
+        let dir = scratch();
+        let mut window = victim();
+        let (attacker, pipe) = attacker_pipe(&dir);
+        let fake = DiscoveryEntry {
+            id: victim_id(window.id()),
+            pipe,
+            pid: window.id(),
+            start_time: process_start_time(window.id()).expect("its start time"),
+            quick: false,
+            version: "0".to_string(),
+        };
+        write_discovery(&discovery_dir(&dir), &fake).expect("planted");
+        let reached = mcp_reaches_the_attacker(&dir, fake.id, &attacker);
+        let _ = window.kill();
+        let _ = window.wait();
+        drop(attacker);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!reached, "the attacker's pipe was told something");
     }
 
     fn serve(dir: &Path) -> (Server, u64) {

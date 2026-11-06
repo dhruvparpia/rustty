@@ -396,6 +396,100 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+fn honest_entry() -> DiscoveryEntry {
+    let pid = 4242;
+    DiscoveryEntry {
+        id: (u64::from(pid) << ID_PID_SHIFT) + 7,
+        pipe: r"\\.\pipe\rustty.me.4242.1".to_string(),
+        pid,
+        start_time: 99,
+        quick: false,
+        version: "0".to_string(),
+    }
+}
+
+#[test]
+fn an_honest_entry_is_trusted() {
+    assert_eq!(entry_problem(&honest_entry(), Some(99)), None);
+}
+
+#[test]
+fn an_id_must_belong_to_the_process_claiming_it() {
+    // The attack: the real window's id, with the attacker's own pid and pipe.
+    let mut fake = honest_entry();
+    fake.pid = 4243;
+    assert!(entry_problem(&fake, Some(99)).is_some());
+}
+
+#[test]
+fn a_start_time_must_be_real_and_match_the_live_process() {
+    let mut fake = honest_entry();
+    assert!(entry_problem(&fake, Some(100)).is_some(), "a reused pid");
+    assert!(entry_problem(&fake, None).is_some(), "it can't be checked");
+    fake.start_time = 0;
+    assert!(
+        entry_problem(&fake, Some(0)).is_some(),
+        "zero proves nothing"
+    );
+}
+
+#[test]
+fn only_a_local_rustty_pipe_name_is_trusted() {
+    for bad in [
+        r"\\server\pipe\rustty.me.4242.1",
+        r"\\?\pipe\rustty.me.4242.1",
+        r"\\.\UNC\server\pipe\rustty.me.4242.1",
+        "//./pipe/rustty.me.4242.1",
+        r"\\.\pipe\other.me.4242.1",
+        r"\\.\PIPE\rustty.me.4242.1",
+        r"\\.\pipe\rustty.",
+        // Windows folds `..` before it looks at the host part.
+        r"\\.\pipe\rustty.me\..\..\..\UNC\server\pipe\x",
+        r"\\.\pipe\rustty.me/../x",
+        r"\\.\pipe\rustty.me 4242",
+        "",
+    ] {
+        let mut fake = honest_entry();
+        fake.pipe = bad.to_string();
+        assert!(entry_problem(&fake, Some(99)).is_some(), "{bad}");
+    }
+    // What `pipe_name` makes is what is trusted, whatever the user is called.
+    for user in ["Dhruv Parpia", "a.b\\c", "", "\u{e9}"] {
+        let mut fine = honest_entry();
+        fine.pipe = pipe_name(user, fine.pid, 3);
+        assert_eq!(entry_problem(&fine, Some(99)), None, "{user:?}");
+    }
+}
+
+#[test]
+fn an_untrusted_entry_is_dropped_before_a_window_is_chosen() {
+    let good = honest_entry();
+    let mut bad = honest_entry();
+    bad.id += 1;
+    bad.pipe = "//./pipe/rustty.x".to_string();
+    let kept = trusted_entries(vec![good.clone(), bad], &|_| Some(99));
+    assert_eq!(kept, vec![good]);
+}
+
+#[test]
+fn two_entries_for_one_window_fail_closed_rather_than_picking_one() {
+    // Break caught: whichever file sorts first deciding who gets the token.
+    let good = honest_entry();
+    let mut fake = honest_entry();
+    fake.pid = 4243;
+    fake.pipe = r"\\.\pipe\rustty.evil.4243.1".to_string();
+    // The fake isn't dropped for being untrusted: that would hide the duplicate.
+    let kept = trusted_entries(vec![good.clone(), fake], &|_| Some(99));
+    assert_eq!(kept.len(), 2);
+    let error = select_window(&kept, Some(good.id), None).expect_err("refused");
+    assert_eq!(error.code, ErrorCode::NoInstance, "{error}");
+    let by_env = good.id.to_string();
+    let error = select_window(&kept, None, Some(&by_env)).expect_err("refused");
+    assert_eq!(error.code, ErrorCode::NoInstance, "{error}");
+    // Nothing named: nobody is chosen either.
+    assert!(select_window(&kept, None, None).is_err());
+}
+
 #[test]
 fn a_discovery_file_holds_only_the_public_facts() {
     // Break caught: the write token landing in a world of files other tools read.

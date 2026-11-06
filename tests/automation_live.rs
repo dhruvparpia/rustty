@@ -18,8 +18,10 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use rustty::automation::client::Transport;
-use rustty::automation::pipe::{PipeTransport, alive, open};
-use rustty::automation::{DiscoveryEntry, ErrorCode, discovery_dir, load_discovery};
+use rustty::automation::pipe::{PipeTransport, Server, alive, open, process_start_time};
+use rustty::automation::{
+    DiscoveryEntry, ErrorCode, discovery_dir, load_discovery, next_id, write_discovery,
+};
 use serde_json::{Value, json};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Threading::{
@@ -486,6 +488,75 @@ font-size = 30
     assert_eq!(refused.status.code(), Some(4), "{refused:?}");
     let listed = json_of(&window.ctl(&["--json", "list"]));
     assert_eq!(listed["tabs"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+#[ignore = "opens a window; run by hand"]
+fn a_spoofed_discovery_file_never_sees_the_real_windows_token() {
+    // The attack, against a real window: this process publishes the window's id
+    // with its own pid and pipe, and waits for a client holding the token.
+    let window = TestWindow::start("spoof", &format!("{BASE_CONFIG}automation-writes = true\n"));
+    let real = window.entry();
+    let private = window.scratch.join("attacker");
+    let attacker = Server::start(next_id(), false, Some(private.clone())).expect("server");
+    let pipe = load_discovery(&private, &|_| true)[0].pipe.clone();
+    let own_pid = std::process::id();
+    let fake = DiscoveryEntry {
+        id: real.id,
+        pipe,
+        pid: own_pid,
+        start_time: process_start_time(own_pid).expect("own start time"),
+        quick: false,
+        version: "0".to_string(),
+    };
+    let fake_file = write_discovery(&discovery_dir(&window.scratch), &fake).expect("planted");
+
+    let mcp_list = |window: &TestWindow| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rustty"))
+            .arg("mcp")
+            .env("APPDATA", &window.scratch)
+            .env("LOCALAPPDATA", &window.scratch)
+            .env("RUSTTY_WINDOW", real.id.to_string())
+            .env("RUSTTY_AUTOMATION_TOKEN", "the-token-a-boss-holds")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("started");
+        let mut stdin = child.stdin.take().expect("stdin");
+        let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+        ask(
+            &mut stdin,
+            &mut stdout,
+            1,
+            "initialize",
+            json!({"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "live", "version": "1"}}),
+        );
+        let reply = ask(
+            &mut stdin,
+            &mut stdout,
+            2,
+            "tools/call",
+            json!({"name": "list", "arguments": {}}),
+        );
+        drop(stdin);
+        child.wait().expect("ended");
+        reply
+    };
+
+    // Two files for one window: nobody gets anything until that is sorted out.
+    let reply = mcp_list(&window);
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert!(
+        attacker.next_request(&|_| true).is_none(),
+        "the attacker's pipe was told something"
+    );
+
+    // With the fake gone, the same client reaches the window.
+    std::fs::remove_file(&fake_file).expect("removed");
+    let reply = mcp_list(&window);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert!(attacker.next_request(&|_| true).is_none());
 }
 
 #[test]

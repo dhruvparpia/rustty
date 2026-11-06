@@ -129,6 +129,7 @@ impl Connector for WindowConnector {
         let entries = super::discovery_dir_from_env()
             .map(|dir| super::load_discovery(&dir, &super::pipe::alive))
             .unwrap_or_default();
+        let entries = super::trusted_entries(entries, &super::pipe::process_start_time);
         let entry = super::select_window(
             &entries,
             self.target.explicit,
