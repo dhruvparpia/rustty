@@ -820,6 +820,9 @@ pub struct Config {
     /// startup (TAB-026, WINDOW-015/016).
     #[serde(rename = "session-restore", default = "default_true")]
     pub session_restore: bool,
+    /// WELCOME-001: show the crab banner when rustty starts.
+    #[serde(default = "default_true")]
+    pub welcome: bool,
     /// SHELLINT-013/014: launch known shells (Git Bash, PowerShell, WSL
     /// bash) with the rustty integration script, and enable per-command
     /// tracking, navigation and completion notices. Explicit opt-in.
@@ -879,6 +882,7 @@ impl Default for Config {
             copy_on_select: false,
             bell: BellMode::default(),
             session_restore: true,
+            welcome: true,
             shell_integration: false,
             command_notify_ms: default_notify_ms(),
             detach_prefix: default_detach_prefix(),
@@ -912,6 +916,7 @@ impl PartialEq for Config {
             && self.cursor_blink == other.cursor_blink
             && self.copy_on_select == other.copy_on_select
             && self.session_restore == other.session_restore
+            && self.welcome == other.welcome
             && self.shell_integration == other.shell_integration
             && self.command_notify_ms == other.command_notify_ms
             && self.detach_prefix == other.detach_prefix

@@ -70,6 +70,10 @@ copy-on-select = true
 # background also raises a Windows toast (BELL-005).
 bell = "audible"
 
+# Show the crab banner when rustty starts with no other rustty window open
+# (WELCOME-001). It never appears on new tabs or splits.
+welcome = true
+
 # Reopen the previous run's tabs, splits and window position at startup
 # (TAB-026, WINDOW-015/016). Shells respawn in each pane's last reported
 # directory; the file is `session.toml` beside `config.toml`.

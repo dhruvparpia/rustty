@@ -129,6 +129,8 @@ pub mod tasks;
     reason = "THEME-010: the system theme check is a Win32 registry FFI boundary"
 )]
 pub mod theme;
+/// The startup banner: crab, status, key commands and a tip.
+pub mod welcome;
 /// Workspace templates (WORKSPACE-001..009): pure Rust store + schema.
 pub mod workspace;
 /// Worktree discovery (#92): existing Git worktrees, branch/path and availability.

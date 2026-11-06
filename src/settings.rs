@@ -142,6 +142,13 @@ pub fn settings(cfg: &Config) -> Vec<Setting> {
     );
     add(
         &mut out,
+        "welcome",
+        format!("{}", cfg.welcome),
+        "global",
+        false,
+    );
+    add(
+        &mut out,
         "session-restore",
         format!("{}", cfg.session_restore),
         "global",

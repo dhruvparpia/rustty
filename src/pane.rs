@@ -766,6 +766,14 @@ impl Pane {
         }
     }
 
+    /// Size the grid before a shell exists, so text can be written at the
+    /// window's real size ahead of the spawn.
+    pub fn fit_grid(&mut self, cols: usize, rows: usize) {
+        self.grid.resize(cols, rows);
+        self.parser.fit(&self.grid);
+        self.dirty = true;
+    }
+
     /// Colors for ANSI-16 output from now on. Text already on screen keeps
     /// the colors it was written with.
     pub const fn set_palette(&mut self, palette: [crate::color::Color; 16]) {
@@ -1240,6 +1248,13 @@ mod tests {
         pane.grid_mut().scroll_up(2);
         pane.update_follow();
         pane
+    }
+
+    #[test]
+    fn fit_grid_resizes_without_a_shell() {
+        let mut pane = Pane::with_size(80, 24, 100);
+        pane.fit_grid(100, 30);
+        assert_eq!((pane.grid().cols, pane.grid().rows), (100, 30));
     }
 
     #[test]

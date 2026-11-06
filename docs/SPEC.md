@@ -785,6 +785,16 @@ The product must support common terminal/TUI applications.
 
 ---
 
+## 9.13a Welcome banner
+
+| ID | Requirement | Priority |
+|---|---|---|
+| WELCOME-001 | When rustty starts with no other rustty window open, the focused pane shall show a banner before its shell starts: the crab, version and session status, key commands and a tip. `welcome = false` removes it. | P1 |
+| WELCOME-002 | The banner shall not appear on new tabs, splits, the quick terminal, `--workspace` or `--attach` launches, or panes viewing a host session. | P1 |
+| WELCOME-003 | From 78 columns the banner shows the crab; from 52 columns the text alone. Below 52 columns or 14 rows there is no banner. A tip that would not fit on one line is left out. | P1 |
+| WELCOME-004 | The crab's claws shall snap twice over about one second, then stop, leaving no timer running. With Windows animation effects off the crab shall not move. | P1 |
+| WELCOME-005 | The banner shall never delay the shell, write to the shell's input or use the network, and the animation shall stop rather than overwrite other text. | P0 |
+
 ## 9.14 Font requirements
 
 | ID | Requirement | Priority |
