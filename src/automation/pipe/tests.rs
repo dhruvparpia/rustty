@@ -32,6 +32,12 @@ struct Rig {
     departed: Vec<ClientId>,
 }
 
+impl Drop for Rig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 impl Rig {
     fn new(tag: &str) -> Self {
         let dir = temp_dir(tag);
@@ -529,6 +535,7 @@ fn starting_the_server_costs_the_window_little() {
         slowest = slowest.max(start.elapsed());
         drop(server);
     }
+    let _ = std::fs::remove_dir_all(&dir);
     println!("Server::start worst of 20: {slowest:?}");
     assert!(slowest < Duration::from_millis(50), "{slowest:?}");
 }

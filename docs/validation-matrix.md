@@ -186,6 +186,53 @@ Driven through the real window, with screenshots read by hand. Status was checke
 | Double-click on maximize | Maximizes, then restores |
 | Narrator on the drawn caption | Not run |
 
+## Local automation API (AUTO-001..015), 2026-11-06, build 26300
+
+Live and bench runs are at commit 5427954, on top of the COM fix d6e5ee1. The commit
+after it only adds this section and removes temp folders the tests left behind.
+
+Live runs are `cargo test --test automation_live -- --ignored --test-threads=1`, ignored
+by default because they open a window. Each window runs against a scratch `%APPDATA%`
+and `%LOCALAPPDATA%`, so it uses none of the person's settings and discovery can't find
+their windows. It starts without activation, and only its own process is stopped.
+
+| Check | Result | How |
+| --- | --- | --- |
+| Dispatcher, grants, ids, stale targets, rate limit, paging, events | pass | Headless against a real `App` with a fake window (`automation::ops`, `automation::events`) |
+| Concurrent clients, a client vanishing mid-request, a flooding client, a client that stops reading, oversized and malformed frames, a squatted pipe name, the wrong process on a pipe, the token over a pipe | pass | Real named pipe with the test thread as the window (`automation::pipe`) |
+| MCP over stdio, both eras | pass | The real stdio loop on a fake window (`automation::mcp`), and the real binary with no window (`tests/automation_cli.rs`) |
+| CLI parsing and exit codes | pass | Fake window (`automation::ctl`), and the real binary (`tests/automation_cli.rs`). Written alongside the code rather than before it, so checked by mutation: 8 of 8 deliberate breaks caught |
+| A boss's whole flow, sidebar on and sidebar off | pass | Live: reads, a refused write, the config key reloading, a background tab, its environment, the token absent, output in order, status changes, scrollback, split, focus, `exit 7`, stale ids, a program that won't start, closing the last tab, the reply still arriving, the discovery file going |
+| A command that ends reports its output and exit code | pass | Live: subscribe, `tab.open`, `pane-output`, then `pane-closed` with `exitCode` 3 |
+| `rustty mcp` driving a real window | pass | Live: handshake, `tools/list`, `list`, `tab_open`, `pane_send-text`, `pane_read` |
+| A wrong token gets no writes | pass | Live |
+| Painting | pass | `PrintWindow` read by eye: sidebar rows, titles, grid text sent through the API, and "Typed by automation" on the row |
+| The window never took the foreground | pass | Checked in the flow above and at the capture |
+| A shell's exit is noticed (AUTO-015) | pass | Real ConPTY, headless. Failed before the fix, as did ff51b46 and 0e7dae6 under the same launch |
+
+| Bench (release) | Numbers | Result |
+| --- | --- | --- |
+| `a_full_page_read_stays_well_inside_a_tick` | Worst read 4.2 ms; 9.6 MB of history in 74 pages. Before reads stopped on time: 34.6 ms for one 1 MiB page | pass |
+| `starting_the_server_costs_the_window_little` | 1.0 ms worst of 20, on the UI thread at window start | pass |
+
+Every other desktop bench was also run individually on this commit and passes, with
+0 allocations in the burst, damage and sidebar frames.
+
+**Not run:**
+
+- `open_boss_tab`, live. It has no caller until the boss exists. Its parts are covered:
+  the token over a real pipe, and `add_boss_token` and the environment scrub headless.
+- A stock MCP client (Claude Code, Claude Desktop, the inspector). The client side here
+  is a test harness speaking the published wire format, in both eras.
+- The modern `subscriptions/listen` stream and legacy event notifications against a real
+  window: covered against the fake window only.
+- `slow-client` against a real window. Covered over a real pipe with a test thread as
+  the window, which is the same code on the same side of it.
+- A dialog or a drag holding writes back, live. The holding is covered over a real pipe;
+  the two conditions in the window that trigger it are not.
+- Elevated windows and WSL sessions.
+- Linux and arm64 run nothing: they are `cargo check` only.
+
 ## Known gaps
 
 - The graphics marquee (progress animation) has no unit test; `a=;` key
