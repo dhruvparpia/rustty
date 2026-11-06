@@ -1730,10 +1730,9 @@ unsafe extern "system" fn wnd_proc(
                 if !s.quick
                     && let Ok(menu) =
                         build_menu(&s.profiles, &menu_theme_names(s.theme_dir.as_deref()))
+                    && let Some(old) = s.menu.replace(menu)
                 {
-                    if let Some(old) = s.menu.replace(menu) {
-                        let _ = unsafe { DestroyMenu(old) };
-                    }
+                    let _ = unsafe { DestroyMenu(old) };
                 }
                 let names: Vec<String> = s.profiles.iter().map(|p| p.name.clone()).collect();
                 rebuild_jumplist(&names);
@@ -4316,6 +4315,7 @@ fn menu_only_rows(workspace_open: bool, workspaces: &[String]) -> Vec<PaletteIte
 }
 
 /// The palette command that does the same as a menu item.
+#[cfg(test)]
 fn palette_command_for_menu(id: usize) -> Option<Command> {
     let action = |action| Some(Command::Action(action));
     match id {
