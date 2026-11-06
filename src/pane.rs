@@ -353,6 +353,8 @@ fn cwd_from_url(url: &str) -> String {
 /// A single terminal pane (one grid, one parser, one shell process).
 #[derive(Debug)]
 pub struct Pane {
+    /// Stable identity (AUTO-001): assigned at creation, never reused.
+    id: u64,
     grid: Grid,
     shell: Shell,
     parser: Parser,
@@ -404,6 +406,10 @@ pub struct Pane {
     screen_read_at: Option<std::time::Instant>,
     /// What the sessions sidebar remembers about this pane.
     activity: crate::rail::Activity,
+    /// The status from the last sidebar step, for readers that must not step.
+    rail_status: crate::rail::Status,
+    /// When automation last typed here (AUTO-011: shown on the sidebar row).
+    automation_input: Option<std::time::Instant>,
     /// Grid changed since the renderer last asked (repaint hint).
     dirty: bool,
     /// Mouse text selection, in absolute grid coordinates (WIN-004).
@@ -429,6 +435,7 @@ impl Pane {
     pub fn new() -> Self {
         Self {
             grid: Grid::new(),
+            id: crate::automation::next_id(),
             shell: Shell::new(),
             parser: Parser::new(),
             title: None,
@@ -455,6 +462,8 @@ impl Pane {
             screen_question: None,
             screen_read_at: None,
             activity: crate::rail::Activity::default(),
+            rail_status: crate::rail::Status::Idle,
+            automation_input: None,
             dirty: true,
             selection: None,
             bookmarks: Vec::new(),
@@ -471,6 +480,7 @@ impl Pane {
     pub fn with_size(cols: usize, rows: usize, scrollback: usize) -> Self {
         Self {
             grid: Grid::with_size(cols, rows, scrollback),
+            id: crate::automation::next_id(),
             shell: Shell::new(),
             parser: Parser::new(),
             title: None,
@@ -497,6 +507,8 @@ impl Pane {
             screen_question: None,
             screen_read_at: None,
             activity: crate::rail::Activity::default(),
+            rail_status: crate::rail::Status::Idle,
+            automation_input: None,
             dirty: true,
             selection: None,
             bookmarks: Vec::new(),
@@ -505,6 +517,20 @@ impl Pane {
             view_alias: None,
             view_controller: false,
         }
+    }
+
+    /// Stable identity (AUTO-001): assigned at creation, never reused.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The grid holding this pane's history: the main screen, even while the
+    /// alternate screen is showing. The alternate grid numbers its lines
+    /// independently, so a scrollback cursor only means something here.
+    #[must_use]
+    pub fn history_grid(&self) -> &Grid {
+        self.main_grid.as_ref().unwrap_or(&self.grid)
     }
 
     /// The pane's grid (viewport rows are `0..grid.rows`).
@@ -1111,6 +1137,40 @@ impl Pane {
     /// This pane's status for the sessions sidebar. `viewed` means the person
     /// can see it, which also clears anything waiting to be seen.
     pub fn rail_step(&mut self, viewed: bool, now_ms: u64) -> crate::rail::Status {
+        let status = self.step_activity(viewed, now_ms);
+        self.rail_status = status;
+        status
+    }
+
+    /// The status from the last [`Pane::rail_step`]. Stepping mutates what the
+    /// sidebar remembers, so anything else that wants the status reads this.
+    #[must_use]
+    pub const fn rail_status(&self) -> crate::rail::Status {
+        self.rail_status
+    }
+
+    /// The line the sidebar shows for the last computed status.
+    #[must_use]
+    pub fn rail_detail(&self) -> String {
+        crate::rail::tab_detail(
+            self.rail_status,
+            self.interrupted(),
+            self.attention_message(),
+        )
+    }
+
+    /// Record that automation just typed into this pane (AUTO-011).
+    pub fn note_automation_input(&mut self) {
+        self.automation_input = Some(std::time::Instant::now());
+    }
+
+    /// Time since automation last typed into this pane.
+    #[must_use]
+    pub fn automation_input_age(&self) -> Option<std::time::Duration> {
+        self.automation_input.map(|at| at.elapsed())
+    }
+
+    fn step_activity(&mut self, viewed: bool, now_ms: u64) -> crate::rail::Status {
         if viewed {
             self.mark_seen();
         }
@@ -1213,6 +1273,49 @@ impl Default for Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panes_get_distinct_ids_that_only_go_up() {
+        // Break caught: a closed pane's id naming a new pane.
+        let a = Pane::new();
+        let b = Pane::with_size(10, 4, 10);
+        assert_ne!(a.id(), 0);
+        assert!(b.id() > a.id());
+    }
+
+    #[test]
+    fn a_pane_remembers_the_status_it_last_stepped_to() {
+        // Break caught: automation stepping activity a second time per tick,
+        // which would clear "finished" and attention the sidebar still shows.
+        let mut pane = Pane::new();
+        assert_eq!(pane.rail_status(), crate::rail::Status::Idle);
+        pane.feed(b"\x1b]9;4;3;\x07");
+        let stepped = pane.rail_step(false, 0);
+        assert_eq!(stepped, crate::rail::Status::Working);
+        assert_eq!(pane.rail_status(), stepped);
+        assert_eq!(pane.rail_status(), stepped, "reading does not step");
+    }
+
+    #[test]
+    fn history_stays_the_main_screen_while_the_alternate_one_shows() {
+        // Break caught: a scrollback cursor reading the alt grid, whose line
+        // numbers are unrelated, and returning the wrong lines.
+        let mut pane = Pane::with_size(20, 3, 50);
+        pane.feed(b"main text\r\n");
+        let main_first = pane.history_grid().line_text_abs(0);
+        pane.feed(b"\x1b[?1049halt text");
+        assert!(pane.in_alt());
+        assert_eq!(pane.history_grid().line_text_abs(0), main_first);
+        assert_eq!(pane.grid().line_text_abs(0).as_deref(), Some("alt text"));
+    }
+
+    #[test]
+    fn automation_input_is_recorded_for_the_sidebar() {
+        let mut pane = Pane::new();
+        assert_eq!(pane.automation_input_age(), None);
+        pane.note_automation_input();
+        assert!(pane.automation_input_age().is_some());
+    }
     use crate::selection::Pos;
 
     #[test]

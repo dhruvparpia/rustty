@@ -175,7 +175,11 @@ impl SpawnOptions {
                 self.env.insert(name.to_string(), value.to_string());
             }
         }
-        // WSL passes on only what WSLENV lists.
+        self.list_in_wslenv(&["TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"]);
+    }
+
+    /// WSL passes on only what WSLENV lists.
+    fn list_in_wslenv(&mut self, names: &[&str]) {
         let key = self
             .env
             .keys()
@@ -186,12 +190,32 @@ impl SpawnOptions {
             .and_then(|key| self.env.get(key))
             .cloned()
             .or_else(|| std::env::var("WSLENV").ok());
-        let merged = wslenv_with(
-            current.as_deref(),
-            &["TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"],
-        );
+        let merged = wslenv_with(current.as_deref(), names);
         self.env
             .insert(key.unwrap_or_else(|| "WSLENV".to_string()), merged);
+    }
+
+    /// Set a variable, replacing any spelling of its name.
+    fn set_env_exact(&mut self, name: &str, value: String) {
+        self.env.retain(|key, _| !key.eq_ignore_ascii_case(name));
+        self.env.insert(name.to_string(), value);
+    }
+
+    /// Tell this session which window it is in (AUTO-006): `rustty ctl` and
+    /// `rustty mcp` run inside it then target that window by default. This
+    /// value always wins, so a session can't be pointed at another window.
+    pub fn add_window_env(&mut self, window: u64) {
+        let name = crate::automation::ENV_WINDOW;
+        self.set_env_exact(name, window.to_string());
+        self.list_in_wslenv(&[name]);
+    }
+
+    /// Hand this session the window's write token (AUTO-007). Only sessions a
+    /// window starts for a boss get it; nothing else ever calls this.
+    pub fn add_boss_token(&mut self, token: &str) {
+        let name = crate::automation::ENV_TOKEN;
+        self.set_env_exact(name, token.to_string());
+        self.list_in_wslenv(&[name]);
     }
 
     /// Options for `program` (no args) at `cols` x `rows`.
@@ -1260,6 +1284,33 @@ impl Drop for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_is_told_its_window_and_wsl_can_see_it() {
+        let mut opts = SpawnOptions::new("x", 80, 24);
+        opts.env
+            .insert("RUSTTY_WINDOW".to_string(), "wrong".to_string());
+        opts.add_window_env(7);
+        assert_eq!(opts.env.get("RUSTTY_WINDOW").map(String::as_str), Some("7"));
+        let wslenv = opts.env.get("WSLENV").cloned().unwrap_or_default();
+        assert!(wslenv.split(':').any(|n| n == "RUSTTY_WINDOW"), "{wslenv}");
+        assert!(!opts.env.contains_key("RUSTTY_AUTOMATION_TOKEN"));
+    }
+
+    #[test]
+    fn only_the_boss_helper_hands_out_the_token() {
+        let mut opts = SpawnOptions::new("x", 80, 24);
+        opts.add_boss_token("secret-value");
+        assert_eq!(
+            opts.env.get("RUSTTY_AUTOMATION_TOKEN").map(String::as_str),
+            Some("secret-value")
+        );
+        let wslenv = opts.env.get("WSLENV").cloned().unwrap_or_default();
+        assert!(
+            wslenv.split(':').any(|n| n == "RUSTTY_AUTOMATION_TOKEN"),
+            "{wslenv}"
+        );
+    }
 
     #[test]
     fn new_shell_is_inactive() {

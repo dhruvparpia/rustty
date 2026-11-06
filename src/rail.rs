@@ -60,6 +60,39 @@ pub enum Status {
     Background,
 }
 
+impl Status {
+    /// The status's name on the automation wire (AUTO-005). Clients match on
+    /// these, so they never change.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "needs-you",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+            Self::Working => "working",
+            Self::Finished => "finished",
+            Self::Idle => "idle",
+            Self::Exited => "exited",
+            Self::Background => "background",
+        }
+    }
+}
+
+/// How long a row says automation typed into its session.
+pub const AUTOMATION_NOTE: Duration = Duration::from_secs(5);
+
+/// The line under a row's title once automation typed into its session
+/// `age` ago (AUTO-011). Text written into the grid would desynchronise it
+/// from the program's own screen, so this is where the injection shows.
+#[must_use]
+pub fn automation_detail(detail: &str, age: Option<Duration>) -> &str {
+    if age.is_some_and(|age| age < AUTOMATION_NOTE) {
+        "Typed by automation"
+    } else {
+        detail
+    }
+}
+
 /// What one pane is reporting.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Signals<'a> {
@@ -326,6 +359,20 @@ pub fn detail_for(status: Status, message: Option<&str>) -> String {
     }
 }
 
+/// The line under a row's title, given what a session's panes report: a stopped
+/// agent while it is interrupted, otherwise what a notification said.
+#[must_use]
+pub fn tab_detail(status: Status, stopped: Option<&str>, message: Option<&str>) -> String {
+    detail_for(
+        status,
+        if status == Status::Interrupted {
+            stopped
+        } else {
+            message
+        },
+    )
+}
+
 /// What a placed item shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
@@ -472,6 +519,37 @@ pub fn effective_width(enabled: bool, client_width: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statuses_have_stable_wire_names() {
+        // Automation clients match on these; renaming one breaks them.
+        for (status, name) in [
+            (Status::NeedsYou, "needs-you"),
+            (Status::Failed, "failed"),
+            (Status::Interrupted, "interrupted"),
+            (Status::Working, "working"),
+            (Status::Finished, "finished"),
+            (Status::Idle, "idle"),
+            (Status::Exited, "exited"),
+            (Status::Background, "background"),
+        ] {
+            assert_eq!(status.as_str(), name);
+        }
+    }
+
+    #[test]
+    fn typing_by_automation_shows_on_the_row_for_a_while() {
+        // ADR §5: injection is visibly logged, without writing to the grid.
+        assert_eq!(automation_detail("Working", None), "Working");
+        assert_eq!(
+            automation_detail("Working", Some(Duration::from_secs(1))),
+            "Typed by automation"
+        );
+        assert_eq!(
+            automation_detail("Working", Some(AUTOMATION_NOTE)),
+            "Working"
+        );
+    }
 
     const S: Duration = Duration::from_secs(1);
 

@@ -16,6 +16,9 @@ pub mod app;
 #[cfg(windows)]
 #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
 pub mod attach;
+/// Local automation API (issue #44, docs/design-automation-api.md): pure core,
+/// dispatcher, events, pipe transport, `rustty ctl` and `rustty mcp`.
+pub mod automation;
 /// Bookmarks over a pane's history (issue #53, SPEC BKMK-001..003). Pure
 /// anchor math.
 pub mod bookmark;

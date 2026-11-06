@@ -528,9 +528,26 @@ fn wide_command_line(program: &str, args: &[String]) -> Vec<u16> {
 /// the profile's overrides applied (case-insensitive, Windows convention),
 /// as `KEY=VALUE\0` pairs terminated by an extra NUL.
 fn wide_environment(env: &BTreeMap<String, String>) -> Vec<u16> {
+    environment_text(std::env::vars(), env)
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// The block's text. The automation variables are never inherited (AUTO-007):
+/// they name one session's window and grant, so a window or host started from
+/// inside a boss session must not pass them on to every shell it opens. A
+/// session that should have them gets them explicitly, in `env`.
+fn environment_text(
+    inherited: impl Iterator<Item = (String, String)>,
+    env: &BTreeMap<String, String>,
+) -> String {
     let mut block = String::new();
-    for (key, value) in std::env::vars() {
-        if !env.iter().any(|(k, _)| k.eq_ignore_ascii_case(&key)) {
+    for (key, value) in inherited {
+        let private = [crate::automation::ENV_WINDOW, crate::automation::ENV_TOKEN]
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&key));
+        if !private && !env.iter().any(|(k, _)| k.eq_ignore_ascii_case(&key)) {
             block.push_str(&key);
             block.push('=');
             block.push_str(&value);
@@ -543,7 +560,7 @@ fn wide_environment(env: &BTreeMap<String, String>) -> Vec<u16> {
         block.push_str(value);
         block.push('\0');
     }
-    block.encode_utf16().chain(std::iter::once(0)).collect()
+    block
 }
 
 fn io_error(e: &windows::core::Error) -> io::Error {
@@ -553,6 +570,30 @@ fn io_error(e: &windows::core::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automation_variables_are_never_inherited() {
+        // Break caught: a window started from a boss session handing that
+        // session's token to every shell it opens, and a host session naming
+        // a window it has nothing to do with.
+        let inherited = vec![
+            ("PATH".to_string(), "p".to_string()),
+            ("RUSTTY_AUTOMATION_TOKEN".to_string(), "leak".to_string()),
+            ("rustty_window".to_string(), "9".to_string()),
+        ];
+        let mut env = BTreeMap::new();
+        let block = environment_text(inherited.clone().into_iter(), &env);
+        assert!(block.contains("PATH=p"));
+        assert!(!block.contains("leak"));
+        assert!(!block.to_ascii_uppercase().contains("RUSTTY_WINDOW"));
+        // What this session was explicitly given still goes through.
+        env.insert("RUSTTY_WINDOW".to_string(), "5".to_string());
+        env.insert("RUSTTY_AUTOMATION_TOKEN".to_string(), "mine".to_string());
+        let block = environment_text(inherited.into_iter(), &env);
+        assert!(block.contains("RUSTTY_WINDOW=5"));
+        assert!(block.contains("RUSTTY_AUTOMATION_TOKEN=mine"));
+        assert!(!block.contains("leak"));
+    }
 
     /// SHELL-021: the profile's environment replaces the inherited value
     /// (case-insensitively) and the block stays double-NUL terminated.

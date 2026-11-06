@@ -128,6 +128,25 @@ impl PaneTree {
         Self::count_node(&self.root)
     }
 
+    /// Each leaf's dot path from the root, in flatten order: `.0` for a lone
+    /// pane, then one component per split on the way down (`.1.0`).
+    #[must_use]
+    pub fn paths(&self) -> Vec<String> {
+        fn go(n: &Node, path: &str, out: &mut Vec<String>) {
+            match n {
+                Node::Leaf(_) if path.is_empty() => out.push(".0".to_string()),
+                Node::Leaf(_) => out.push(path.to_string()),
+                Node::VSplit { first, second, .. } | Node::HSplit { first, second, .. } => {
+                    go(first, &format!("{path}.0"), out);
+                    go(second, &format!("{path}.1"), out);
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(self.count());
+        go(&self.root, "", &mut out);
+        out
+    }
+
     /// All panes in flatten order (left-to-right, top-to-bottom).
     #[must_use]
     pub fn flatten(&self) -> Vec<Rc<RefCell<Pane>>> {

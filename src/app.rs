@@ -38,6 +38,8 @@ pub struct App {
     show_cwd: bool,
     /// Colors for ANSI-16 output in every pane (the window's theme).
     palette: [Color; 16],
+    /// This window's automation id: shells it starts learn it (AUTO-006).
+    window_id: Option<u64>,
 }
 
 impl App {
@@ -49,6 +51,7 @@ impl App {
             active: 0,
             show_cwd: true,
             palette: crate::color::ansi_palette(),
+            window_id: None,
         }
     }
 
@@ -61,7 +64,47 @@ impl App {
             active: 0,
             show_cwd: true,
             palette: crate::color::ansi_palette(),
+            window_id: None,
         }
+    }
+
+    /// Set the automation id shells started from now on are told about.
+    pub const fn set_window_id(&mut self, id: Option<u64>) {
+        self.window_id = id;
+    }
+
+    /// Tell a shell about to start which window it belongs to (AUTO-006).
+    pub fn apply_session_env(&self, opts: &mut SpawnOptions) {
+        if let Some(id) = self.window_id {
+            opts.add_window_env(id);
+        }
+    }
+
+    /// Index of the tab with this id (AUTO-001). `None` once it has closed:
+    /// ids are never reused, so a stale id can't find the tab in its slot.
+    #[must_use]
+    pub fn locate_tab(&self, id: u64) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.id() == id)
+    }
+
+    /// Tab index and flatten index of the pane with this id (AUTO-001).
+    #[must_use]
+    pub fn locate_pane(&self, id: u64) -> Option<(usize, usize)> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .find_map(|(t, tab)| tab.pane_index_of(id).map(|p| (t, p)))
+    }
+
+    /// Split a pane in any tab, keeping the selected tab and its focus, and
+    /// return the new pane's id. The caller spawns its shell.
+    pub fn split_tab_pane(&mut self, tab_idx: usize, pane_idx: usize, dir: Dir) -> Option<u64> {
+        let tab = self.tabs.get_mut(tab_idx)?;
+        let idx = tab.split_keep_focus(pane_idx, dir)?;
+        let id = tab.pane_at(idx)?.id();
+        self.apply_palette();
+        self.sync_tab_titles();
+        Some(id)
     }
 
     /// TAB-018: the active tab asks before its shells are closed.
@@ -425,16 +468,20 @@ impl App {
     /// Start a shell in the focused pane of the active tab, sized to its
     /// box (TTY-001, SPLIT-007: split panes get the tab's profile).
     pub fn spawn_active(&mut self, opts: &SpawnOptions) -> Result<(), ShellError> {
+        let window_id = self.window_id;
         match self.active_tab_mut() {
             Some(tab) => {
                 let (cols, rows) = tab
                     .active_rect()
                     .map_or((opts.cols, opts.rows), |r| (r.cols, r.rows));
-                let opts = SpawnOptions {
+                let mut opts = SpawnOptions {
                     cols,
                     rows,
                     ..opts.clone()
                 };
+                if let Some(id) = window_id {
+                    opts.add_window_env(id);
+                }
                 tab.pane_mut().spawn_shell(&opts)
             }
             None => Err(ShellError::NotRunning),
@@ -541,6 +588,56 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn targets_are_found_by_id_and_gone_after_closing() {
+        // Break caught (#56): a stale id resolving to whatever took its slot.
+        let mut app = App::with_size(80, 24, 100);
+        app.add_tab_sized(80, 24, 100);
+        let (first_tab, first_pane) = {
+            let tab = &app.tabs()[0];
+            (tab.id(), tab.pane().id())
+        };
+        let second_tab = app.tabs()[1].id();
+        assert_eq!(app.locate_tab(first_tab), Some(0));
+        assert_eq!(app.locate_tab(second_tab), Some(1));
+        assert_eq!(app.locate_pane(first_pane), Some((0, 0)));
+        assert!(!app.close_tab(0));
+        assert_eq!(app.locate_tab(first_tab), None);
+        assert_eq!(app.locate_pane(first_pane), None);
+        assert_eq!(app.locate_tab(second_tab), Some(0));
+        app.add_tab_sized(80, 24, 100);
+        assert_ne!(app.tabs()[1].id(), first_tab, "ids are never reused");
+    }
+
+    #[test]
+    fn splitting_a_background_tab_keeps_the_selection() {
+        let mut app = App::with_size(80, 24, 100);
+        app.add_tab_sized(80, 24, 100);
+        app.select_tab(1);
+        let fresh = app
+            .split_tab_pane(0, 0, Dir::Vertical)
+            .expect("split in the background tab");
+        assert_eq!(app.active_index(), 1);
+        assert_eq!(app.pane_count(), 1, "the active tab did not change");
+        assert_eq!(app.locate_pane(fresh), Some((0, 1)));
+        assert_eq!(app.split_tab_pane(5, 0, Dir::Vertical), None);
+    }
+
+    #[test]
+    fn every_shell_a_window_starts_names_that_window() {
+        // AUTO-006: RUSTTY_WINDOW selects a session's own window.
+        let mut app = App::new();
+        let mut opts = SpawnOptions::new("x", 80, 24);
+        app.apply_session_env(&mut opts);
+        assert!(!opts.env.contains_key("RUSTTY_WINDOW"));
+        app.set_window_id(Some(42));
+        app.apply_session_env(&mut opts);
+        assert_eq!(
+            opts.env.get("RUSTTY_WINDOW").map(String::as_str),
+            Some("42")
+        );
+    }
 
     #[test]
     fn starts_with_one_tab() {
