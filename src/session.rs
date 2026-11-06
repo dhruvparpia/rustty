@@ -81,6 +81,22 @@ impl Shape {
     }
 }
 
+/// The first saved tab with a pane in `dir`, however the path is spelled.
+#[must_use]
+pub fn tab_in_folder(session: &Session, dir: &str) -> Option<usize> {
+    let normal = |path: &str| {
+        path.replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    };
+    let wanted = normal(dir);
+    session.tabs.iter().position(|tab| {
+        let mut cwds = Vec::new();
+        tab.shape.leaf_cwds(&mut cwds);
+        cwds.iter().flatten().any(|cwd| normal(cwd) == wanted)
+    })
+}
+
 /// A saved tab: profile, title, focused pane, pane shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionTab {
@@ -320,5 +336,26 @@ mod tests {
         let mut agents = Vec::new();
         back.tabs[0].shape.leaf_agents(&mut agents);
         assert_eq!(agents, vec![None]);
+    }
+
+    #[test]
+    fn a_saved_tab_is_found_by_its_folder_however_it_is_spelled() {
+        // Break caught: a shortcut with a folder adding a new tab every launch.
+        let tab = |cwd: &str| SessionTab {
+            profile: "p".to_string(),
+            title: String::new(),
+            title_fixed: false,
+            focused_pane: 0,
+            shape: leaf(Some(cwd)),
+        };
+        let session = Session {
+            tabs: vec![tab("C:/other"), tab("C:/Work/API")],
+            focused_tab: 0,
+            window: None,
+        };
+        assert_eq!(tab_in_folder(&session, "C:/Work/API"), Some(1));
+        assert_eq!(tab_in_folder(&session, r"c:\work\api\"), Some(1));
+        assert_eq!(tab_in_folder(&session, "C:/Work"), None);
+        assert_eq!(tab_in_folder(&session, "C:/Work/API2"), None);
     }
 }

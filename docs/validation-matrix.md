@@ -131,6 +131,18 @@ One real run: Claude Code 2.1.319 as boss in a scratch Git repository, launched 
 | A worker asking a permission question, several workers at once, a real merge | Not run |
 | Boss after a restart | Not supported: a resumed `claude --continue` has neither the tools nor a token. Start a new boss |
 
+## Shortcuts pressed as keys, 2026-11-06
+
+`tests/keyboard_live.rs` sets Ctrl and Shift in a keyboard state shared only with the test window, then posts the key, so the person's focus is left alone. Earlier tests went through the menu, which is why `Ctrl+Shift+Enter` could be dead from 2026-11-01 until now.
+
+| Check | Result |
+|---|---|
+| `Ctrl+Shift+Enter` | Splits right. Failed before the fix |
+| `Ctrl+Shift+-` | Splits below |
+| `rustty <folder>` with a saved session | Saved tab kept, folder's tab in front. Failed before the fix |
+| Every other shortcut through this path | Not run. Most built-in shortcuts have never been pressed as keys by a test |
+| A person's real keyboard | Not run |
+
 ## Skinned dialogs (DIALOG-001), 2026-11-06
 
 `tests/dialog_live.rs` drives real dialogs, posting keys to the focused control so they go through the dialog's own message loop. Screenshots were read by eye in `copper-dark` and `copper-light`.

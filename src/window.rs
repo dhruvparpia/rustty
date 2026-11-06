@@ -2180,11 +2180,24 @@ fn init_window(hwnd: HWND) {
         }
     }
     if restored {
+        // A folder on the command line is what the person asked for, and the saved
+        // layout is still theirs: keep both, with that folder in front.
+        let folder = state_ref(hwnd).and_then(|s| {
+            let dir = s.spawn.cwd.clone()?;
+            let saved = s.restore.as_ref()?;
+            let tab = crate::session::tab_in_folder(saved, &dir);
+            Some((dir, tab))
+        });
         // The bar height follows the restored tab count (TAB-010 "auto");
         // grid and every tab must follow before shells spawn.
         sync_tab_bar(hwnd);
         if let Some(s) = state_mut(hwnd) {
             spawn_restored(s);
+        }
+        match folder {
+            Some((_, Some(tab))) => activate_tab(hwnd, tab),
+            Some((dir, None)) => open_session_in(hwnd, std::path::Path::new(&dir), None),
+            None => {}
         }
     }
     if let Some(s) = state_mut(hwnd) {
@@ -3930,7 +3943,7 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
                 switch_tab_rel(hwnd, -1);
                 true
             }
-            0x0A => {
+            0x0D => {
                 // Ctrl+Shift+Enter: split the focused pane, new pane right
                 // (SPLIT-005)
                 split_pane(hwnd, Dir::Vertical);

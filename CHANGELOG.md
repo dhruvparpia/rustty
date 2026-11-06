@@ -62,6 +62,8 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
   worktree and prints its path.
 - The sidebar now shows when Claude Code is waiting on you, with its actual question, read from its
   screen. Programs can also report their status directly through OSC 7501.
+- Fixed: `Ctrl+Shift+Enter` never split a pane: it matched a key code Windows does not send. It now splits right, as the welcome banner says.
+- Fixed: `rustty C:\folder` was ignored when a saved session existed. The saved tabs now come back with that folder's tab in front, reusing one already there.
 - Fixed: a window started without activation, such as from a "Run minimized" shortcut, had no
   renderer and could not draw.
 - Fixed: `CSI > 4 m`, which Claude Code sends at startup, turned on underline for all later text.
