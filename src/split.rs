@@ -353,7 +353,8 @@ impl PaneTree {
         fn go(n: &Node) -> crate::session::Shape {
             match n {
                 Node::Leaf(p) => crate::session::Shape::Leaf {
-                    cwd: p.borrow().cwd().map(str::to_owned),
+                    cwd: p.borrow().saved_cwd().map(str::to_owned),
+                    agent: p.borrow().saved_agent().map(str::to_owned),
                 },
                 Node::VSplit {
                     ratio,
@@ -394,7 +395,7 @@ impl PaneTree {
             make_leaf: &mut dyn FnMut(Option<&str>) -> Rc<RefCell<Pane>>,
         ) -> Node {
             match s {
-                crate::session::Shape::Leaf { cwd } => Node::Leaf(make_leaf(cwd.as_deref())),
+                crate::session::Shape::Leaf { cwd, .. } => Node::Leaf(make_leaf(cwd.as_deref())),
                 crate::session::Shape::Split { dir, ratio, a, b } if depth > 0 => {
                     let first = Box::new(go(a, depth - 1, make_leaf));
                     let second = Box::new(go(b, depth - 1, make_leaf));

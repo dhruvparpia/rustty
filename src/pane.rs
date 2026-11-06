@@ -390,6 +390,12 @@ pub struct Pane {
     last_input: Option<std::time::Instant>,
     /// When the grid last changed size.
     last_resize: Option<std::time::Instant>,
+    /// The agent CLI running here now (RESTORE-002).
+    agent: Option<&'static str>,
+    /// The agent a restart stopped here, until it is resumed or dismissed.
+    interrupted: Option<String>,
+    /// Where the agent, or else the shell, is really running.
+    process_cwd: Option<String>,
     /// What the sessions sidebar remembers about this pane.
     activity: crate::rail::Activity,
     /// Grid changed since the renderer last asked (repaint hint).
@@ -436,6 +442,9 @@ impl Pane {
             last_output: None,
             last_input: None,
             last_resize: None,
+            agent: None,
+            interrupted: None,
+            process_cwd: None,
             activity: crate::rail::Activity::default(),
             dirty: true,
             selection: None,
@@ -472,6 +481,9 @@ impl Pane {
             last_output: None,
             last_input: None,
             last_resize: None,
+            agent: None,
+            interrupted: None,
+            process_cwd: None,
             activity: crate::rail::Activity::default(),
             dirty: true,
             selection: None,
@@ -687,6 +699,13 @@ impl Pane {
                 match event {
                     ParserEvent::Title(title) => self.title = Some(title),
                     ParserEvent::Cwd(url) => self.record_cwd(&url),
+                    ParserEvent::CwdPath(path) => {
+                        let path = path.trim_matches('"').replace('\\', "/");
+                        if !path.is_empty() {
+                            self.cwd = Some(path);
+                            self.shell_host = None;
+                        }
+                    }
                     // The parser owns the link pen and the URI table; the
                     // renderer and window layer read them on demand.
                     ParserEvent::Hyperlink(_) => {}
@@ -906,6 +925,7 @@ impl Pane {
     /// Send keyboard/paste bytes to the shell (TTY-004..TTY-017).
     pub fn send_input(&mut self, bytes: &[u8]) -> Result<(), ShellError> {
         self.input_seen = true;
+        self.interrupted = None;
         self.last_input = Some(std::time::Instant::now());
         self.shell.write_input(bytes)
     }
@@ -950,6 +970,50 @@ impl Pane {
         self.last_input.map(|at| at.elapsed())
     }
 
+    /// Record the agent CLI now running here.
+    pub fn set_agent(&mut self, agent: Option<&'static str>) {
+        self.agent = agent;
+        if agent.is_some() {
+            self.interrupted = None;
+        }
+    }
+
+    /// Record that a restart stopped `agent` here.
+    pub fn set_interrupted(&mut self, agent: Option<String>) {
+        self.interrupted = agent;
+    }
+
+    /// The agent a restart stopped here.
+    #[must_use]
+    pub fn interrupted(&self) -> Option<&str> {
+        self.interrupted.as_deref()
+    }
+
+    /// Record where the agent, or else the shell, is running.
+    pub fn set_process_cwd(&mut self, cwd: Option<String>) {
+        self.process_cwd = cwd;
+    }
+
+    /// The folder this pane is really in. A running agent's own folder wins.
+    /// Next comes what the shell reported, since `cd` in PowerShell does not
+    /// move its process.
+    #[must_use]
+    pub fn saved_cwd(&self) -> Option<&str> {
+        if self.agent.is_some() && self.process_cwd.is_some() {
+            return self.process_cwd.as_deref();
+        }
+        self.cwd.as_deref().or(self.process_cwd.as_deref())
+    }
+
+    /// The agent to remember across a restart. A resume runs in the saved
+    /// folder, so without one there is nothing safe to offer.
+    #[must_use]
+    pub fn saved_agent(&self) -> Option<&str> {
+        self.interrupted
+            .as_deref()
+            .or_else(|| self.agent.filter(|_| self.saved_cwd().is_some()))
+    }
+
     /// Forget work the sidebar was not watching, so showing it again does not
     /// report a false "Finished".
     pub const fn reset_rail_activity(&mut self) {
@@ -971,7 +1035,12 @@ impl Pane {
             output_age: self.output_age(),
             input_age: self.input_age(),
         };
-        self.activity.step(&signals, viewed, now_ms)
+        let status = self.activity.step(&signals, viewed, now_ms);
+        if self.interrupted.is_some() && !signals.exited && status != crate::rail::Status::NeedsYou
+        {
+            return crate::rail::Status::Interrupted;
+        }
+        status
     }
 
     /// Whether the user has sent this pane any input. Terminal replies do not
@@ -1429,6 +1498,65 @@ mod tests {
         assert!(pane.output_age().is_some());
         let _ = pane.send_input(b"y");
         assert!(pane.input_age().is_some());
+    }
+
+    #[test]
+    fn a_stopped_agent_shows_until_resumed_or_dismissed() {
+        // Break caught: a restart silently losing a running agent.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.set_interrupted(Some("claude".to_string()));
+        assert_eq!(pane.rail_step(true, 0), crate::rail::Status::Interrupted);
+        assert_eq!(pane.interrupted(), Some("claude"));
+        let _ = pane.send_input(b"x");
+        assert_eq!(pane.interrupted(), None, "typing dismisses it");
+
+        pane.set_interrupted(Some("claude".to_string()));
+        pane.set_agent(Some("claude"));
+        assert_eq!(pane.interrupted(), None, "it is running again");
+    }
+
+    #[test]
+    fn only_an_agent_with_a_known_folder_is_remembered() {
+        // Break caught: `claude --continue` resuming a conversation from the
+        // wrong folder.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.set_agent(Some("claude"));
+        assert_eq!(pane.saved_agent(), None);
+        pane.feed(b"\x1b]7;file://DESKTOP/C:/src/rust\x07");
+        assert_eq!(pane.saved_agent(), Some("claude"));
+        pane.set_agent(None);
+        assert_eq!(pane.saved_agent(), None);
+        pane.set_interrupted(Some("codex".to_string()));
+        assert_eq!(pane.saved_agent(), Some("codex"), "kept across restarts");
+    }
+
+    #[test]
+    fn an_agents_own_folder_beats_what_the_shell_last_said() {
+        // Break caught: PowerShell reports nothing, so a running agent was
+        // forgotten; or the shell's old folder resumed the wrong conversation.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.set_agent(Some("claude"));
+        pane.set_process_cwd(Some("C:/work/api".to_string()));
+        assert_eq!(pane.saved_cwd(), Some("C:/work/api"));
+        assert_eq!(pane.saved_agent(), Some("claude"));
+        pane.feed(b"\x1b]7;file://DESKTOP/C:/old\x07");
+        assert_eq!(pane.saved_cwd(), Some("C:/work/api"));
+        pane.set_agent(None);
+        pane.set_process_cwd(Some("C:/shell/start".to_string()));
+        assert_eq!(
+            pane.saved_cwd(),
+            Some("C:/old"),
+            "no agent: the shell's report wins"
+        );
+    }
+
+    #[test]
+    fn a_prompt_directory_report_sets_the_folder() {
+        // OSC 9;9 is how many Windows prompts report where they are.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.feed(b"\x1b]9;9;\"C:\\src\\rust\"\x07");
+        assert_eq!(pane.cwd(), Some("C:/src/rust"));
+        assert!(!pane.needs_attention());
     }
 
     #[test]

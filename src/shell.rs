@@ -449,6 +449,8 @@ pub fn probe_shell(cfg: &Config) -> SpawnOptions {
 /// and reports output chunks plus the exit event (TTY-025).
 pub struct Shell {
     state: ShellState,
+    /// The child's process id, while this shell owns a console.
+    pid: Option<u32>,
     #[cfg(windows)]
     inner: Option<Inner>,
     #[cfg(windows)]
@@ -490,6 +492,7 @@ impl Shell {
     pub fn new() -> Self {
         Self {
             state: ShellState::Inactive,
+            pid: None,
             #[cfg(windows)]
             inner: None,
             #[cfg(windows)]
@@ -506,6 +509,13 @@ impl Shell {
             view: None,
             view_notice: false,
         }
+    }
+
+    /// The child's process id, while this shell owns a console. A session
+    /// view has none: its process belongs to the host.
+    #[must_use]
+    pub const fn process_id(&self) -> Option<u32> {
+        if self.is_running() { self.pid } else { None }
     }
 
     /// Current lifecycle state.
@@ -576,6 +586,7 @@ impl Shell {
             None,
         )
         .map_err(spawn_err)?;
+        self.pid = Some(conpty::process_id(&process)).filter(|&pid| pid != 0);
         // The primary thread handle is not needed after spawn (WIN-001:
         // no handle leaks); dropping the SendHandle closes it.
         drop(thread);

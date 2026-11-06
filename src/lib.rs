@@ -87,6 +87,8 @@ pub mod pane;
 pub mod parser;
 // Render hot-path benchmark (NFR-113/NFR-114): tests only, ignored by
 // default because Direct2D needs a desktop session.
+/// The sessions sidebar: session status and row layout.
+pub mod agents;
 #[cfg(all(test, windows))]
 #[allow(
     unsafe_code,
@@ -94,7 +96,6 @@ pub mod parser;
 )]
 mod perf_bench;
 pub mod portable;
-/// The sessions sidebar: session status and row layout.
 pub mod rail;
 /// Terminal search over screen + scrollback (SPEC SEARCH-001..015).
 pub mod search;

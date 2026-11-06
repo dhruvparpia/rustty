@@ -40,6 +40,9 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Added
 
+- Restart safety: the session is saved when Windows shuts down and every 30 seconds, and panes that
+  were running Claude Code or Codex come back as Interrupted, with a click to resume. Sidebar
+  projects now follow an agent's real folder, even when the shell reports none.
 - A sessions sidebar, on by default: every session grouped by project with what it is doing
   (needs you, working, finished, ready, exited), plus background host sessions you can click to
   open and type in (read-only if another window controls them). It reads signals agent CLIs already send. Ctrl+Shift+S or `session-rail = false` turns it

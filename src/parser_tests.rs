@@ -868,13 +868,13 @@ mod tests {
         // "Needs you" on every background session.
         let mut p = Parser::new();
         let mut g = grid();
-        for seq in [
-            "\x1b]9;9;C:\\Users\\me\\src\x07",
-            "\x1b]9;12\x07",
-            "\x1b]9;1;500\x07",
-        ] {
+        for seq in ["\x1b]9;12\x07", "\x1b]9;1;500\x07"] {
             assert_eq!(feed(&mut p, &mut g, seq), vec![], "{seq}");
         }
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]9;9;C:\\Users\\me\\src\x07"),
+            vec![ParserEvent::CwdPath("C:\\Users\\me\\src".to_string())]
+        );
         assert_eq!(
             feed(&mut p, &mut g, "\x1b]9;2 tests failed\x07"),
             vec![ParserEvent::Notify("2 tests failed".to_string())]

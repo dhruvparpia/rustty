@@ -26,6 +26,8 @@ pub enum ParserEvent {
     Title(String),
     /// OSC 9 or OSC 777;notify: a program is asking for attention.
     Notify(String),
+    /// OSC 9;9: a prompt reports its folder as a plain path.
+    CwdPath(String),
     /// OSC 9;4: a program reports progress (`true`) or that it has stopped.
     Progress(bool),
     /// The shell asked for the alternate screen (`CSI ?1049h` family).
@@ -784,6 +786,8 @@ impl Parser {
                         // State 0 clears; 1-4 are normal, error, busy and paused.
                         let state = progress.split(';').next().unwrap_or("0");
                         events.push(ParserEvent::Progress(state != "0" && !state.is_empty()));
+                    } else if let Some(path) = rest.strip_prefix("9;") {
+                        events.push(ParserEvent::CwdPath(path.to_string()));
                     } else if !rest.split(';').next().is_some_and(|first| {
                         !first.is_empty() && first.bytes().all(|b| b.is_ascii_digit())
                     }) {

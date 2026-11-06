@@ -26,7 +26,7 @@
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use std::cell::RefCell;
 use std::rc::Weak;
@@ -174,6 +174,8 @@ const APP_NAME: &str = "rustty";
 
 /// Shell-output poll period in milliseconds.
 const POLL_MS: u32 = 33;
+/// This process holds the instance mutex, so its layout is the one to keep.
+static PRIMARY_INSTANCE: AtomicBool = AtomicBool::new(false);
 
 /// Timer id for the shell-output poll.
 const POLL_TIMER: usize = 1;
@@ -1327,6 +1329,17 @@ struct WindowState {
     rail_enabled: bool,
     /// The left button went down in the grid and has not come back up.
     grid_pressed: bool,
+    /// When to look for agent CLIs next (RESTORE-002).
+    agent_next_poll: Option<Instant>,
+    /// The process list being read off the UI thread.
+    agent_rx: Option<std::sync::mpsc::Receiver<Vec<crate::agents::Inspection>>>,
+    /// When to save the session next (RESTORE-001).
+    session_next_save: Option<Instant>,
+    /// What the last periodic save wrote.
+    session_saved: Option<crate::session::Session>,
+    /// Windows is shutting down: agents dying now must not be recorded as
+    /// having been closed.
+    shutting_down: bool,
     /// Its width right now: 0 when off, too narrow, fullscreen or quick.
     rail_w: f32,
     /// When its rows are next rebuilt.
@@ -1979,8 +1992,24 @@ unsafe extern "system" fn wnd_proc(
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
         }
+        windows::Win32::UI::WindowsAndMessaging::WM_QUERYENDSESSION => {
+            save_for_shutdown(hwnd);
+            LRESULT(1)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_ENDSESSION => {
+            if wparam.0 == 0 {
+                // Something cancelled the shutdown: back to normal.
+                if let Some(s) = state_mut(hwnd) {
+                    s.shutting_down = false;
+                }
+            } else {
+                save_for_shutdown(hwnd);
+            }
+            LRESULT(0)
+        }
         WM_TIMER => {
             rail_tick(hwnd);
+            agent_tick(hwnd);
             if wparam.0 == CLACK_TIMER {
                 clack_tick(hwnd);
             } else if wparam.0 == BLINK_TIMER {
@@ -2072,7 +2101,7 @@ unsafe extern "system" fn wnd_proc(
                 } else {
                     // TAB-026/WINDOW-015/016: save while every shell is still
                     // live (fresh OSC 7 cwds); a failed save never blocks quit.
-                    if state.cfg.session_restore {
+                    if state.cfg.session_restore && !state.shutting_down {
                         let session = snapshot_session(&state, hwnd);
                         if let Err(e) = crate::session::save(&session) {
                             eprintln!("rustty: session save failed: {e}");
@@ -2423,6 +2452,11 @@ fn create_quick_window() {
         clack: None,
         rail_enabled: false,
         grid_pressed: false,
+        agent_next_poll: None,
+        agent_rx: None,
+        session_next_save: None,
+        session_saved: None,
+        shutting_down: false,
         rail_w: 0.0,
         rail_next_tick: None,
         rail_next_host_poll: None,
@@ -2671,10 +2705,15 @@ fn spawn_restored(s: &mut WindowState) {
             .as_deref()
             .and_then(|tabs| tabs.get(i))
             .map_or(&[], Vec::as_slice);
-        if let Some(tab) = s.app.tab_at_mut(i)
-            && let Err(e) = tab.spawn_panes_cmds(&opts, &cwds, cmds)
-        {
-            eprintln!("rustty: shell spawn failed: {e}");
+        if let Some(tab) = s.app.tab_at_mut(i) {
+            if let Err(e) = tab.spawn_panes_cmds(&opts, &cwds, cmds) {
+                eprintln!("rustty: shell spawn failed: {e}");
+            }
+            // RESTORE-003: what the last run left running.
+            let mut agents = Vec::new();
+            st.shape.leaf_agents(&mut agents);
+            let mut leaf = agents.into_iter();
+            tab.for_each_pane(|pane, _| pane.set_interrupted(leaf.next().flatten()));
         }
     }
 }
@@ -2904,6 +2943,112 @@ fn sync_rail_width(hwnd: HWND) {
     }
 }
 
+/// Keep what a restart needs current: which panes run an agent, and the saved
+/// session (RESTORE-001, RESTORE-002). The process list is read off the UI
+/// thread; a save writes only when the session changed.
+fn agent_tick(hwnd: HWND) {
+    const POLL: Duration = Duration::from_secs(5);
+    const SAVE: Duration = Duration::from_secs(30);
+    let now = Instant::now();
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.quick || s.shutting_down {
+        return;
+    }
+    if let Some(rx) = &s.agent_rx {
+        match rx.try_recv() {
+            Ok(found) => {
+                s.agent_rx = None;
+                for i in 0..s.app.tab_count() {
+                    if let Some(tab) = s.app.tab_at_mut(i) {
+                        tab.for_each_pane(|pane, _| {
+                            let root = pane.shell().process_id();
+                            if let Some(seen) = found.iter().find(|seen| Some(seen.root) == root) {
+                                pane.set_agent(seen.agent);
+                                pane.set_process_cwd(seen.cwd.clone());
+                            }
+                        });
+                    }
+                }
+            }
+            Err(TryRecvError::Disconnected) => s.agent_rx = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+    if s.agent_rx.is_none() && s.agent_next_poll.is_none_or(|next| now >= next) {
+        s.agent_next_poll = Some(now + POLL);
+        let mut roots = Vec::new();
+        for i in 0..s.app.tab_count() {
+            if let Some(tab) = s.app.tab_at_mut(i) {
+                tab.for_each_pane(|pane, _| roots.extend(pane.shell().process_id()));
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("rustty-agents".to_string())
+            .spawn(move || {
+                let table = crate::agents::process_table();
+                let found = roots
+                    .into_iter()
+                    .map(|root| crate::agents::inspect(&table, root))
+                    .collect();
+                let _ = tx.send(found);
+            });
+        if spawned.is_ok() {
+            s.agent_rx = Some(rx);
+        }
+    }
+    let due = s.session_next_save.is_none_or(|next| now >= next);
+    if due {
+        s.session_next_save = Some(now + SAVE);
+        // A second window would overwrite the first one's layout.
+        if s.cfg.session_restore && PRIMARY_INSTANCE.load(Ordering::Acquire) {
+            let session = snapshot_session(s, hwnd);
+            if s.session_saved.as_ref() != Some(&session) {
+                if let Err(e) = crate::session::save(&session) {
+                    eprintln!("rustty: session save failed: {e}");
+                }
+                s.session_saved = Some(session);
+            }
+        }
+    }
+}
+
+/// Windows is ending the session (RESTORE-001): save now, while everything is
+/// still known. It may not get as far as closing this window.
+fn save_for_shutdown(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.quick {
+        return;
+    }
+    if !s.shutting_down && s.cfg.session_restore {
+        let session = snapshot_session(s, hwnd);
+        if let Err(e) = crate::session::save(&session) {
+            eprintln!("rustty: session save failed: {e}");
+        }
+    }
+    s.shutting_down = true;
+}
+
+/// Run what a restart stopped in the active tab (RESTORE-003). The name comes
+/// from a fixed table, never straight from the session file.
+fn resume_interrupted(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(tab) = s.app.active_tab_mut() else {
+        return;
+    };
+    tab.for_each_pane(|pane, _| {
+        let Some(agent) = pane.interrupted().map(str::to_string) else {
+            return;
+        };
+        match crate::agents::resume_command(&agent) {
+            Some(command) => {
+                let _ = pane.send_input(format!("{command}\r").as_bytes());
+            }
+            None => pane.set_interrupted(None),
+        }
+    });
+}
+
 /// Show or hide the sessions sidebar.
 fn toggle_session_rail(hwnd: HWND) {
     if let Some(s) = state_mut(hwnd) {
@@ -2928,23 +3073,34 @@ fn build_rail_rows(s: &mut WindowState, focused: bool, now_ms: u64) -> Vec<rail:
         let viewed = i == active && focused;
         let mut statuses = Vec::new();
         let mut message = None;
+        let mut stopped = None;
         tab.for_each_pane(|pane, _| {
             statuses.push(pane.rail_step(viewed, now_ms));
             if message.is_none() {
                 message = pane.attention_message().map(str::to_string);
             }
+            if stopped.is_none() {
+                stopped = pane.interrupted().map(str::to_string);
+            }
             shown_aliases.extend(pane.view_alias());
         });
         let status = rail::most_urgent(statuses);
         let title = rail::row_title(tab.title(), tab.profile());
-        let project = match tab.pane().cwd() {
+        let project = match tab.pane().saved_cwd() {
             Some(cwd) => rail::project_of(Some(cwd)),
             None => s.rail_home_project.clone(),
         };
         rows.push(rail::Row {
             target: rail::Target::Tab(i),
             title,
-            detail: rail::detail_for(status, message.as_deref()),
+            detail: rail::detail_for(
+                status,
+                if status == rail::Status::Interrupted {
+                    stopped.as_deref()
+                } else {
+                    message.as_deref()
+                },
+            ),
             project,
             status,
             active: i == active,
@@ -3110,7 +3266,12 @@ fn rail_click(hwnd: HWND, x: f32, y: f32) {
     match hit {
         rail::Hit::New => new_tab(hwnd),
         rail::Hit::Row(i) => match target(i) {
-            Some(rail::Target::Tab(tab)) => activate_tab(hwnd, tab),
+            Some(rail::Target::Tab(tab)) => {
+                activate_tab(hwnd, tab);
+                if status(i) == rail::Status::Interrupted {
+                    resume_interrupted(hwnd);
+                }
+            }
             Some(rail::Target::Host(alias)) => {
                 // Fresh, not the last poll: taking control from someone who
                 // attached a moment ago would take their keyboard away.
@@ -7688,6 +7849,20 @@ pub fn run(
 ) -> anyhow::Result<()> {
     // Held until this process exits, so a later launch knows a window is open.
     let instance = InstanceGuard::acquire(INSTANCE_MUTEX);
+    PRIMARY_INSTANCE.store(instance.is_some(), Ordering::Release);
+    if instance.is_some() {
+        // RESTORE-001: come back after a Windows Update restart, if the
+        // person's "restart apps" setting allows it. Not after a crash.
+        use windows::Win32::System::Recovery::{
+            RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RegisterApplicationRestart,
+        };
+        let _ = unsafe {
+            RegisterApplicationRestart(
+                PCWSTR::null(),
+                RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_PATCH,
+            )
+        };
+    }
     let greet = welcome::should_show(&welcome::Launch {
         quick: false,
         workspace: workspace.is_some(),
@@ -7843,6 +8018,11 @@ pub fn run(
         clack: None,
         rail_enabled: cfg.session_rail,
         grid_pressed: false,
+        agent_next_poll: None,
+        agent_rx: None,
+        session_next_save: None,
+        session_saved: None,
+        shutting_down: false,
         rail_w: 0.0,
         rail_next_tick: None,
         rail_next_host_poll: None,

@@ -44,6 +44,8 @@ const MESSAGE_MAX_CHARS: usize = 120;
 pub enum Status {
     /// Asked for attention: a bell or a notification.
     NeedsYou,
+    /// A restart stopped its agent (RESTORE-003).
+    Interrupted,
     /// Busy right now.
     Working,
     /// Finished while nobody was looking.
@@ -214,11 +216,12 @@ impl Activity {
 pub fn most_urgent(statuses: impl IntoIterator<Item = Status>) -> Status {
     let rank = |status: &Status| match status {
         Status::NeedsYou => 0,
-        Status::Working => 1,
-        Status::Finished => 2,
-        Status::Idle => 3,
-        Status::Background => 4,
-        Status::Exited => 5,
+        Status::Interrupted => 1,
+        Status::Working => 2,
+        Status::Finished => 3,
+        Status::Idle => 4,
+        Status::Background => 5,
+        Status::Exited => 6,
     };
     statuses
         .into_iter()
@@ -297,6 +300,10 @@ pub fn detail_for(status: Status, message: Option<&str>) -> String {
     match (status, message) {
         (Status::NeedsYou, Some(message)) if !message.is_empty() => message.to_string(),
         (Status::NeedsYou, _) => "Needs you".to_string(),
+        (Status::Interrupted, Some(agent)) if !agent.is_empty() => {
+            format!("Interrupted. Click to resume {agent}")
+        }
+        (Status::Interrupted, _) => "Interrupted".to_string(),
         (Status::Working, _) => "Working".to_string(),
         (Status::Finished, _) => "Finished".to_string(),
         (Status::Idle, _) => "Ready".to_string(),
@@ -963,5 +970,22 @@ mod tests {
         assert_eq!(drag_x(10.0, RAIL_WIDTH, true), RAIL_WIDTH);
         assert_eq!(drag_x(300.0, RAIL_WIDTH, true), 300.0);
         assert_eq!(drag_x(10.0, RAIL_WIDTH, false), 10.0);
+    }
+
+    #[test]
+    fn an_interrupted_row_says_what_a_click_does() {
+        assert_eq!(
+            detail_for(Status::Interrupted, Some("claude")),
+            "Interrupted. Click to resume claude"
+        );
+        assert_eq!(detail_for(Status::Interrupted, None), "Interrupted");
+        assert_eq!(
+            most_urgent([Status::Working, Status::Interrupted, Status::Idle]),
+            Status::Interrupted
+        );
+        assert_eq!(
+            most_urgent([Status::Interrupted, Status::NeedsYou]),
+            Status::NeedsYou
+        );
     }
 }

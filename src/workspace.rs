@@ -87,7 +87,7 @@ impl WsShape {
     #[must_use]
     pub fn from_session(shape: &session::Shape) -> Self {
         match shape {
-            session::Shape::Leaf { cwd } => Self::Leaf {
+            session::Shape::Leaf { cwd, .. } => Self::Leaf {
                 cwd: cwd.clone(),
                 command: None,
             },
@@ -111,10 +111,14 @@ impl WsShape {
 
     fn to_session_at(&self, depth: u32) -> session::Shape {
         match self {
-            Self::Leaf { cwd, .. } => session::Shape::Leaf { cwd: cwd.clone() },
-            Self::Split { dir, ratio, a, b } if depth >= MAX_DEPTH => {
-                session::Shape::Leaf { cwd: None }
-            }
+            Self::Leaf { cwd, .. } => session::Shape::Leaf {
+                cwd: cwd.clone(),
+                agent: None,
+            },
+            Self::Split { dir, ratio, a, b } if depth >= MAX_DEPTH => session::Shape::Leaf {
+                cwd: None,
+                agent: None,
+            },
             Self::Split { dir, ratio, a, b } => session::Shape::Split {
                 dir: *dir,
                 ratio: *ratio,

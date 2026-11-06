@@ -385,6 +385,13 @@ impl Drop for ConPty {
 
 /// Block until the child process exits, then return its exit code.
 ///
+/// The process id behind `process` (RESTORE-002): 0 when Windows will not say.
+#[must_use]
+pub fn process_id(process: &SendHandle) -> u32 {
+    // Safety: the handle stays open for the length of the call.
+    unsafe { windows::Win32::System::Threading::GetProcessId(*process.0) }
+}
+
 /// Run this on the reader thread after the output pipe reports EOF
 /// (TTY-025: report the exit code to the pane). `STILL_ACTIVE` (259) is
 /// filtered out so a half-dead handle yields `None`, never a bogus code.

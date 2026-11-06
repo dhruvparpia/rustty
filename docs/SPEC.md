@@ -789,6 +789,9 @@ The product must support common terminal/TUI applications.
 
 | ID | Requirement | Priority |
 |---|---|---|
+| RESTORE-001 | The session shall be saved when Windows asks to end the session and every 30 seconds when it changed, not only when the window closes. rustty shall register to come back after a Windows Update restart, when the person's restart-apps setting allows it. | P1 |
+| RESTORE-002 | rustty shall notice known agent CLIs running under a pane's shell, and read the working folder of the agent or shell from its process. | P1 |
+| RESTORE-003 | After a restart, a pane that was running an agent shall show as Interrupted. Clicking its row shall run that agent's resume command, from a fixed table and never from the session file. Typing in the pane dismisses the offer. | P1 |
 | RAIL-001 | A sidebar shall list every session in the window, grouped by project, with a "New session" row. Ctrl+Shift+S and `session-rail` turn it on and off. While it is on it lists the tabs and the tab strip steps aside; tabs remain, and turning it off brings the strip back. It collapses under 720 DIPs and in fullscreen. | P1 |
 | RAIL-002 | Each row shall show what its session is doing: needs you, working, finished while unseen, ready or exited. Status comes from signals programs already send: a spinner in the title, recent output, shell integration, `OSC 9;4` progress, a bell, `OSC 9` or `OSC 777;notify`. Output within a second of a resize is a repaint, not work, and a spinner or progress report left behind by a program that stopped writing expires. No program needs to know about rustty. | P1 |
 | RAIL-003 | Live host sessions this window is not showing shall be listed under Background, and clicking one opens it. You can type in it unless another window controls it, in which case it opens read-only. | P1 |

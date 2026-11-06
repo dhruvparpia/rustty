@@ -79,6 +79,20 @@ Driven through the real window, with screenshots read by hand.
 | Windows animation effects off | Not run live, to leave system settings alone. Covered by a unit test |
 | Windows 10 | Not run: no machine |
 
+## Restart safety (RESTORE-001..003), 2026-11-06
+
+Driven through the real window, with a copy of `ping.exe` named `claude.exe` as the agent. No real restart was run: the shutdown messages were sent by script and the processes then killed.
+
+| Check | Result |
+|---|---|
+| Periodic save with an agent running and no shell folder report | `cwd` and `agent = "claude"` in `session.toml` after 40 s |
+| `WM_QUERYENDSESSION` | Answers yes and saves at once |
+| Hard kill, then relaunch | Row reads "Interrupted. Click to resume claude" |
+| Click the row | `claude --continue` runs in the saved folder |
+| Real Windows restart, `RegisterApplicationRestart` | Not run |
+| Codex, or agents that run as plain `node.exe` | Not run. `node.exe` agents such as Gemini are not detected |
+| Interrupted panes with the sidebar hidden | No way to resume them: the offer is only in the sidebar |
+
 ## Sessions sidebar (RAIL-001..005), 2026-11-06, Windows 11, 100% DPI
 
 Driven through the real window, with screenshots read by hand. Status was checked with a spinner in the title, `OSC 9` and a finished job, not with a real agent CLI.
