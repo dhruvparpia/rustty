@@ -201,7 +201,8 @@ fn text_value(value: &str, (encoded, decoded): (usize, usize)) -> Option<String>
 
 /// Characters that change how text reads without showing: direction overrides
 /// and invisible formatting.
-const fn is_invisible(c: char) -> bool {
+#[must_use]
+pub const fn is_invisible(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'

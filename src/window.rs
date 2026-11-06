@@ -3356,26 +3356,21 @@ fn worktree_tick(hwnd: HWND) {
     }
 }
 
-/// Start a Boss Agent session for the active session's project (BOSS-001).
+/// Start a Boss Agent session for the active session's project (BOSS-001). The
+/// folder can come from what a program reported, so the person is asked by name.
 fn start_boss(hwnd: HWND) {
     let Some(s) = state_ref(hwnd) else { return };
     let root = active_project_root(s);
-    let exe = std::env::current_exe().unwrap_or_default();
-    let dir = std::env::temp_dir().join(format!("rustty-boss-{}", std::process::id()));
     let root_text = root.to_string_lossy().into_owned();
-    let files = crate::boss::write_files(&dir, &exe.to_string_lossy(), &root_text);
-    let (mcp, brief) = match files {
-        Ok(files) => files,
-        Err(e) => {
-            show_message(hwnd, &format!("Could not start the Boss Agent: {e}"));
-            return;
-        }
-    };
+    if !confirm_yes_no(hwnd, &crate::boss::confirm_text(&root_text)) {
+        return;
+    }
+    let exe = std::env::current_exe().unwrap_or_default();
     let request = crate::automation::ops::SpawnRequest {
+        command: Some(crate::boss::command(&exe.to_string_lossy(), &root_text)),
         dir: Some(root_text),
         profile: None,
         name: Some("Boss".to_string()),
-        command: Some(crate::boss::command(&mcp, &brief)),
         env: std::collections::BTreeMap::new(),
     };
     match open_boss_tab(hwnd, &request) {

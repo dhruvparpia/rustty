@@ -42,6 +42,9 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{HRESULT, Owned, PCWSTR, PWSTR};
 
+/// The longest command line `CreateProcessW` takes, in UTF-16 units with its NUL.
+pub const MAX_COMMAND_LINE: usize = 32_767;
+
 /// An owned raw HANDLE safe to move onto a worker thread.
 ///
 /// Dropping it closes the handle via the windows crate's `Free` impl for HANDLE.
@@ -123,6 +126,17 @@ impl ConPty {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "terminal size must be 1..=i16::MAX in each dimension",
+            ));
+        }
+        // Refused here, whole. Cutting it short would run something else.
+        let mut cmdline = wide_command_line(program, args);
+        if cmdline.len() > MAX_COMMAND_LINE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the command line is {} characters, over the {MAX_COMMAND_LINE} Windows allows",
+                    cmdline.len()
+                ),
             ));
         }
         let size = COORD {
@@ -211,7 +225,6 @@ impl ConPty {
                 return Err(io_error(&e));
             }
 
-            let mut cmdline = wide_command_line(program, args);
             // SHELL-019/021: working directory and environment overrides for
             // this pane. The block starts from the inherited environment
             // (SHELL-022: nothing is injected on top of what the user set).
@@ -519,6 +532,12 @@ fn quote_arg(arg: &str) -> String {
     out.to_string()
 }
 
+/// How long this command line would be, in UTF-16 units with its NUL.
+#[must_use]
+pub fn command_line_units(program: &str, args: &[String]) -> usize {
+    wide_command_line(program, args).len()
+}
+
 fn wide_command_line(program: &str, args: &[String]) -> Vec<u16> {
     let mut s = quote_arg(program);
     for arg in args {
@@ -574,6 +593,77 @@ fn io_error(e: &windows::core::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a program's C runtime will read back from this command line.
+    fn parsed_back(program: &str, args: &[String]) -> Vec<String> {
+        let line = wide_command_line(program, args);
+        let mut count = 0;
+        // Safety: `line` is NUL-terminated, and the array `CommandLineToArgvW`
+        // returns is read within `count` and then freed with `LocalFree`.
+        unsafe {
+            let argv = windows::Win32::UI::Shell::CommandLineToArgvW(
+                PCWSTR::from_raw(line.as_ptr()),
+                &mut count,
+            );
+            assert!(!argv.is_null());
+            let parts = std::slice::from_raw_parts(argv, usize::try_from(count).unwrap())
+                .iter()
+                .map(|arg| arg.to_string().unwrap())
+                .collect();
+            let _ = windows::Win32::Foundation::LocalFree(Some(
+                windows::Win32::Foundation::HLOCAL(argv.cast()),
+            ));
+            parts
+        }
+    }
+
+    #[test]
+    fn arguments_with_quotes_and_newlines_arrive_unchanged() {
+        // Break caught: a boss getting a corrupted configuration or brief.
+        let args: Vec<String> = [
+            r#"{"mcpServers":{"rustty":{"command":"C:\\Tools\\rust ty\\rustty.exe"}}}"#,
+            "first line\nsecond \"quoted\" line\r\nthird\ttabbed",
+            "ends in a backslash\\",
+            r#"ends in a quote and backslashes\\""#,
+            r#"\\server\"share"#,
+            "",
+            "no-spaces\nbut a newline",
+            "plain",
+        ]
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect();
+        let program = r"C:\Program Files\x\claude.exe";
+        let back = parsed_back(program, &args);
+        assert_eq!(back[0], program);
+        assert_eq!(&back[1..], args.as_slice());
+    }
+
+    #[test]
+    fn the_real_boss_command_arrives_unchanged() {
+        let exe = r"C:\Tools\rust ty\rustty.exe";
+        let args = crate::boss::command(exe, r"C:\src\my project");
+        let (program, rest) = args.split_first().unwrap();
+        let back = parsed_back(program, rest);
+        assert_eq!(&back[1..], rest);
+        // The configuration still parses, and still starts this rustty.
+        let at = rest.iter().position(|a| a == "--mcp-config").unwrap() + 1;
+        let config: serde_json::Value = serde_json::from_str(&back[at + 1]).unwrap();
+        assert_eq!(config["mcpServers"]["rustty"]["command"], exe);
+    }
+
+    #[test]
+    fn a_command_line_over_the_limit_is_refused_whole() {
+        // Break caught: CreateProcessW being handed something it would refuse with
+        // a bare error, or a caller cutting it short to fit.
+        let args = vec!["x".repeat(MAX_COMMAND_LINE)];
+        let env = BTreeMap::new();
+        let Err(error) = ConPty::spawn("cmd.exe", &args, 80, 24, None, &env, None) else {
+            panic!("a command line over the limit started");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("32767"), "{error}");
+    }
 
     #[test]
     fn automation_variables_are_never_inherited() {

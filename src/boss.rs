@@ -2,15 +2,13 @@
 //! and a brief, so it can split work across sessions in their own worktrees and
 //! watch them. rustty adds no agent of its own: this is one `claude` command.
 
-use std::path::{Path, PathBuf};
-
 /// Tools the boss may use without asking: they only read. Anything that starts a
 /// session or types into one stays behind Claude Code's own permission prompt.
 pub const READ_ONLY_TOOLS: &str =
     "mcp__rustty__list,mcp__rustty__pane_read,mcp__rustty__capabilities";
 
 /// The MCP configuration for a boss session. It names the variables rather than
-/// their values, so the write token is never on disk.
+/// their values, so the write token is never on a command line.
 #[must_use]
 pub fn mcp_config(exe: &str) -> String {
     serde_json::json!({
@@ -53,15 +51,36 @@ Rules:
     )
 }
 
-/// The command that starts a boss session.
+/// What the person is asked before a boss starts. The folder can come from what a
+/// program reported (OSC 7 or OSC 9;9), so it is named in full, and anything in it
+/// that wouldn't show is written out rather than left to hide the real path.
 #[must_use]
-pub fn command(mcp: &Path, brief: &Path) -> Vec<String> {
+pub fn confirm_text(root: &str) -> String {
+    let mut shown = String::with_capacity(root.len());
+    for c in root.chars() {
+        if c.is_control() || crate::program_status::is_invisible(c) {
+            shown.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+        } else {
+            shown.push(c);
+        }
+    }
+    format!(
+        "Start a Boss Agent in this folder?\n\n{shown}\n\nIt gets tools to read every session \
+         in this window and to start new ones. A program can report a folder of its own \
+         choosing, so say yes only if this is the project you meant."
+    )
+}
+
+/// The command that starts a boss session. Its configuration and brief go inline,
+/// so nothing is left in a temp folder for another program to change first.
+#[must_use]
+pub fn command(exe: &str, root: &str) -> Vec<String> {
     vec![
         "claude".to_string(),
         "--mcp-config".to_string(),
-        mcp.to_string_lossy().into_owned(),
-        "--append-system-prompt-file".to_string(),
-        brief.to_string_lossy().into_owned(),
+        mcp_config(exe),
+        "--append-system-prompt".to_string(),
+        brief(exe, root),
         "--allowedTools".to_string(),
         READ_ONLY_TOOLS.to_string(),
         // Only rustty's tools: a project's own MCP servers would inherit the token.
@@ -72,19 +91,6 @@ pub fn command(mcp: &Path, brief: &Path) -> Vec<String> {
     ]
 }
 
-/// Write the configuration and brief into `dir`. Returns their paths.
-///
-/// # Errors
-/// The folder or a file cannot be written.
-pub fn write_files(dir: &Path, exe: &str, root: &str) -> std::io::Result<(PathBuf, PathBuf)> {
-    std::fs::create_dir_all(dir)?;
-    let mcp = dir.join("mcp.json");
-    let brief_path = dir.join("brief.md");
-    std::fs::write(&mcp, mcp_config(exe))?;
-    std::fs::write(&brief_path, brief(exe, root))?;
-    Ok((mcp, brief_path))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,7 +99,7 @@ mod tests {
 
     #[test]
     fn the_config_starts_this_rustty_and_holds_no_secret() {
-        // Break caught: the write token landing in a file another program reads.
+        // Break caught: the write token on a command line another program reads.
         let text = mcp_config(EXE);
         let config: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
         let server = &config["mcpServers"]["rustty"];
@@ -109,7 +115,7 @@ mod tests {
     #[test]
     fn the_command_preapproves_only_reading() {
         // Break caught: a boss starting sessions and typing with no prompt.
-        let args = command(Path::new("m.json"), Path::new("b.md"));
+        let args = command(EXE, "C:/src/api");
         assert_eq!(args[0], "claude");
         let at = |flag: &str| {
             args.iter()
@@ -117,8 +123,8 @@ mod tests {
                 .and_then(|i| args.get(i + 1))
                 .map_or("", String::as_str)
         };
-        assert_eq!(at("--mcp-config"), "m.json");
-        assert_eq!(at("--append-system-prompt-file"), "b.md");
+        assert_eq!(at("--mcp-config"), mcp_config(EXE));
+        assert_eq!(at("--append-system-prompt"), brief(EXE, "C:/src/api"));
         assert_eq!(at("--allowedTools"), READ_ONLY_TOOLS);
         // Break caught: a project's own .mcp.json starting servers that inherit
         // the token, or a saved setting turning prompts off.
@@ -150,15 +156,37 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
-    fn the_files_are_written_where_the_command_says() {
-        let dir = std::env::temp_dir().join(format!("rustty-boss-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let (mcp, brief_path) = write_files(&dir, EXE, "C:/src/api").expect("written");
-        let config = std::fs::read_to_string(&mcp).expect("config");
-        assert!(config.contains("mcpServers"));
-        let text = std::fs::read_to_string(&brief_path).expect("brief");
-        assert!(text.contains("tab_open"));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn the_command_line_fits_with_the_longest_ordinary_paths() {
+        // Break caught: a brief that grew past CreateProcessW's limit, which would
+        // fail for people with long paths and nobody else.
+        let exe = format!(r"C:\{}\rustty.exe", "x".repeat(245));
+        let root = format!(r"C:\{}", "y".repeat(257));
+        let args = command(&exe, &root);
+        let (program, rest) = args.split_first().expect("a program");
+        let units = crate::conpty::command_line_units(program, rest);
+        assert!(
+            units <= crate::conpty::MAX_COMMAND_LINE,
+            "{units} UTF-16 units"
+        );
+        // Room to spare: an install path is not what should decide this.
+        assert!(units < 16_000, "{units} UTF-16 units");
+    }
+
+    #[test]
+    fn the_confirmation_names_the_folder_and_hides_nothing_in_it() {
+        let text = confirm_text(r"C:\src\api");
+        assert!(text.contains(r"C:\src\api"), "{text}");
+        assert!(text.contains("Boss Agent"), "{text}");
+        // A right-to-left override would show the end of the path first.
+        let text = confirm_text("C:\\src\\\u{202e}ipa\n\u{200b}x");
+        assert!(
+            !text.contains('\u{202e}') && !text.contains('\u{200b}'),
+            "{text}"
+        );
+        assert!(text.contains(r"\u{202e}"), "{text}");
+        assert!(text.contains(r"\u{200b}"), "{text}");
+        assert!(text.contains(r"\u{a}"), "{text}");
     }
 }
