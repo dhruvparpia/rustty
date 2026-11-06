@@ -12,9 +12,10 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 - Local automation API (AUTO-001..015): `rustty ctl <verb>` and `rustty mcp` control a running
   window over a per-window pipe, so a script or a coding agent can start sessions, read their
-  output, type into them and see whether they need attention. Reading is always allowed; writes
-  need `automation-writes = true` or the window's token. See
-  [the design record](docs/design-automation-api.md).
+  output, type into them and see whether they need attention. Reading needs
+  `automation-reads = true`, and writing `automation-writes = true`; a window reads both once, when
+  it starts, and its token gives a boss session the same reads and writes to the sessions it opened.
+  See [the design record](docs/design-automation-api.md).
 - Per-project 1Password secrets (SECRET-001..012): `rustty secrets setup`, `add`, `list` and
   `run --only A,B -- cmd` give each project its own small vault and read-only service account, so
   agents stop prompting for approval in every sub-shell. Values are held in locked, encrypted memory

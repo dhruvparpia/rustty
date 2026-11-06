@@ -127,6 +127,7 @@ One real run: Claude Code 2.1.319 as boss in a scratch Git repository, launched 
 | Stops before merging | Asked the person. `master` unchanged, nothing pushed |
 | Write token on disk | `mcp.json` holds only `${RUSTTY_AUTOMATION_TOKEN}` |
 | Permission prompts in the default mode | Not run. Write tools were approved by auto mode in this run |
+| After this run: inline `--mcp-config` and `--append-system-prompt`, `--strict-mcp-config`, `--permission-mode default`, the Yes/No dialog naming the folder | Not run end to end, since no test may start the real `claude` as a session. Flags checked against `claude --help` 2.1.319, whose help lists `manual` but whose parser also accepts `default`. The command line is parsed back with `CommandLineToArgvW` and is about 2,800 characters with ordinary paths. To be run by the owner |
 | A worker asking a permission question, several workers at once, a real merge | Not run |
 | Boss after a restart | Not supported: a resumed `claude --continue` has neither the tools nor a token. Start a new boss |
 
@@ -225,10 +226,19 @@ their windows. It starts without activation, and only its own process is stopped
 | Concurrent clients, a client vanishing mid-request, a flooding client, a client that stops reading, oversized and malformed frames, a squatted pipe name, the wrong process on a pipe, the token over a pipe | pass | Real named pipe with the test thread as the window (`automation::pipe`) |
 | MCP over stdio, both eras | pass | The real stdio loop on a fake window (`automation::mcp`), and the real binary with no window (`tests/automation_cli.rs`) |
 | CLI parsing and exit codes | pass | Fake window (`automation::ctl`), and the real binary (`tests/automation_cli.rs`). Written alongside the code rather than before it, so checked by mutation: 8 of 8 deliberate breaks caught |
-| A boss's whole flow, sidebar on and sidebar off | pass | Live: reads, a refused write, the config key reloading, a background tab, its environment, the token absent, output in order, status changes, scrollback, split, focus, `exit 7`, stale ids, a program that won't start, closing the last tab, the reply still arriving, the discovery file going |
+| A boss's whole flow, sidebar on and sidebar off | pass | Live: reads, a background tab, its environment, the token absent, output in order, status changes, scrollback, split, focus, `exit 7`, stale ids, a program that won't start, closing the last tab, the reply still arriving, the discovery file going |
 | A command that ends reports its output and exit code | pass | Live: subscribe, `tab.open`, `pane-output`, then `pane-closed` with `exitCode` 3 |
 | `rustty mcp` driving a real window | pass | Live: handshake, `tools/list`, `list`, `tab_open`, `pane_send-text`, `pane_read` |
-| A wrong token gets no writes | pass | Live |
+| A wrong token gets no writes or reads | pass | Live |
+| Editing the config never grants anything | pass | Live: `editing_the_config_never_turns_writes_on` proves the reload landed by a bigger font changing `cols`, and `reads_need_a_grant_on_a_real_window_and_editing_the_file_doesnt_give_one` |
+| Reads need a grant | pass | Dispatcher tests for each grant, and live: `ctl list` and `ctl watch` exit 4 naming the key, `capabilities` stays open |
+| A spoofed discovery file gets no token | pass | The real binary against a real attacker's pipe, no window needed (`tests/automation_cli.rs`), and live against a real window. The attacker's pipe received nothing |
+| A token reaches only what it opened, and can't answer a permission, trust or auth wait | pass | Dispatcher tests. Not on a real window: its token comes only from Start Boss Agent, which needs the real `claude` |
+| Which encoder shows the token | pass | The real `rustty ctl` and `rustty mcp` against a real pipe server (`tests/automation_cli.rs`) |
+| Hostile clients | pass | Live: protocol `u32::MAX`, 127 levels of objects, 32 silent connections losing their slots after 5 s. The nesting overflowed the reader's stack in a debug build before the fix |
+| `detailSource`, a report hiding a question, cleaned names and captions | pass | Dispatcher, event and pane tests; `detailSource` in the live flow |
+| The sidebar heading says so | pass | `PrintWindow` read by eye with `automation-writes = true`: "rustty · automation on" |
+| Windows opened through a launcher asking for no activation stay in the background while the launcher's terminal holds the foreground | pass | The flows above, with foreground changes logged. Before: `SetFocus` at start activated them, and the discovery probes opened console windows in the default terminal |
 | Session host route | Known exception, not a pass: `--attach --take-control`, `session.input`, `session.terminate` and `host.shutdown` need no grant (AUTO-007), so the grants in this table don't cover host sessions | Not changed, not tested |
 | Painting | pass | `PrintWindow` read by eye: sidebar rows, titles, grid text sent through the API, and "Typed by automation" on the row |
 | The window never took the foreground | pass | Checked in the flow above and at the capture |
