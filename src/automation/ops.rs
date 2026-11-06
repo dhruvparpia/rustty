@@ -487,6 +487,14 @@ fn spawn_request(params: &Value) -> Result<SpawnRequest, RpcError> {
             if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
                 return Err(bad());
             }
+            // A session is never handed the token by a client (AUTO-007). The name
+            // is safe to say; the value might not be.
+            if key.eq_ignore_ascii_case(super::ENV_TOKEN) {
+                return Err(RpcError::bad_params(format!(
+                    "env can't set {}: the write token doesn't pass to other sessions",
+                    super::ENV_TOKEN
+                )));
+            }
             // The window always says which window a session is in (AUTO-006).
             if !key.eq_ignore_ascii_case(super::ENV_WINDOW) {
                 request.env.insert(key.clone(), value.to_string());

@@ -78,6 +78,32 @@ fn a_version_mismatch_is_a_hard_error_and_leaves_the_connection_uninitialized() 
 }
 
 #[test]
+fn a_session_cant_be_handed_the_token_through_env() {
+    // Break caught: a boss passing its grant to every worker it starts, in any
+    // spelling of the name.
+    for method_params in [("tab.open", json!({})), ("pane.split", json!({"pane": 0}))] {
+        for name in [
+            "RUSTTY_AUTOMATION_TOKEN",
+            "rustty_automation_token",
+            "Rustty_Automation_Token",
+        ] {
+            let (mut d, mut w) = setup();
+            w.allow_writes = true;
+            let (method, mut params) = (method_params.0, method_params.1.clone());
+            if method == "pane.split" {
+                params["pane"] = json!(first_pane(&w));
+            }
+            params["env"] = json!({name: "stolen"});
+            let frame = call(&mut d, &mut w, CLIENT, method, params);
+            let error = err(&frame);
+            assert_eq!(error.code, ErrorCode::BadParams, "{name}");
+            assert!(!error.message.contains("stolen"), "{}", error.message);
+            assert!(w.opened.is_empty() && w.splits.is_empty());
+        }
+    }
+}
+
+#[test]
 fn a_connection_initializes_once() {
     // Break caught: guessing tokens over one connection, or changing protocol
     // part way through.

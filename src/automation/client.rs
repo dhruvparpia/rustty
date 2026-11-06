@@ -47,7 +47,7 @@ pub struct Target {
     pub explicit: Option<u64>,
     /// `RUSTTY_WINDOW`.
     pub env_window: Option<String>,
-    /// `RUSTTY_AUTOMATION_TOKEN`.
+    /// `RUSTTY_AUTOMATION_TOKEN`, for the one encoder that reads it.
     pub env_token: Option<String>,
 }
 
@@ -62,14 +62,24 @@ impl std::fmt::Debug for Target {
 }
 
 impl Target {
-    /// From this process's environment.
+    /// From this process's environment, without the token. `rustty ctl` uses this:
+    /// any command run inside a boss session inherits the variable, and running a
+    /// command must not be enough to write (AUTO-007).
     #[must_use]
     pub fn from_env(explicit: Option<u64>) -> Self {
         Self {
             explicit,
             env_window: std::env::var(ENV_WINDOW).ok().filter(|v| !v.is_empty()),
-            env_token: std::env::var(ENV_TOKEN).ok().filter(|v| !v.is_empty()),
+            env_token: None,
         }
+    }
+
+    /// Also take the token from the environment. Only `rustty mcp` does: it is the
+    /// boss's own tool server, behind Claude Code's permission prompts.
+    #[must_use]
+    pub fn with_env_token(mut self) -> Self {
+        self.env_token = std::env::var(ENV_TOKEN).ok().filter(|v| !v.is_empty());
+        self
     }
 
     /// The token to show window `id`. A token belongs to the window that made

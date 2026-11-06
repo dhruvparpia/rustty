@@ -146,3 +146,10 @@ JSON-RPC 2.0 (same base as MCP, so the adapter is a thin encoder):
     once, when the window starts, and a hot reload never changes it: otherwise an
     agent that can write a file could grant itself writes with nothing for the person
     to notice. While it is on, the sidebar heading says "rustty · automation on".
+12. **The token reaches fewer places** (amendment 1). `rustty ctl` ignores
+    `RUSTTY_AUTOMATION_TOKEN` and only `rustty mcp` reads it, so running a command
+    inside a boss session is not enough to write. `tab.open` and `pane.split` refuse
+    it in `env`, and it is never in `WSLENV`. The boss starts with
+    `--strict-mcp-config` and `--permission-mode default`. Anything the boss session
+    starts itself still inherits the variable and can read it: this scopes a grant,
+    and is not a boundary against code running as this user.

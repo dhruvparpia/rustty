@@ -98,6 +98,95 @@ fn a_session_whose_window_is_gone_gets_an_error_not_another_window() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Which encoder shows the token, against a real pipe server run by this test: it
+/// needs no window and no desktop. Nothing else can reach the server, because
+/// discovery is the scratch `%APPDATA%` and the pipe takes this user only.
+#[cfg(windows)]
+mod token {
+    use std::io::Write;
+    use std::path::Path;
+    use std::process::{Child, Stdio};
+    use std::time::{Duration, Instant};
+
+    use rustty::automation::pipe::Server;
+    use rustty::automation::{RpcError, discovery_dir, error_frame, next_id};
+    use serde_json::{Value, json};
+
+    use super::{rustty, scratch};
+
+    const SECRET: &str = "the-window-token-for-this-test";
+
+    /// The first request `child` sends, answered with an error so it ends quickly.
+    fn first_request(server: &Server, child: &mut Child) -> Value {
+        let start = Instant::now();
+        loop {
+            if let Some((client, request)) = server.next_request(&|_| true) {
+                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                server.send(client, &error_frame(id, &RpcError::bad_params("test over")));
+                return request;
+            }
+            let done = child.try_wait().expect("polled").is_some();
+            assert!(!done, "it ended without connecting");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "it never connected"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn serve(dir: &Path) -> (Server, u64) {
+        let id = next_id();
+        let server = Server::start(id, false, Some(discovery_dir(dir))).expect("server");
+        (server, id)
+    }
+
+    #[test]
+    fn ctl_ignores_the_token_in_its_environment() {
+        // Break caught: any command an agent runs inside a boss session getting
+        // writes just by inheriting the variable.
+        let dir = scratch();
+        let (server, id) = serve(&dir);
+        let mut child = rustty(&dir, &["ctl", "list"])
+            .env("RUSTTY_WINDOW", id.to_string())
+            .env("RUSTTY_AUTOMATION_TOKEN", SECRET)
+            .spawn()
+            .expect("started");
+        let request = first_request(&server, &mut child);
+        assert_eq!(request["method"], "initialize");
+        assert!(request["params"].get("token").is_none(), "{request}");
+        let _ = child.wait_with_output();
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mcp_shows_the_token_to_its_own_window() {
+        let dir = scratch();
+        let (server, id) = serve(&dir);
+        let mut child = rustty(&dir, &["mcp"])
+            .env("RUSTTY_WINDOW", id.to_string())
+            .env("RUSTTY_AUTOMATION_TOKEN", SECRET)
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("started");
+        let mut stdin = child.stdin.take().expect("stdin");
+        for message in [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list", "arguments": {}}}),
+        ] {
+            writeln!(stdin, "{message}").expect("written");
+        }
+        let request = first_request(&server, &mut child);
+        assert_eq!(request["method"], "initialize");
+        assert_eq!(request["params"]["token"], SECRET);
+        drop(stdin);
+        let _ = child.wait_with_output();
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Feed `rustty mcp` these messages, then end its input.
 fn mcp(messages: &[Value]) -> Vec<Value> {
     let dir = scratch();

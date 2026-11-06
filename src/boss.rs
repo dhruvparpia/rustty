@@ -63,6 +63,11 @@ pub fn command(mcp: &Path, brief: &Path) -> Vec<String> {
         brief.to_string_lossy().into_owned(),
         "--allowedTools".to_string(),
         READ_ONLY_TOOLS.to_string(),
+        // Only rustty's tools: a project's own MCP servers would inherit the token.
+        "--strict-mcp-config".to_string(),
+        // A saved setting can't turn the permission prompts off.
+        "--permission-mode".to_string(),
+        "default".to_string(),
     ]
 }
 
@@ -114,6 +119,10 @@ mod tests {
         assert_eq!(at("--mcp-config"), "m.json");
         assert_eq!(at("--append-system-prompt-file"), "b.md");
         assert_eq!(at("--allowedTools"), READ_ONLY_TOOLS);
+        // Break caught: a project's own .mcp.json starting servers that inherit
+        // the token, or a saved setting turning prompts off.
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
+        assert_eq!(at("--permission-mode"), "default");
         for write in ["tab_open", "tab_close", "send-text", "pane_split"] {
             assert!(!READ_ONLY_TOOLS.contains(write), "{write}");
         }

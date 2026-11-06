@@ -211,11 +211,11 @@ impl SpawnOptions {
     }
 
     /// Hand this session the window's write token (AUTO-007). Only sessions a
-    /// window starts for a boss get it; nothing else ever calls this.
+    /// window starts for a boss get it; nothing else ever calls this. It stays out
+    /// of `WSLENV`: nothing inside WSL needs it, and everything there would see it.
     pub fn add_boss_token(&mut self, token: &str) {
         let name = crate::automation::ENV_TOKEN;
         self.set_env_exact(name, token.to_string());
-        self.list_in_wslenv(&[name]);
     }
 
     /// Options for `program` (no args) at `cols` x `rows`.
@@ -1383,7 +1383,9 @@ mod tests {
         );
         let wslenv = opts.env.get("WSLENV").cloned().unwrap_or_default();
         assert!(
-            wslenv.split(':').any(|n| n == "RUSTTY_AUTOMATION_TOKEN"),
+            !wslenv
+                .split(':')
+                .any(|n| n.starts_with("RUSTTY_AUTOMATION_TOKEN")),
             "{wslenv}"
         );
     }

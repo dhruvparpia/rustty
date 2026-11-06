@@ -614,7 +614,7 @@ pub fn run_stdio<C: Connector>(
 /// `RUSTTY_AUTOMATION_TOKEN` from the environment. Returns the exit code.
 #[must_use]
 pub fn main() -> u8 {
-    let connector = WindowConnector::new(Target::from_env(None), "rustty mcp");
+    let connector = WindowConnector::new(Target::from_env(None).with_env_token(), "rustty mcp");
     let mut server = McpServer::new(connector);
     let mut stdout = io::stdout();
     match run_stdio(BufReader::new(io::stdin()), &mut stdout, &mut server) {
