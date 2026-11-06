@@ -87,7 +87,7 @@ Everything built on top of 0.6.0: the sessions sidebar, restart safety, worktree
   already on screen keeps its colors after a theme switch, and a session host's snapshot
   of existing text uses the default palette.
 
-## [0.6.0] - unreleased feature work
+## [0.6.0] - never released; its changes ship in 0.7.0
 
 Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. Feature work targets minors. `packaging/check-release.ps1` checks tag/version/SHA and CI fetches tags and runs it for `v0.5.1`.
 
