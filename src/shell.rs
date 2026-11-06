@@ -467,6 +467,29 @@ pub fn probe_shell(cfg: &Config) -> SpawnOptions {
     opts
 }
 
+/// Wait for what a program printed just before exiting to reach the pane: the
+/// window closes a pane as soon as it hears of the exit, so that news must come
+/// after the output. Done when nothing has been waiting to be delivered for a
+/// little while, or after a bound, so a window not draining can't hold it forever.
+#[cfg(windows)]
+fn wait_for_last_output(queued: &AtomicUsize) {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(25);
+    const QUIET_POLLS: u32 = 4;
+    const MOST_POLLS: u32 = 80;
+    let mut quiet = 0;
+    for _ in 0..MOST_POLLS {
+        std::thread::sleep(POLL);
+        quiet = if queued.load(Ordering::Relaxed) == 0 {
+            quiet + 1
+        } else {
+            0
+        };
+        if quiet >= QUIET_POLLS {
+            return;
+        }
+    }
+}
+
 /// A shell process behind the pane.
 ///
 /// The UI side owns the receiver; the reader thread owns a sender clone
@@ -616,7 +639,25 @@ impl Shell {
         drop(thread);
         let reader_handle = conpty.output_reader().map_err(spawn_err)?;
 
+        let process = Arc::new(process);
         let (tx, rx) = mpsc::channel::<ShellEvent>();
+        // The output pipe can stay open after the program exits, until the
+        // pseudo-console is closed, so the reader alone may never report it.
+        // This does, and the pane closing then closes the pseudo-console. The
+        // session host watches its processes the same way.
+        let exit_tx = tx.clone();
+        let exit_process = Arc::clone(&process);
+        let exit_queued = Arc::clone(&self.queued);
+        let watcher = std::thread::Builder::new()
+            .name("rustty-shell-exit".to_string())
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let code = conpty::wait_exit_code(&exit_process);
+                wait_for_last_output(&exit_queued);
+                let _ = exit_tx.send(ShellEvent::Exited(code));
+            });
+        // Without it the reader still reports an exit if its pipe closes.
+        drop(watcher);
         let pump_tx = tx.clone();
         let pump_queued = Arc::clone(&self.queued);
         let pump_stopping = Arc::clone(&self.stopping);
@@ -1284,6 +1325,41 @@ impl Drop for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real shell through a real pseudo-console: only the pane answers the
+    /// cursor query conhost starts with, so this goes through `Pane`.
+    #[cfg(windows)]
+    #[test]
+    fn a_shell_that_exits_is_noticed_with_its_output_and_exit_code() {
+        // Break caught: the output pipe stays open after the child exits, so a
+        // reader waiting for it to close never reports the exit. The pane then
+        // stays open forever, showing a program that has gone.
+        let mut pane = crate::pane::Pane::with_size(80, 24, 100);
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.args = vec!["/c".to_string(), "echo marker-text& exit 3".to_string()];
+        pane.spawn_shell(&opts).expect("cmd.exe starts");
+        let start = std::time::Instant::now();
+        while !matches!(pane.shell().state(), crate::shell::ShellState::Exited(_)) {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(15),
+                "the exit was never noticed; {:?}",
+                pane.shell().state()
+            );
+            pane.drain_shell();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            pane.shell().state(),
+            crate::shell::ShellState::Exited(Some(3))
+        );
+        let text: Vec<String> = (0..pane.grid().rows)
+            .filter_map(|row| pane.grid().line_text(row))
+            .collect();
+        assert!(
+            text.iter().any(|line| line == "marker-text"),
+            "output printed just before the exit must not be lost: {text:?}"
+        );
+    }
 
     #[test]
     fn a_session_is_told_its_window_and_wsl_can_see_it() {

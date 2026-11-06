@@ -65,6 +65,10 @@ impl SendHandle {
 // process thread, and this type is the sole owner, so moving it between threads is
 // sound (the reader thread and the UI thread never share the same handle object).
 unsafe impl Send for SendHandle {}
+// Safety: only `raw` and `wait_exit_code` read it through a shared reference. The
+// handle value never changes, and waiting on or querying one process handle from
+// two threads is allowed. It is closed only when the last owner drops it.
+unsafe impl Sync for SendHandle {}
 
 /// The ConPTY input side, owned by one worker thread.
 ///
