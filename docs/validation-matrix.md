@@ -78,6 +78,37 @@ Driven through the real window, with screenshots read by hand.
 | 150% and 200% DPI, mixed DPI | Not run: one 100% display |
 | Windows animation effects off | Not run live, to leave system settings alone. Covered by a unit test |
 | Windows 10 | Not run: no machine |
+
+## Sessions sidebar (RAIL-001..005), 2026-11-06, Windows 11, 100% DPI
+
+Driven through the real window, with screenshots read by hand. Status was checked with a spinner in the title, `OSC 9` and a finished job, not with a real agent CLI.
+
+| Check | Result |
+|---|---|
+| New session, switch by row, hide and show, command palette beside the sidebar | Work |
+| Under 720 DIP | Sidebar collapses, tab strip returns |
+| Fullscreen | Sidebar collapses as soon as it starts and comes back on exit |
+| Needs you, Working, Finished, Ready, Background rows | Each shows with the right text |
+| Resizing for 4 s with two sessions | Both stay Ready. Before the fix, they showed Working, then Finished |
+| Click a background session | Opens under its name, typed text reaches it |
+| Click a background session another window controls | Not run live. The decision has a unit test |
+| Crab beside the sidebar | Clacks, banner fits |
+| Close a session from its glyph | Asks first, then closes, in the real window. The hover highlight is proved by `hovering_a_sidebar_row_paints_only_the_sidebar`, since a synthetic mouse message cannot hold a hover with the real pointer elsewhere |
+| Launch through Explorer | Stays up. Started with `explorer.exe <path>`, the shell opens in `system32`, so the project heading reads `system32` |
+| `OSC 9;9` directory report with the window in the background | Row stays Ready. A unit test covers the other numbered commands |
+| `TERM_PROGRAM` inside WSL (Ubuntu 24.04) | `wsl-sees-rustty` |
+| Hide with Ctrl+Shift+S, then save an unrelated config change | Stays hidden |
+| `session-rail = false` saved while running | Sidebar goes at once, tab strip returns |
+| Working dot | Colour steps through a pulse in the real window |
+| CPU over 30 s with one session Working | 63 ms, against 234 ms when each pulse repainted the whole window |
+| Bell with one pane | Row flashes: `hovering_a_sidebar_row_paints_only_the_sidebar`. Not rung in the real window |
+| Selection and mouse-report drags past the sidebar, folder drop on it | Not run live. `drag_x` has a unit test; the drop change is one condition |
+| A real agent CLI (Claude Code, Codex) | Not run: its signals were reproduced by script |
+| Startup, 5 launches | Median 62 ms with the sidebar on and off |
+| Idle CPU over 30 s | On: 63-78 ms. Off: 31-63 ms. About 0.2% of one core at most, near the noise |
+| Sidebar frames | `damage_frames_with_the_sidebar_allocate_nothing`: 0 allocations in 20 frames |
+| Desktop benches, one at a time | All pass |
+| 150% and 200% DPI, Windows 10, ARM64 run | Not run |
 | Caption buttons through MSAA (`OBJID_TITLEBAR`) | Minimize, maximize and close report the rectangles they are drawn and clicked at; context help is invisible. Before the fix they reported a 1-pixel-tall strip |
 | Caption buttons through UI Automation | Not exposed: rustty's provider shows tabs and panes only. v0.5.1 with native buttons behaved the same, so this is not new |
 | Double-click on maximize | Maximizes, then restores |

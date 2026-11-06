@@ -30,6 +30,8 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 
 use std::cell::RefCell;
 use std::rc::Weak;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 use windows::Data::Xml::Dom::XmlDocument;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -123,6 +125,7 @@ use crate::keyboard::{AltTap, VK_MENU};
 use crate::palette::{Command, PaletteItem, PaletteState, builtin_shortcut, display_shortcut};
 use crate::pane::Pane;
 use crate::parser::{MouseProtocol, bracketed_paste_bytes, mouse_report_bytes};
+use crate::rail;
 use crate::render::{
     CellMetrics, Renderer, SEARCH_BAR_HEIGHT, dips_to_px, measure_cells, palette_row_height,
     px_to_dips,
@@ -177,6 +180,9 @@ const POLL_TIMER: usize = 1;
 
 /// Per-session name of the mutex a GUI process holds.
 const INSTANCE_MUTEX: &str = "Local\\rustty-gui";
+
+/// `WM_MOUSELEAVE`, which the bindings do not export.
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 /// Timer id for the crab animation.
 const CLACK_TIMER: usize = 21;
@@ -235,6 +241,7 @@ const MENU_COPY: usize = 0xE811;
 const MENU_PASTE: usize = 0xE812;
 const MENU_SEARCH: usize = 0xE821;
 const MENU_FULLSCREEN: usize = 0xE822;
+const MENU_SESSION_RAIL: usize = 0xE826;
 const MENU_PREV_COMMAND: usize = 0xE823;
 const MENU_NEXT_COMMAND: usize = 0xE824;
 const MENU_COPY_LAST_CMD: usize = 0xE825;
@@ -417,6 +424,7 @@ fn build_menu(profiles: &[ProfileSpec], theme_names: &[String]) -> Result<HMENU>
         append_menu_item(view, "Split Be&low\tCtrl+Shift+-", MENU_SPLIT_DOWN)?;
         append_menu_separator(view)?;
         append_menu_item(view, "Full &Screen\tF11", MENU_FULLSCREEN)?;
+        append_menu_item(view, "Sessions Side&bar\tCtrl+Shift+S", MENU_SESSION_RAIL)?;
         append_menu_separator(view)?;
         let themes = CreatePopupMenu()?;
         for (idx, name) in theme_names.iter().enumerate() {
@@ -680,6 +688,7 @@ fn update_menu_checks(hwnd: HWND, wparam: WPARAM) {
         }
         enable_menu_item(view, MENU_SEARCH, tabs > 0);
         check_menu_item(view, MENU_FULLSCREEN, state.fullscreen.is_some());
+        check_menu_item(view, MENU_SESSION_RAIL, state.rail_enabled);
     }
 
     if let Some(window) = submenu_of(menu, 3)
@@ -753,6 +762,7 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         MENU_VIEW_TAKE_CONTROL => take_view_control(hwnd),
         MENU_VIEW_TERMINATE => terminate_view_session(hwnd),
         MENU_FULLSCREEN => toggle_fullscreen(hwnd),
+        MENU_SESSION_RAIL => toggle_session_rail(hwnd),
         MENU_COPY => copy_screen(hwnd),
         MENU_PASTE => paste_clipboard(hwnd),
         MENU_OPEN_LINK => {
@@ -1313,6 +1323,26 @@ struct WindowState {
     menu: Option<HMENU>,
     /// Watches for a lone tap of Alt.
     alt_tap: AltTap,
+    /// The sessions sidebar is switched on.
+    rail_enabled: bool,
+    /// The left button went down in the grid and has not come back up.
+    grid_pressed: bool,
+    /// Its width right now: 0 when off, too narrow, fullscreen or quick.
+    rail_w: f32,
+    /// When its rows are next rebuilt.
+    rail_next_tick: Option<Instant>,
+    /// When host sessions are next listed.
+    rail_next_host_poll: Option<Instant>,
+    /// The answer to a host session listing still on its way.
+    rail_host_rx: Option<Receiver<Vec<serde_json::Value>>>,
+    /// Host sessions from the last listing.
+    rail_hosts: Vec<serde_json::Value>,
+    /// Heading for a session whose folder is unknown: where rustty started.
+    rail_home_project: String,
+    /// Time zero for sidebar activity.
+    rail_epoch: Instant,
+    /// Working dots pulse, unless Windows animation effects are off.
+    rail_animate: bool,
     /// This launch shows the banner; cleared once it has.
     greet: bool,
     /// The running crab animation and the pane it draws in.
@@ -1381,6 +1411,10 @@ impl WindowState {
     /// `always` shows it, `auto` shows it only with more than one tab,
     /// `hidden` never shows it.
     fn bar_height(&self) -> f32 {
+        // The sidebar lists the tabs, so the tab strip steps aside.
+        if self.rail_w > 0.0 {
+            return 0.0;
+        }
         match self.tab_bar {
             TabBar::Always => TAB_BAR_HEIGHT,
             TabBar::Auto if self.app.tab_count() > 1 => TAB_BAR_HEIGHT,
@@ -1408,6 +1442,9 @@ impl WindowState {
 
     /// End of the `+` button when the title strip holds tabs, otherwise 0.
     fn tabs_end(&self) -> f32 {
+        if self.rail_w > 0.0 {
+            return self.rail_w;
+        }
         match &self.renderer {
             Some(r) if self.tabs_on_top() && self.bar_height() > 0.0 => r.tabs_end(),
             _ => 0.0,
@@ -1840,6 +1877,10 @@ unsafe extern "system" fn wnd_proc(
             handle_dblclick(hwnd, lparam);
             LRESULT(0)
         }
+        WM_MOUSELEAVE => {
+            set_rail_hover(hwnd, rail::Hit::None);
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
             set_caption_hover(hwnd, None);
             handle_mouse_move(hwnd, wparam, lparam);
@@ -1939,6 +1980,7 @@ unsafe extern "system" fn wnd_proc(
             }
         }
         WM_TIMER => {
+            rail_tick(hwnd);
             if wparam.0 == CLACK_TIMER {
                 clack_tick(hwnd);
             } else if wparam.0 == BLINK_TIMER {
@@ -2148,6 +2190,15 @@ fn init_window(hwnd: HWND) {
             && client.bottom > 0
         {
             r.resize(client.right as u32, client.bottom as u32);
+        }
+        // Before the first shell and banner are sized.
+        let scale = dpi.max(96) as f32 / 96.0;
+        let enabled = s.rail_enabled && !s.quick;
+        s.rail_w = rail::effective_width(enabled, client.right as f32 / scale);
+        let (bar, rail_w) = (s.bar_height(), s.rail_w);
+        if let Some(r) = &mut s.renderer {
+            r.set_rail_width(rail_w);
+            r.set_tab_bar_height(bar);
         }
         s.app.set_palette(s.theme.palette);
         if s.restore.is_some() {
@@ -2370,6 +2421,21 @@ fn create_quick_window() {
         alt_tap: AltTap::default(),
         greet: false,
         clack: None,
+        rail_enabled: false,
+        grid_pressed: false,
+        rail_w: 0.0,
+        rail_next_tick: None,
+        rail_next_host_poll: None,
+        rail_host_rx: None,
+        rail_hosts: Vec::new(),
+        rail_home_project: rail::project_of(
+            std::env::current_dir()
+                .ok()
+                .as_deref()
+                .and_then(std::path::Path::to_str),
+        ),
+        rail_epoch: Instant::now(),
+        rail_animate: animations_enabled(),
         search: None,
         palette: None,
         hint: None,
@@ -2668,6 +2734,8 @@ fn blink_cursor(hwnd: HWND) {
 /// WM_SIZE follow-up: resize render target -> grid -> ConPTY (NFR resize
 /// chain, spec NFR).
 fn resize_window(hwnd: HWND, width_px: u32, height_px: u32) {
+    sync_rail_width(hwnd);
+    sync_tab_bar(hwnd);
     let Some(s) = state_mut(hwnd) else { return };
     let Some(r) = &mut s.renderer else { return };
     r.resize(width_px, height_px);
@@ -2813,6 +2881,294 @@ fn clack_tick(hwnd: HWND) {
         }
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Recompute the sessions sidebar's width from the setting and the window size.
+fn sync_rail_width(hwnd: HWND) {
+    let mut client = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut client) };
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    if let Some(s) = state_mut(hwnd) {
+        let enabled = s.rail_enabled && !s.quick && s.fullscreen.is_none();
+        let hidden = s.rail_w <= 0.0;
+        s.rail_w = rail::effective_width(enabled, client.right as f32 / scale);
+        if hidden && s.rail_w > 0.0 {
+            // Nothing watched sessions while it was hidden.
+            s.rail_next_tick = None;
+            for i in 0..s.app.tab_count() {
+                if let Some(tab) = s.app.tab_at_mut(i) {
+                    tab.for_each_pane(|pane, _| pane.reset_rail_activity());
+                }
+            }
+        }
+    }
+}
+
+/// Show or hide the sessions sidebar.
+fn toggle_session_rail(hwnd: HWND) {
+    if let Some(s) = state_mut(hwnd) {
+        s.rail_enabled = !s.rail_enabled;
+        s.rail_next_tick = None;
+    }
+    sync_rail_width(hwnd);
+    sync_tab_bar(hwnd);
+    rail_tick(hwnd);
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// One row per tab, then one per host session this window isn't showing.
+fn build_rail_rows(s: &mut WindowState, focused: bool, now_ms: u64) -> Vec<rail::Row> {
+    let active = s.app.active_index();
+    let mut rows = Vec::with_capacity(s.app.tab_count());
+    let mut shown_aliases = Vec::new();
+    for i in 0..s.app.tab_count() {
+        let Some(tab) = s.app.tab_at_mut(i) else {
+            continue;
+        };
+        let viewed = i == active && focused;
+        let mut statuses = Vec::new();
+        let mut message = None;
+        tab.for_each_pane(|pane, _| {
+            statuses.push(pane.rail_step(viewed, now_ms));
+            if message.is_none() {
+                message = pane.attention_message().map(str::to_string);
+            }
+            shown_aliases.extend(pane.view_alias());
+        });
+        let status = rail::most_urgent(statuses);
+        let title = rail::row_title(tab.title(), tab.profile());
+        let project = match tab.pane().cwd() {
+            Some(cwd) => rail::project_of(Some(cwd)),
+            None => s.rail_home_project.clone(),
+        };
+        rows.push(rail::Row {
+            target: rail::Target::Tab(i),
+            title,
+            detail: rail::detail_for(status, message.as_deref()),
+            project,
+            status,
+            active: i == active,
+        });
+    }
+    for rec in &s.rail_hosts {
+        let field = |key: &str| rec.get(key).and_then(serde_json::Value::as_str);
+        let alias = rec
+            .get("alias")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|a| u32::try_from(a).ok());
+        let Some(alias) = alias else { continue };
+        if field("state") != Some("live") || shown_aliases.contains(&alias) {
+            continue;
+        }
+        rows.push(rail::Row {
+            target: rail::Target::Host(alias),
+            title: rail::row_title(field("name").unwrap_or(""), "session"),
+            detail: rail::detail_for(rail::Status::Background, None),
+            project: "Background".to_string(),
+            status: rail::Status::Background,
+            active: false,
+        });
+    }
+    rail::group(&mut rows);
+    rows
+}
+
+/// Refresh the sidebar: at most a few times a second, and it repaints only when
+/// something changed or a working dot is pulsing.
+fn rail_tick(hwnd: HWND) {
+    /// How often rows are rebuilt.
+    const TICK: Duration = Duration::from_millis(100);
+    /// How often host sessions are listed.
+    const HOST_POLL: Duration = Duration::from_secs(3);
+    let now = Instant::now();
+    let focused = unsafe { GetForegroundWindow() } == hwnd;
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.rail_w <= 0.0 {
+        // Nothing to draw, but a session you can see has still been seen.
+        if focused && let Some(tab) = s.app.active_tab_mut() {
+            tab.for_each_pane(|pane, _| pane.mark_seen());
+        }
+        return;
+    }
+    if s.rail_next_tick.is_some_and(|next| now < next) {
+        return;
+    }
+    s.rail_next_tick = Some(now + TICK);
+    if let Some(rx) = &s.rail_host_rx {
+        match rx.try_recv() {
+            Ok(hosts) => {
+                s.rail_hosts = hosts;
+                s.rail_host_rx = None;
+            }
+            Err(TryRecvError::Disconnected) => s.rail_host_rx = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+    if s.rail_host_rx.is_none() && s.rail_next_host_poll.is_none_or(|next| now >= next) {
+        s.rail_next_host_poll = Some(now + HOST_POLL);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("rustty-rail-hosts".to_string())
+            .spawn(move || {
+                let _ = tx.send(session_records());
+            });
+        if spawned.is_ok() {
+            s.rail_host_rx = Some(rx);
+        }
+    }
+    let elapsed = now.duration_since(s.rail_epoch);
+    let rows = build_rail_rows(
+        s,
+        focused,
+        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+    );
+    let pulsing = s.rail_animate && rows.iter().any(|r| r.status == rail::Status::Working);
+    let Some(r) = &mut s.renderer else { return };
+    let changed = r.rail_rows() != rows.as_slice();
+    if changed {
+        r.set_rail_rows(rows);
+    }
+    let pulse = if pulsing {
+        rail::pulse_at(elapsed.as_secs_f32())
+    } else {
+        1.0
+    };
+    let stepped = r.set_rail_pulse(pulse);
+    // The timer's damage paint draws the sidebar and leaves a quiet grid alone.
+    if (changed || stepped)
+        && let Some(tab) = s.app.active_tab_mut()
+    {
+        tab.pane_mut().mark_dirty();
+    }
+}
+
+/// Ask for a repaint after the pointer moved in the sidebar. This repaints the
+/// whole window, so nothing periodic may use it.
+fn invalidate_rail(hwnd: HWND) {
+    let mut client = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut client) };
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    let width = state_ref(hwnd).map_or(0.0, |s| s.rail_w);
+    let area = RECT {
+        left: 0,
+        top: 0,
+        right: (width * scale).ceil() as i32,
+        bottom: client.bottom,
+    };
+    let _ = unsafe { InvalidateRect(Some(hwnd), Some(&area), false) };
+}
+
+/// Close a tab from its row, asking first when that could lose work (TAB-018).
+/// The tab comes to the front, so you can see what you are being asked about.
+fn close_tab_from_rail(hwnd: HWND, tab: usize, status: rail::Status) {
+    activate_tab(hwnd, tab);
+    let Some((live, confirm, last)) = state_ref(hwnd).map(|s| {
+        (
+            s.app
+                .active_tab()
+                .is_some_and(|t| t.pane().shell().state() == crate::shell::ShellState::Running),
+            s.app.tab_confirm_close(),
+            s.app.tab_count() == 1,
+        )
+    }) else {
+        return;
+    };
+    if rail::close_needs_confirm(status, confirm, live, last) {
+        let text = if last {
+            "Close this session? It is the last one, so rustty will quit."
+        } else {
+            "Close this session and kill what is running in it?"
+        };
+        if !confirm_yes_no(hwnd, text) {
+            return;
+        }
+    }
+    close_tab(hwnd, tab);
+}
+
+/// Whether a client x is over the sidebar.
+fn over_rail(hwnd: HWND, x: f32) -> bool {
+    state_ref(hwnd).is_some_and(|s| x < s.rail_w)
+}
+
+/// A click in the sidebar.
+fn rail_click(hwnd: HWND, x: f32, y: f32) {
+    // Rows can be up to a tick old: a closed or moved tab must not shift what
+    // this click means.
+    if let Some(s) = state_mut(hwnd) {
+        s.rail_next_tick = None;
+    }
+    rail_tick(hwnd);
+    let Some((hit, rows)) = state_ref(hwnd)
+        .and_then(|s| s.renderer.as_ref())
+        .map(|r| (r.rail_hit(x, y), r.rail_rows().to_vec()))
+    else {
+        return;
+    };
+    let target = |i: usize| rows.get(i).map(|row| row.target);
+    let status = |i: usize| rows.get(i).map_or(rail::Status::Idle, |row| row.status);
+    match hit {
+        rail::Hit::New => new_tab(hwnd),
+        rail::Hit::Row(i) => match target(i) {
+            Some(rail::Target::Tab(tab)) => activate_tab(hwnd, tab),
+            Some(rail::Target::Host(alias)) => {
+                // Fresh, not the last poll: taking control from someone who
+                // attached a moment ago would take their keyboard away.
+                let controllers = live_sessions()
+                    .iter()
+                    .find(|rec| {
+                        rec.get("alias").and_then(serde_json::Value::as_u64)
+                            == Some(u64::from(alias))
+                    })
+                    .and_then(|rec| rec.get("controllers"))
+                    .and_then(serde_json::Value::as_u64);
+                open_session_view(hwnd, alias, rail::opens_with_control(controllers));
+            }
+            None => {}
+        },
+        rail::Hit::Close(i) => {
+            if let Some(rail::Target::Tab(tab)) = target(i) {
+                close_tab_from_rail(hwnd, tab, status(i));
+            }
+        }
+        rail::Hit::None => {}
+    }
+    if let Some(s) = state_mut(hwnd) {
+        s.rail_next_tick = None;
+    }
+    rail_tick(hwnd);
+}
+
+/// Bring tab `idx` to the front.
+fn activate_tab(hwnd: HWND, idx: usize) {
+    if let Some(s) = state_mut(hwnd) {
+        if s.app.select_tab(idx) {
+            apply_active_profile_theme(s);
+        }
+        set_title(hwnd, &s.app);
+    }
+    sync_active_tab_geometry(hwnd); // issue #9
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    search_resync(hwnd);
+}
+
+/// Update what the pointer is over in the sidebar, and ask to hear when it leaves.
+fn set_rail_hover(hwnd: HWND, hit: rail::Hit) {
+    let changed = state_mut(hwnd)
+        .and_then(|s| s.renderer.as_mut())
+        .is_some_and(|r| r.set_rail_hover(hit));
+    if changed {
+        if hit != rail::Hit::None {
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            let _ = unsafe { TrackMouseEvent(&mut track) };
+        }
+        invalidate_rail(hwnd);
+    }
 }
 
 /// Tell the Alt-tap detector about a key press.
@@ -3007,12 +3363,14 @@ fn sync_tab_bar(hwnd: HWND) {
     let Some(s) = state_mut(hwnd) else { return };
     let bar = s.bar_height();
     let strip = s.caption_height();
+    let rail_w = s.rail_w;
     let Some(r) = &mut s.renderer else { return };
-    if r.tab_bar_height() == bar && r.caption_height() == strip {
+    if r.tab_bar_height() == bar && r.caption_height() == strip && r.rail_width() == rail_w {
         return;
     }
     r.set_tab_bar_height(bar);
     r.set_caption_height(strip);
+    r.set_rail_width(rail_w);
     let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
     if s.app.resize_active(cols, rows).is_err() {
         eprintln!("rustty: ConPTY resize failed");
@@ -3061,6 +3419,11 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
     // keys included) reaches the shell (issue #52).
     if state_ref(hwnd).is_some_and(|s| s.hint.is_some()) {
         handle_hint_keydown(hwnd, vk);
+        return;
+    }
+    // Ctrl+Shift+S shows or hides the sessions sidebar (RAIL-001).
+    if mods.ctrl && mods.shift && !mods.alt && vk == 0x53 {
+        toggle_session_rail(hwnd);
         return;
     }
     // Ctrl+Shift+B opens or closes the bookmark list (issue #53, BKMK-002).
@@ -4479,6 +4842,12 @@ fn standard_rows(ctx: &RowCtx, shortcut: impl Fn(KeyAction) -> Option<String>) -
     push("Reset Font Size", "View", KeyAction::ResetFontSize, None);
     push("Toggle Fullscreen", "Window", KeyAction::Fullscreen, None);
     push(
+        "Toggle Sessions Sidebar",
+        "Window",
+        KeyAction::ToggleSessionRail,
+        None,
+    );
+    push(
         "Hide Quick Terminal",
         "Window",
         KeyAction::CloseQuick,
@@ -4554,6 +4923,7 @@ fn palette_command_for_menu(id: usize) -> Option<Command> {
         MENU_PASTE => action(KeyAction::Paste),
         MENU_SEARCH => action(KeyAction::Search),
         MENU_FULLSCREEN => action(KeyAction::Fullscreen),
+        MENU_SESSION_RAIL => action(KeyAction::ToggleSessionRail),
         MENU_PREV_COMMAND => action(KeyAction::PrevCommand),
         MENU_NEXT_COMMAND => action(KeyAction::NextCommand),
         MENU_COPY_LAST_CMD => action(KeyAction::CopyLastCommand),
@@ -4874,6 +5244,14 @@ fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32,
     };
     let _ = unsafe { ScreenToClient(hwnd, &mut pt) };
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    if over_rail(hwnd, pt.x.max(0) as f32 / scale) {
+        if let Some(r) = state_mut(hwnd).and_then(|s| s.renderer.as_mut()) {
+            r.scroll_rail(-f32::from(delta) / 120.0 * rail::ROW_HEIGHT);
+        }
+        invalidate_rail(hwnd);
+        return;
+    }
     let (cell, proto, sgr, urxvt) = {
         let Some(s) = state_mut(hwnd) else { return };
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
@@ -4973,7 +5351,8 @@ fn handle_drop(hwnd: HWND, hdrop: HDROP) {
         let height = client_height_dips(hwnd);
         let bar = s.bar_height();
         let top = s.bar_top(height);
-        let over_bar = bar > 0.0 && y >= top && y < top + bar;
+        // DRAG-002: the sidebar stands in for the tab strip it replaces.
+        let over_bar = (bar > 0.0 && y >= top && y < top + bar) || x < s.rail_w;
         let pane_idx = if over_bar {
             None
         } else {
@@ -5029,7 +5408,12 @@ fn cell_at(s: &WindowState, x: f32, y: f32, height: f32) -> Option<(usize, usize
         return None;
     }
     let tab = s.app.active_tab()?;
-    let col = ((x - s.pad_x()) / s.metrics.cell_width).floor().max(0.0) as usize;
+    if x < s.rail_w {
+        return None;
+    }
+    let col = ((x - s.rail_w - s.pad_x()) / s.metrics.cell_width)
+        .floor()
+        .max(0.0) as usize;
     let row = ((y - top) / s.metrics.cell_height).floor().max(0.0) as usize;
     let (cols, rows) = (tab.cols(), tab.rows());
     let col = col.min(cols.saturating_sub(1));
@@ -5090,7 +5474,7 @@ fn send_mouse_report(
 fn mouse_cell(hwnd: HWND, lparam: LPARAM) -> Option<(usize, usize, usize)> {
     let (x, y) = cursor_dips(hwnd, lparam);
     let height = client_height_dips(hwnd);
-    state_ref(hwnd).and_then(|s| cell_at(s, x, y, height))
+    state_ref(hwnd).and_then(|s| cell_at(s, rail::drag_x(x, s.rail_w, s.grid_pressed), y, height))
 }
 
 /// OSC 8 link target of grid cell (`view_row`, `col`) in pane `idx`
@@ -5185,6 +5569,9 @@ fn open_diagnostic(hwnd: HWND, r: Resolved) {
 }
 
 fn handle_rbutton_down(hwnd: HWND, lparam: LPARAM) {
+    if over_rail(hwnd, cursor_dips(hwnd, lparam).0) {
+        return;
+    }
     if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
         && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
     {
@@ -5195,6 +5582,9 @@ fn handle_rbutton_down(hwnd: HWND, lparam: LPARAM) {
 }
 
 fn handle_mbutton_down(hwnd: HWND, lparam: LPARAM) -> bool {
+    if over_rail(hwnd, cursor_dips(hwnd, lparam).0) {
+        return true;
+    }
     if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
         && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
     {
@@ -5418,6 +5808,13 @@ fn show_tab_menu(hwnd: HWND, idx: usize) {
 
 fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
     let (x, y) = cursor_dips(hwnd, lparam);
+    if over_rail(hwnd, x) {
+        rail_click(hwnd, x, y);
+        return;
+    }
+    if let Some(s) = state_mut(hwnd) {
+        s.grid_pressed = true;
+    }
     let hit = state_ref(hwnd).map(|s| s.tab_hit(x, y, client_height_dips(hwnd)));
     match hit {
         Some(TabHit::Tab(i)) => {
@@ -5563,6 +5960,16 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     const MK_RBUTTON: usize = 0x02;
     let (x, y) = cursor_dips(hwnd, lparam);
     let height = client_height_dips(hwnd);
+    let dragging = wparam.0 & MK_LBUTTON != 0 && state_ref(hwnd).is_some_and(|s| s.grid_pressed);
+    let hover = if !dragging && over_rail(hwnd, x) {
+        state_ref(hwnd)
+            .and_then(|s| s.renderer.as_ref())
+            .map_or(rail::Hit::None, |r| r.rail_hit(x, y))
+    } else {
+        rail::Hit::None
+    };
+    set_rail_hover(hwnd, hover);
+    let x = state_ref(hwnd).map_or(x, |s| rail::drag_x(x, s.rail_w, dragging));
     // Tab drag reorder (TAB-016): drop the dragged tab on the tab it crosses.
     if let Some(from) = state_ref(hwnd).and_then(|s| s.tab_drag)
         && let Some(to) = state_ref(hwnd).map(|s| s.tab_hit(x, y, height))
@@ -5712,6 +6119,7 @@ fn handle_lbutton_up(hwnd: HWND, lparam: LPARAM) {
     }
     if let Some(s) = state_mut(hwnd) {
         s.drag_anchor = None;
+        s.grid_pressed = false;
         s.tab_drag = None;
     }
     // CONFIG-010: copy-on-select puts the selection on the clipboard.
@@ -5730,6 +6138,12 @@ fn set_cursor_for_position(wparam: WPARAM) {
     let _ = unsafe { ScreenToClient(target, &mut pt) };
     let dpi = unsafe { GetDpiForWindow(target) }.max(96) as f32;
     let y = px_to_dips(pt.y.max(0) as u32, dpi);
+    if over_rail(target, px_to_dips(pt.x.max(0) as u32, dpi)) {
+        if let Ok(cursor) = unsafe { LoadCursorW(None, IDC_ARROW) } {
+            let _ = unsafe { SetCursor(Some(cursor)) };
+        }
+        return;
+    }
     let over_bar = state_ref(target).is_some_and(|s| s.over_tab_bar(y, client_height_dips(target)));
     let idc = if over_bar { IDC_ARROW } else { IDC_IBEAM };
     if let Ok(cursor) = unsafe { LoadCursorW(None, idc) } {
@@ -5810,7 +6224,9 @@ fn toggle_fullscreen(hwnd: HWND) {
             s.fullscreen = Some((rect, style, exstyle));
         }
     }
-    // Fullscreen has no title strip; the grid takes that room and gives it back.
+    // Fullscreen has no title strip or sidebar; the grid takes that room and
+    // gives it back.
+    sync_rail_width(hwnd);
     sync_tab_bar(hwnd);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
@@ -6302,9 +6718,10 @@ fn open_session_view(hwnd: HWND, alias: u32, take_control: bool) {
     )
     .unwrap_or(24)
     .max(MIN_ROWS);
-    let label = format!(
-        "Session {alias} · {}",
-        if take_control { "ctrl" } else { "watch" }
+    let label = rail::view_label(
+        alias,
+        rec.get("name").and_then(serde_json::Value::as_str),
+        take_control,
     );
     let Some(s) = state_mut(hwnd) else { return };
     s.app
@@ -6440,6 +6857,10 @@ fn reload_config(s: &mut WindowState, hwnd: HWND) {
     let font_changed = font != s.font;
     s.app.set_palette(new_theme.palette);
     s.theme = new_theme;
+    // Only a change to the file overrides what Ctrl+Shift+S chose.
+    if cfg.session_rail != s.cfg.session_rail {
+        s.rail_enabled = cfg.session_rail;
+    }
     s.cfg = cfg;
     // PALETTE-001: shortcuts and profiles changed; rebuild the registry on
     // the next open.
@@ -6467,6 +6888,7 @@ fn reload_config(s: &mut WindowState, hwnd: HWND) {
     apply_profile_theme(s, &spec);
     apply_profile_font(s, &spec);
     apply_opacity(hwnd);
+    sync_rail_width(hwnd);
     sync_tab_bar(hwnd);
     // A new font, bar placement, bar visibility or padding changes how many
     // cells fit in the same client rect, so refit every tab, not just the
@@ -6767,6 +7189,7 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
         KeyAction::CommandPalette => toggle_palette(hwnd),
         KeyAction::HintMode => toggle_hint(hwnd),
         KeyAction::ToggleBookmark => toggle_bookmark(hwnd),
+        KeyAction::ToggleSessionRail => toggle_session_rail(hwnd),
         KeyAction::ShowBookmarks => toggle_bookmarks_overlay(hwnd),
         KeyAction::ExportSelection => export_selection(hwnd),
         KeyAction::ExportLastCommand => export_last_command(hwnd),
@@ -7076,8 +7499,12 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         tabs: Vec::new(),
         active: state.app.active_index(),
-        bar_visible: bar > 0.0,
-        bar_bounds: (0.0, bar_top, client_w, bar_top + bar),
+        bar_visible: bar > 0.0 || state.rail_w > 0.0,
+        bar_bounds: if state.rail_w > 0.0 {
+            (0.0, 0.0, state.rail_w, client_h)
+        } else {
+            (0.0, bar_top, client_w, bar_top + bar)
+        },
         tab_bounds: Vec::new(),
         client_w,
         client_h,
@@ -7119,7 +7546,18 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
             activity: tab.bell_pending(),
         });
     }
-    snap.tab_bounds = renderer.tab_layout().tabs;
+    snap.tab_bounds = if state.rail_w > 0.0 {
+        (0..state.app.tab_count())
+            .map(|i| renderer.rail_tab_rect(i).unwrap_or((0.0, 0.0, 0.0, 0.0)))
+            .collect()
+    } else {
+        renderer
+            .tab_layout()
+            .tabs
+            .iter()
+            .map(|&(lo, hi)| (lo, bar_top, hi, bar_top + bar))
+            .collect()
+    };
     if let Some(tab) = state.app.active_tab() {
         snap.focused_pane = tab.focused_index().unwrap_or(0);
         tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
@@ -7279,6 +7717,7 @@ pub fn run(
     let rows = cfg.window.rows.max(MIN_ROWS);
     // One tab at startup: "auto"/"hidden" bars start collapsed (TAB-010).
     let bar = match cfg.tab_bar.visible {
+        _ if cfg.session_rail => 0.0,
         TabBar::Always => TAB_BAR_HEIGHT,
         TabBar::Auto | TabBar::Hidden => 0.0,
     };
@@ -7292,6 +7731,12 @@ pub fn run(
         cfg.window.padding.x as f32,
         cfg.window.padding.y as f32,
     );
+    // The sidebar comes on top of the configured grid, not out of it.
+    let cell_w = if cfg.session_rail {
+        cell_w + crate::render::dips_to_px(rail::RAIL_WIDTH, dpi as f32) as i32
+    } else {
+        cell_w
+    };
     let mut rect = RECT {
         left: 0,
         top: 0,
@@ -7396,6 +7841,21 @@ pub fn run(
         alt_tap: AltTap::default(),
         greet,
         clack: None,
+        rail_enabled: cfg.session_rail,
+        grid_pressed: false,
+        rail_w: 0.0,
+        rail_next_tick: None,
+        rail_next_host_poll: None,
+        rail_host_rx: None,
+        rail_hosts: Vec::new(),
+        rail_home_project: rail::project_of(
+            std::env::current_dir()
+                .ok()
+                .as_deref()
+                .and_then(std::path::Path::to_str),
+        ),
+        rail_epoch: Instant::now(),
+        rail_animate: animations_enabled(),
         search: None,
         palette: None,
         hint: None,

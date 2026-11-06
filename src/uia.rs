@@ -126,7 +126,7 @@ pub struct Snapshot {
     pub bar_bounds: DipRect,
     /// Per-tab x-extents `(left, right)` from the renderer layout, inside
     /// the tab strip.
-    pub tab_bounds: Vec<(f32, f32)>,
+    pub tab_bounds: Vec<DipRect>,
     /// Client width (DIPs).
     pub client_w: f32,
     /// Client height (DIPs).
@@ -256,8 +256,7 @@ pub fn contains_px(rect: DipRect, origin: (f32, f32), dpi: f32, x: f32, y: f32) 
 #[must_use]
 pub fn hit_test(s: &Snapshot, origin: (f32, f32), x: f32, y: f32) -> Node {
     if s.bar_visible {
-        for (i, &(lo, hi)) in s.tab_bounds.iter().enumerate() {
-            let rect = (lo, s.bar_bounds.1, hi, s.bar_bounds.3);
+        for (i, &rect) in s.tab_bounds.iter().enumerate() {
             if contains_px(rect, origin, s.dpi, x, y) {
                 return Node::Tab(i);
             }
@@ -298,10 +297,10 @@ pub fn bounds_px(node: Node, s: &Snapshot, win: DipRect, origin: (f32, f32)) -> 
         Node::Root => return win,
         Node::TabBar => s.bar_bounds,
         Node::Tab(i) => {
-            let Some(&(lo, hi)) = s.tab_bounds.get(i) else {
+            let Some(&rect) = s.tab_bounds.get(i) else {
                 return (0.0, 0.0, 0.0, 0.0);
             };
-            (lo, s.bar_bounds.1, hi, s.bar_bounds.3)
+            rect
         }
         Node::Grid(i) => s
             .grid_bounds
@@ -672,7 +671,7 @@ mod tests {
             active: 1,
             bar_visible: true,
             bar_bounds: (0.0, 0.0, 500.0, 32.0),
-            tab_bounds: vec![(0.0, 120.0), (120.0, 240.0)],
+            tab_bounds: vec![(0.0, 0.0, 120.0, 32.0), (120.0, 0.0, 240.0, 32.0)],
             client_w: 500.0,
             client_h: 400.0,
             dpi: 144.0,

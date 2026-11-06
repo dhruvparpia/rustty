@@ -40,6 +40,13 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Added
 
+- A sessions sidebar, on by default: every session grouped by project with what it is doing
+  (needs you, working, finished, ready, exited), plus background host sessions you can click to
+  open and type in (read-only if another window controls them). It reads signals agent CLIs already send. Ctrl+Shift+S or `session-rail = false` turns it
+  off, which brings the tab strip back. Closing a session from its row asks first when it is
+  working or waiting for you, or when the profile asks.
+- `TERM_PROGRAM`, `TERM_PROGRAM_VERSION` and `COLORTERM` also reach WSL shells, through `WSLENV`.
+- Shells see `TERM_PROGRAM=rustty`, `TERM_PROGRAM_VERSION` and `COLORTERM=truecolor`.
 - A welcome banner when rustty starts with no other rustty window open: your crab snaps its
   claws twice beside the session status, key commands and a tip. `welcome = false` removes it.
 - Shells started by rustty get its folder at the end of their PATH, so `rustty` commands

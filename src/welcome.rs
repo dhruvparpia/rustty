@@ -461,6 +461,7 @@ pub const TIPS: &[&str] = &[
     "Ctrl+Shift+B bookmarks a line so you can jump back to it later.",
     "Ctrl+Shift+Enter splits right, and Ctrl+Shift+- splits below.",
     "Tap Alt to open the window menu.",
+    "Ctrl+Shift+S shows or hides the sessions sidebar.",
     "F11 toggles fullscreen.",
     "Ctrl+Plus and Ctrl+Minus change the font size, and Ctrl+0 resets it.",
     "rustty --new-session starts a shell that outlives this window.",

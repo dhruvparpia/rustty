@@ -814,4 +814,70 @@ mod tests {
         feed(&mut p, &mut g, "\x1b[31m");
         assert_eq!(p.pen_fg, Some(Color::rgb(1, 2, 3)));
     }
+
+    #[test]
+    fn osc_9_is_a_notification() {
+        // Break caught: an agent's "needs input" notification being dropped.
+        let mut p = Parser::new();
+        let mut g = grid();
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]9;Approve the edit?\x07"),
+            vec![ParserEvent::Notify("Approve the edit?".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc_777_notify_uses_title_and_body() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]777;notify;Claude;Needs input\x07"),
+            vec![ParserEvent::Notify("Claude: Needs input".to_string())]
+        );
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]777;notify;Just a title\x07"),
+            vec![ParserEvent::Notify("Just a title".to_string())]
+        );
+        assert_eq!(feed(&mut p, &mut g, "\x1b]777;other;x\x07"), vec![]);
+    }
+
+    #[test]
+    fn osc_9_4_reports_progress_not_a_notification() {
+        // Break caught: a progress update raising "needs you".
+        let mut p = Parser::new();
+        let mut g = grid();
+        for (seq, active) in [
+            ("\x1b]9;4;1;42\x07", true),
+            ("\x1b]9;4;2;42\x07", true),
+            ("\x1b]9;4;3\x07", true),
+            ("\x1b]9;4;4;10\x07", true),
+            ("\x1b]9;4;0;0\x07", false),
+            ("\x1b]9;4;0\x07", false),
+        ] {
+            assert_eq!(
+                feed(&mut p, &mut g, seq),
+                vec![ParserEvent::Progress(active)],
+                "{seq}"
+            );
+        }
+    }
+
+    #[test]
+    fn numbered_osc_9_commands_are_not_notifications() {
+        // Break caught: a prompt reporting its directory with OSC 9;9 showing
+        // "Needs you" on every background session.
+        let mut p = Parser::new();
+        let mut g = grid();
+        for seq in [
+            "\x1b]9;9;C:\\Users\\me\\src\x07",
+            "\x1b]9;12\x07",
+            "\x1b]9;1;500\x07",
+        ] {
+            assert_eq!(feed(&mut p, &mut g, seq), vec![], "{seq}");
+        }
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]9;2 tests failed\x07"),
+            vec![ParserEvent::Notify("2 tests failed".to_string())]
+        );
+    }
 }

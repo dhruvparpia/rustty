@@ -79,6 +79,24 @@ pub enum ShellEvent {
     Notice(&'static str),
 }
 
+/// `current`, with `names` added unless already listed (with or without flags).
+#[must_use]
+pub fn wslenv_with(current: Option<&str>, names: &[&str]) -> String {
+    let mut out = current.unwrap_or("").to_string();
+    for name in names {
+        let listed = out
+            .split(':')
+            .any(|item| item.split('/').next() == Some(*name));
+        if !listed {
+            if !out.is_empty() {
+                out.push(':');
+            }
+            out.push_str(name);
+        }
+    }
+    out
+}
+
 /// What [`Shell::spawn`] needs to start a pane's process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnOptions {
@@ -143,6 +161,37 @@ impl SpawnOptions {
             self.env
                 .insert(key.unwrap_or_else(|| "PATH".to_string()), path);
         }
+    }
+
+    /// Tell programs which terminal they are in, the way other terminals do,
+    /// so harnesses and agent CLIs can detect rustty. A profile's own value wins.
+    pub fn add_terminal_identity(&mut self, version: &str) {
+        for (name, value) in [
+            ("TERM_PROGRAM", "rustty"),
+            ("TERM_PROGRAM_VERSION", version),
+            ("COLORTERM", "truecolor"),
+        ] {
+            if !self.env.keys().any(|key| key.eq_ignore_ascii_case(name)) {
+                self.env.insert(name.to_string(), value.to_string());
+            }
+        }
+        // WSL passes on only what WSLENV lists.
+        let key = self
+            .env
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case("WSLENV"))
+            .cloned();
+        let current = key
+            .as_ref()
+            .and_then(|key| self.env.get(key))
+            .cloned()
+            .or_else(|| std::env::var("WSLENV").ok());
+        let merged = wslenv_with(
+            current.as_deref(),
+            &["TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"],
+        );
+        self.env
+            .insert(key.unwrap_or_else(|| "WSLENV".to_string()), merged);
     }
 
     /// Options for `program` (no args) at `cols` x `rows`.
@@ -507,6 +556,7 @@ impl Shell {
     fn attach_console(&mut self, opts: &SpawnOptions) -> Result<(), ShellError> {
         // Every local shell passes through here: tabs, splits and restored panes.
         let mut opts = opts.clone();
+        opts.add_terminal_identity(env!("CARGO_PKG_VERSION"));
         if let Some(dir) = own_exe_dir() {
             opts.add_own_dir(&dir, &std::env::var("PATH").unwrap_or_default());
         }
@@ -1328,5 +1378,65 @@ mod tests {
         let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
         opts.add_own_dir(r"C:\r", r"C:\inherited;C:\r");
         assert!(opts.env.is_empty());
+    }
+
+    #[test]
+    fn shells_can_tell_they_are_in_rustty() {
+        // Break caught: harnesses treating rustty as an unknown terminal.
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.add_terminal_identity("0.6.0");
+        assert_eq!(
+            opts.env.get("TERM_PROGRAM").map(String::as_str),
+            Some("rustty")
+        );
+        assert_eq!(
+            opts.env.get("TERM_PROGRAM_VERSION").map(String::as_str),
+            Some("0.6.0")
+        );
+        assert_eq!(
+            opts.env.get("COLORTERM").map(String::as_str),
+            Some("truecolor")
+        );
+    }
+
+    #[test]
+    fn a_profile_can_override_the_terminal_identity() {
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.env
+            .insert("term_program".to_string(), "mine".to_string());
+        opts.add_terminal_identity("0.6.0");
+        assert_eq!(
+            opts.env.get("term_program").map(String::as_str),
+            Some("mine")
+        );
+        assert!(!opts.env.contains_key("TERM_PROGRAM"));
+    }
+
+    #[test]
+    fn wsl_shells_get_the_terminal_identity_too() {
+        // Break caught: an agent CLI inside WSL not detecting rustty.
+        assert_eq!(wslenv_with(None, &["A", "B"]), "A:B",);
+        assert_eq!(
+            wslenv_with(Some("USERPROFILE/p"), &["A"]),
+            "USERPROFILE/p:A"
+        );
+        assert_eq!(wslenv_with(Some("A/u:B"), &["A", "B", "C"]), "A/u:B:C");
+        assert_eq!(wslenv_with(Some(""), &["A"]), "A");
+        let mut opts = SpawnOptions::new("wsl.exe", 80, 24);
+        opts.add_terminal_identity("0.6.0");
+        let value = opts.env.get("WSLENV").map_or("", String::as_str);
+        for name in ["TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"] {
+            assert!(value.split(':').any(|item| item == name), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_profile_wslenv_is_kept() {
+        let mut opts = SpawnOptions::new("wsl.exe", 80, 24);
+        opts.env.insert("wslenv".to_string(), "MINE".to_string());
+        opts.add_terminal_identity("0.6.0");
+        let value = opts.env.get("wslenv").map_or("", String::as_str);
+        assert!(value.starts_with("MINE:"), "{value}");
+        assert!(!opts.env.contains_key("WSLENV"));
     }
 }

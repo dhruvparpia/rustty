@@ -430,6 +430,150 @@ fn damage_frames_allocate_nothing() {
     let _ = unsafe { DestroyWindow(hwnd) };
 }
 
+/// NFR-113, RAIL-004: the sessions sidebar is in every frame, so it follows
+/// the same hot-path rule, including with a working session's dot mid-pulse.
+#[test]
+#[ignore = "needs a desktop session: cargo test --release -- --ignored"]
+fn damage_frames_with_the_sidebar_allocate_nothing() {
+    use crate::rail::{self, Row, Status, Target};
+    let _guard = bench_lock();
+    let (hwnd, mut renderer) = bench_target(80, 24);
+    renderer.set_rail_width(rail::RAIL_WIDTH);
+    let row = |title: &str, status, target, active| Row {
+        target,
+        title: title.to_string(),
+        detail: rail::detail_for(status, None),
+        project: "winttyghost".to_string(),
+        status,
+        active,
+    };
+    renderer.set_rail_rows(vec![
+        row(
+            "Fixing the login bug",
+            Status::Working,
+            Target::Tab(0),
+            true,
+        ),
+        row(
+            "Refactor the parser",
+            Status::NeedsYou,
+            Target::Tab(1),
+            false,
+        ),
+        row("Running tests", Status::Finished, Target::Tab(2), false),
+        row("Docs", Status::Idle, Target::Tab(3), false),
+        row(
+            "overnight-build",
+            Status::Background,
+            Target::Host(7),
+            false,
+        ),
+    ]);
+    let _ = renderer.set_rail_pulse(0.5);
+    let (cols, rows) = renderer.grid_size();
+    let mut app = App::with_size(cols, rows, 1_000);
+    let theme = Theme::predawn();
+    let floor = present_floor(&mut app, &mut renderer, &theme);
+    let report = paint_burst(&mut app, &mut renderer, &theme, 20, floor);
+    report.print("sidebar allocations");
+
+    assert_eq!(
+        report.allocations, 0,
+        "bench: the sidebar allocated {} times in {} frames (NFR-113)",
+        report.allocations, report.frames,
+    );
+    // The target must go before its window.
+    drop(renderer);
+    let _ = unsafe { DestroyWindow(hwnd) };
+}
+
+/// RAIL-001: hovering a row draws its highlight and close target, inside the
+/// sidebar and nowhere else. A synthetic mouse message cannot show this in the
+/// real window: `TrackMouseEvent` ends the hover at once when the real pointer
+/// is elsewhere.
+#[test]
+#[ignore = "needs a desktop session: cargo test --release -- --ignored"]
+fn hovering_a_sidebar_row_paints_only_the_sidebar() {
+    use crate::rail::{self, Hit, Row, Status, Target};
+    let _guard = bench_lock();
+    let (hwnd, mut renderer) = bench_target(80, 24);
+    // DWM only composes windows that are on a monitor.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+    .expect("bench: moving the bench window on-screen failed");
+    renderer.set_rail_width(rail::RAIL_WIDTH);
+    renderer.set_rail_rows(vec![Row {
+        target: Target::Tab(0),
+        title: "Docs".to_string(),
+        detail: rail::detail_for(Status::Idle, None),
+        project: "winttyghost".to_string(),
+        status: Status::Idle,
+        active: false,
+    }]);
+    let (cols, rows) = renderer.grid_size();
+    let mut app = App::with_size(cols, rows, 1_000);
+    let theme = Theme::predawn();
+    app.feed_active(lines(0, rows).as_bytes());
+    let _ = app.take_dirty();
+    renderer.paint_damage(&app, &theme, None, None, None, None, &[], None);
+    app.clear_grid_damage();
+    let plain = capture_presented(hwnd, None);
+    assert!(!is_flat(&plain), "bench: the capture is one flat colour");
+
+    assert!(renderer.set_rail_hover(Hit::Close(0)));
+    renderer.paint_damage(&app, &theme, None, None, None, None, &[], None);
+    let hovered = capture_presented(hwnd, Some(&plain));
+
+    let mut rect = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut rect) }.expect("bench: client rect");
+    let width = (rect.right - rect.left) as usize;
+    let changed: Vec<usize> = plain
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(hovered.as_chunks::<4>().0.iter())
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(i, _)| i % width)
+        .collect();
+    assert!(!changed.is_empty(), "bench: hovering changed no pixels");
+    let right = changed.iter().copied().max().unwrap_or(0);
+    // The window is far wider than the sidebar, and a capture can be scaled,
+    // so half the window is the safe line.
+    assert!(
+        right < width / 2,
+        "bench: hover painted out to x {right} of {width}, past the sidebar"
+    );
+
+    // BELL-003: with the tab strip gone, a bell flashes the row.
+    renderer.set_rail_hover(Hit::None);
+    renderer.paint_damage(&app, &theme, None, None, None, None, &[], None);
+    let settled = capture_presented(hwnd, Some(&hovered));
+    renderer.set_bell_state(true, &[true], false);
+    renderer.paint_damage(&app, &theme, None, None, None, None, &[], None);
+    let flashed = capture_presented(hwnd, Some(&settled));
+    let changed = settled
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(flashed.as_chunks::<4>().0.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(changed > 0, "bench: a bell changed nothing in the sidebar");
+    // The target must go before its window.
+    drop(renderer);
+    let _ = unsafe { DestroyWindow(hwnd) };
+}
+
 /// NFR-113 damage-only redraw: after the screen is painted once, one line of
 /// output repaints a couple of rows, not the whole grid.
 #[test]

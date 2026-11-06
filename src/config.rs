@@ -581,6 +581,8 @@ pub enum KeyAction {
     ToggleBookmark,
     /// Show the bookmark list (issue #53, BKMK-002).
     ShowBookmarks,
+    /// Show or hide the sessions sidebar (RAIL-001).
+    ToggleSessionRail,
     /// Export the current selection to a file (issue #53, EXPORT-001).
     ExportSelection,
     /// Export the last finished command's output to a file
@@ -631,6 +633,7 @@ impl KeyAction {
             "command-palette" | "palette" => Self::CommandPalette,
             "hint-mode" | "hints" => Self::HintMode,
             "toggle-bookmark" | "bookmark" => Self::ToggleBookmark,
+            "toggle-session-rail" | "session-rail" => Self::ToggleSessionRail,
             "show-bookmarks" | "bookmarks" => Self::ShowBookmarks,
             "export-selection" => Self::ExportSelection,
             "export-last-command" | "export-command-output" => Self::ExportLastCommand,
@@ -820,6 +823,9 @@ pub struct Config {
     /// startup (TAB-026, WINDOW-015/016).
     #[serde(rename = "session-restore", default = "default_true")]
     pub session_restore: bool,
+    /// RAIL-001: show the sessions sidebar.
+    #[serde(rename = "session-rail", default = "default_true")]
+    pub session_rail: bool,
     /// WELCOME-001: show the crab banner when rustty starts.
     #[serde(default = "default_true")]
     pub welcome: bool,
@@ -883,6 +889,7 @@ impl Default for Config {
             bell: BellMode::default(),
             session_restore: true,
             welcome: true,
+            session_rail: true,
             shell_integration: false,
             command_notify_ms: default_notify_ms(),
             detach_prefix: default_detach_prefix(),
@@ -917,6 +924,7 @@ impl PartialEq for Config {
             && self.copy_on_select == other.copy_on_select
             && self.session_restore == other.session_restore
             && self.welcome == other.welcome
+            && self.session_rail == other.session_rail
             && self.shell_integration == other.shell_integration
             && self.command_notify_ms == other.command_notify_ms
             && self.detach_prefix == other.detach_prefix

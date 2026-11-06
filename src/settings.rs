@@ -142,6 +142,13 @@ pub fn settings(cfg: &Config) -> Vec<Setting> {
     );
     add(
         &mut out,
+        "session-rail",
+        format!("{}", cfg.session_rail),
+        "global",
+        false,
+    );
+    add(
+        &mut out,
         "welcome",
         format!("{}", cfg.welcome),
         "global",

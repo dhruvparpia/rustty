@@ -94,6 +94,8 @@ pub mod parser;
 )]
 mod perf_bench;
 pub mod portable;
+/// The sessions sidebar: session status and row layout.
+pub mod rail;
 /// Terminal search over screen + scrollback (SPEC SEARCH-001..015).
 pub mod search;
 pub mod selection;

@@ -273,6 +273,7 @@ pub fn builtin_shortcut(action: KeyAction) -> Option<&'static str> {
         KeyAction::CommandPalette => "ctrl+shift+p",
         KeyAction::HintMode => "ctrl+shift+k",
         KeyAction::ToggleBookmark => "ctrl+shift+b",
+        KeyAction::ToggleSessionRail => "ctrl+shift+s",
         _ => return None,
     })
 }
@@ -353,6 +354,7 @@ fn builtin_actions() -> impl Iterator<Item = (&'static str, KeyAction)> {
         CommandPalette,
         HintMode,
         ToggleBookmark,
+        ToggleSessionRail,
     ]
     .into_iter()
     .filter_map(|a| builtin_shortcut(a).map(|s| (s, a)))
@@ -399,6 +401,7 @@ fn action_name(action: KeyAction) -> &'static str {
         KeyAction::CommandPalette => "command-palette",
         KeyAction::HintMode => "hint-mode",
         KeyAction::ToggleBookmark => "toggle-bookmark",
+        KeyAction::ToggleSessionRail => "toggle-session-rail",
         KeyAction::ShowBookmarks => "show-bookmarks",
         KeyAction::ExportSelection => "export-selection",
         KeyAction::ExportLastCommand => "export-last-command",

@@ -70,6 +70,11 @@ copy-on-select = true
 # background also raises a Windows toast (BELL-005).
 bell = "audible"
 
+# Show the sessions sidebar: every session with what it is doing, grouped by
+# project (RAIL-001). Ctrl+Shift+S shows or hides it. The tab strip steps aside
+# while it is on, and it collapses when the window is under 720 DIPs wide.
+session-rail = true
+
 # Show the crab banner when rustty starts with no other rustty window open
 # (WELCOME-001). It never appears on new tabs or splits.
 welcome = true

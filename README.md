@@ -16,8 +16,9 @@ no web UI, no bundled interpreted runtime.
 > reporting, tab rename/reorder/close, shell profiles (per-profile theme, tab colour,
 > working directory, environment), custom key bindings, window opacity, cursor
 > shape/blink, session restore, notifications, the quick terminal and persistent
-> sessions are built. Tabs sit in the title bar, and tapping Alt opens the window
-> menu. See [`ROADMAP.md`](ROADMAP.md) for what ships in each version.
+> sessions are built. A sessions sidebar shows every session and what it is doing:
+> needs you, working, finished. Ctrl+Shift+S hides it, and tabs then sit in the title
+> bar. Tapping Alt opens the window menu. See [`ROADMAP.md`](ROADMAP.md) for what ships in each version.
 
 ## Vision
 

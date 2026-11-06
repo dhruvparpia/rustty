@@ -378,6 +378,20 @@ pub struct Pane {
     in_alt: bool,
     /// The user has sent input (see [`Pane::input_seen`]).
     input_seen: bool,
+    /// A bell or notification nobody has seen yet.
+    attention: bool,
+    /// What the last notification said.
+    attention_message: Option<String>,
+    /// A program is reporting progress.
+    progress: bool,
+    /// When output last arrived.
+    last_output: Option<std::time::Instant>,
+    /// When the user last sent input.
+    last_input: Option<std::time::Instant>,
+    /// When the grid last changed size.
+    last_resize: Option<std::time::Instant>,
+    /// What the sessions sidebar remembers about this pane.
+    activity: crate::rail::Activity,
     /// Grid changed since the renderer last asked (repaint hint).
     dirty: bool,
     /// Mouse text selection, in absolute grid coordinates (WIN-004).
@@ -416,6 +430,13 @@ impl Pane {
             main_grid: None,
             in_alt: false,
             input_seen: false,
+            attention: false,
+            attention_message: None,
+            progress: false,
+            last_output: None,
+            last_input: None,
+            last_resize: None,
+            activity: crate::rail::Activity::default(),
             dirty: true,
             selection: None,
             bookmarks: Vec::new(),
@@ -445,6 +466,13 @@ impl Pane {
             main_grid: None,
             in_alt: false,
             input_seen: false,
+            attention: false,
+            attention_message: None,
+            progress: false,
+            last_output: None,
+            last_input: None,
+            last_resize: None,
+            activity: crate::rail::Activity::default(),
             dirty: true,
             selection: None,
             bookmarks: Vec::new(),
@@ -644,6 +672,9 @@ impl Pane {
     /// switch selects.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.dirty = true;
+        if crate::rail::output_is_work(self.last_resize.map(|at| at.elapsed())) {
+            self.last_output = Some(std::time::Instant::now());
+        }
         let mut printed = false;
         let mut pos = 0usize;
         while pos < bytes.len() {
@@ -659,8 +690,17 @@ impl Pane {
                     // The parser owns the link pen and the URI table; the
                     // renderer and window layer read them on demand.
                     ParserEvent::Hyperlink(_) => {}
-                    ParserEvent::Bell => self.bell = true,
+                    ParserEvent::Bell => {
+                        self.bell = true;
+                        self.attention = true;
+                    }
+                    ParserEvent::Notify(text) => {
+                        self.attention = true;
+                        self.attention_message = Some(crate::rail::clean_message(&text));
+                    }
+                    ParserEvent::Progress(active) => self.progress = active,
                     ParserEvent::PromptStart => {
+                        self.progress = false;
                         self.at_prompt = true;
                         self.command_running = false;
                         let abs = self.cursor_abs();
@@ -866,7 +906,72 @@ impl Pane {
     /// Send keyboard/paste bytes to the shell (TTY-004..TTY-017).
     pub fn send_input(&mut self, bytes: &[u8]) -> Result<(), ShellError> {
         self.input_seen = true;
+        self.last_input = Some(std::time::Instant::now());
         self.shell.write_input(bytes)
+    }
+
+    /// Whether a bell or notification is waiting to be seen.
+    #[must_use]
+    pub const fn needs_attention(&self) -> bool {
+        self.attention
+    }
+
+    /// What the last unseen notification said, if it said anything.
+    #[must_use]
+    pub fn attention_message(&self) -> Option<&str> {
+        if self.attention {
+            self.attention_message.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// The person has seen this pane.
+    pub fn mark_seen(&mut self) {
+        self.attention = false;
+        self.attention_message = None;
+    }
+
+    /// Whether a program is reporting progress.
+    #[must_use]
+    pub const fn progress_active(&self) -> bool {
+        self.progress
+    }
+
+    /// Time since the last output.
+    #[must_use]
+    pub fn output_age(&self) -> Option<std::time::Duration> {
+        self.last_output.map(|at| at.elapsed())
+    }
+
+    /// Time since the last input.
+    #[must_use]
+    pub fn input_age(&self) -> Option<std::time::Duration> {
+        self.last_input.map(|at| at.elapsed())
+    }
+
+    /// Forget work the sidebar was not watching, so showing it again does not
+    /// report a false "Finished".
+    pub const fn reset_rail_activity(&mut self) {
+        self.activity.reset();
+    }
+
+    /// This pane's status for the sessions sidebar. `viewed` means the person
+    /// can see it, which also clears anything waiting to be seen.
+    pub fn rail_step(&mut self, viewed: bool, now_ms: u64) -> crate::rail::Status {
+        if viewed {
+            self.mark_seen();
+        }
+        let signals = crate::rail::Signals {
+            title: self.title.as_deref().unwrap_or(""),
+            command_running: self.command_running,
+            exited: matches!(self.shell.state(), crate::shell::ShellState::Exited(_)),
+            attention: self.attention,
+            progress: self.progress,
+            output_age: self.output_age(),
+            input_age: self.input_age(),
+        };
+        self.activity.step(&signals, viewed, now_ms)
     }
 
     /// Whether the user has sent this pane any input. Terminal replies do not
@@ -902,6 +1007,7 @@ impl Pane {
     /// text (the resize repaint clears the highlight).
     pub fn resize(&mut self, cols: usize, rows: usize) -> Result<(), ShellError> {
         self.dirty = true;
+        self.last_resize = Some(std::time::Instant::now());
         self.selection = None;
         if self.view_alias.is_some() {
             // A view's geometry is canonical from the host (issue
@@ -1284,6 +1390,64 @@ mod tests {
         pane.feed(b"first\r\n");
         let _ = pane.resize(77, 25);
         assert_eq!(pane.grid().line_text(0).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn bell_and_notification_ask_for_attention_until_seen() {
+        // Break caught: a session asking for you and nothing showing it.
+        let mut pane = Pane::with_size(40, 5, 10);
+        assert!(!pane.needs_attention());
+        pane.feed(b"\x07");
+        assert!(pane.needs_attention());
+        assert_eq!(pane.attention_message(), None);
+        pane.mark_seen();
+        assert!(!pane.needs_attention());
+        pane.feed(b"\x1b]9;Approve\x1b[31m it?\x07");
+        assert!(pane.needs_attention());
+        pane.mark_seen();
+        pane.feed(b"\x1b]777;notify;Claude;Needs input\x07");
+        assert_eq!(pane.attention_message(), Some("Claude: Needs input"));
+    }
+
+    #[test]
+    fn progress_is_tracked() {
+        let mut pane = Pane::with_size(40, 5, 10);
+        assert!(!pane.progress_active());
+        pane.feed(b"\x1b]9;4;1;50\x07");
+        assert!(pane.progress_active());
+        assert!(!pane.needs_attention(), "progress is not a request");
+        pane.feed(b"\x1b]9;4;0;0\x07");
+        assert!(!pane.progress_active());
+    }
+
+    #[test]
+    fn output_and_input_ages_are_tracked() {
+        let mut pane = Pane::with_size(40, 5, 10);
+        assert_eq!(pane.output_age(), None);
+        assert_eq!(pane.input_age(), None);
+        pane.feed(b"x");
+        assert!(pane.output_age().is_some());
+        let _ = pane.send_input(b"y");
+        assert!(pane.input_age().is_some());
+    }
+
+    #[test]
+    fn a_new_prompt_ends_progress() {
+        // Break caught: a program killed mid-progress showing Working forever.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.feed(b"\x1b]9;4;1;50\x07");
+        assert!(pane.progress_active());
+        pane.feed(b"\x1b]133;A\x07");
+        assert!(!pane.progress_active());
+    }
+
+    #[test]
+    fn a_resize_repaint_does_not_look_like_work() {
+        // Break caught: dragging the window marking every session Working.
+        let mut pane = Pane::with_size(40, 5, 10);
+        let _ = pane.resize(50, 6);
+        pane.feed(b"repaint");
+        assert_eq!(pane.output_age(), None);
     }
 
     #[test]

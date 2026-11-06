@@ -24,6 +24,10 @@ use crate::grid::{Cell, CellAttribute, Grid};
 pub enum ParserEvent {
     /// OSC 0/1/2 requested a tab title.
     Title(String),
+    /// OSC 9 or OSC 777;notify: a program is asking for attention.
+    Notify(String),
+    /// OSC 9;4: a program reports progress (`true`) or that it has stopped.
+    Progress(bool),
     /// The shell asked for the alternate screen (`CSI ?1049h` family).
     EnterAltScreen,
     /// The shell left the alternate screen (`CSI ?1049l` family).
@@ -774,6 +778,29 @@ impl Parser {
             match prefix {
                 "0" | "1" | "2" => events.push(ParserEvent::Title(rest.to_string())),
                 "7" => events.push(ParserEvent::Cwd(rest.to_string())),
+                "9" => {
+                    if let Some(progress) = rest.strip_prefix("4;").or((rest == "4").then_some(""))
+                    {
+                        // State 0 clears; 1-4 are normal, error, busy and paused.
+                        let state = progress.split(';').next().unwrap_or("0");
+                        events.push(ParserEvent::Progress(state != "0" && !state.is_empty()));
+                    } else if !rest.split(';').next().is_some_and(|first| {
+                        !first.is_empty() && first.bytes().all(|b| b.is_ascii_digit())
+                    }) {
+                        // A leading number is a ConEmu command, such as a
+                        // prompt's `9;9` directory report: not a message.
+                        events.push(ParserEvent::Notify(rest.to_string()));
+                    }
+                }
+                "777" => {
+                    if let Some(body) = rest.strip_prefix("notify;") {
+                        let text = match body.split_once(';') {
+                            Some((title, message)) => format!("{title}: {message}"),
+                            None => body.to_string(),
+                        };
+                        events.push(ParserEvent::Notify(text));
+                    }
+                }
                 "8" => {
                     // OSC 8 `params;uri`; params (`id=`) are ignored. An
                     // empty URI closes the link. The target is stored as

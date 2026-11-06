@@ -329,8 +329,8 @@ fn create_instance(name: &str, security: &mut PipeSecurity) -> io::Result<Client
 /// One client: framed requests in, framed responses out, until the pipe
 /// closes. A second (pump) thread owns the write side of the handle so
 /// streaming frames (output/input/resize) from other connections can
-/// interleave safely. Every request touches `last_activity` (idle-exit
-/// budget).
+/// interleave safely. Every request but a session list touches
+/// `last_activity` (idle-exit budget).
 #[cfg(windows)]
 fn client_thread(app: &std::sync::Arc<std::sync::Mutex<App>>, client: ClientPipe, token: u64) {
     use rustty::host::MAX_REQUEST_BYTES;
@@ -350,7 +350,9 @@ fn client_thread(app: &std::sync::Arc<std::sync::Mutex<App>>, client: ClientPipe
     while let Ok(req) = rustty::host::read_frame(&mut pipe, MAX_REQUEST_BYTES) {
         {
             let g = state(app);
-            if let Ok(mut t) = g.last_activity.lock() {
+            if rustty::host::counts_as_activity(&req)
+                && let Ok(mut t) = g.last_activity.lock()
+            {
                 *t = std::time::Instant::now();
             }
         }

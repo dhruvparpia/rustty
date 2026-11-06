@@ -22,7 +22,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_WINDOW_STATE_OCCLUDED,
     D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1PathGeometry,
@@ -57,6 +57,7 @@ use crate::config::{CursorShape, FontConfig, TabBarPlacement};
 use crate::glyph_cache::{self, GlyphAtlas, GlyphKey, Tile};
 use crate::grid::{Cell, CellAttribute, Grid};
 use crate::pane::{Pane, StoredImage};
+use crate::rail;
 use crate::search::SearchState;
 use crate::selection::Selection;
 use crate::split::Rect;
@@ -475,11 +476,13 @@ const fn plain_caption_glyph(glyph: char) -> char {
 
 /// Tab title size in DIPs.
 const TAB_FONT_SIZE: f32 = 12.5;
+/// Sidebar heading and detail size in DIPs.
+const RAIL_SMALL_FONT_SIZE: f32 = 11.0;
 
 /// The tab title format and the centred format for the close and `+` glyphs.
 fn make_tab_formats(
     dwrite: &IDWriteFactory,
-) -> anyhow::Result<(IDWriteTextFormat, IDWriteTextFormat)> {
+) -> anyhow::Result<(IDWriteTextFormat, IDWriteTextFormat, IDWriteTextFormat)> {
     let make = |size: f32| {
         make_format(
             dwrite,
@@ -490,22 +493,25 @@ fn make_tab_formats(
         )
     };
     let title = make(TAB_FONT_SIZE)?;
+    let small = make(RAIL_SMALL_FONT_SIZE)?;
     let glyph = make(TAB_FONT_SIZE)?;
     unsafe {
-        title.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-        title.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-        let trimming = DWRITE_TRIMMING {
-            granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-            delimiter: 0,
-            delimiterCount: 0,
-        };
-        let sign = dwrite.CreateEllipsisTrimmingSign(&title)?;
-        title.SetTrimming(&trimming, &sign)?;
+        for format in [&title, &small] {
+            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+            let trimming = DWRITE_TRIMMING {
+                granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                delimiter: 0,
+                delimiterCount: 0,
+            };
+            let sign = dwrite.CreateEllipsisTrimmingSign(format)?;
+            format.SetTrimming(&trimming, &sign)?;
+        }
         glyph.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
         glyph.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         glyph.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
     }
-    Ok((title, glyph))
+    Ok((title, glyph, small))
 }
 
 /// Icon-only text face for the tab bar: the system icon font carrying the
@@ -598,6 +604,20 @@ pub struct Renderer {
     caption_format: Option<IDWriteTextFormat>,
     /// Title strip height in DIPs; 0 for quick and fullscreen windows.
     caption_height: f32,
+    /// Sessions sidebar width in DIPs; 0 when hidden.
+    rail_width: f32,
+    /// Sidebar rows, grouped.
+    rail_rows: Vec<rail::Row>,
+    /// Where each sidebar item goes, reused between frames.
+    rail_placed: Vec<rail::Placed>,
+    /// What the pointer is over in the sidebar.
+    rail_hover: rail::Hit,
+    /// Sidebar list scroll offset.
+    rail_scroll: f32,
+    /// Brightness of a working session's dot.
+    rail_pulse: f32,
+    /// Sidebar headings and detail lines.
+    rail_small_format: IDWriteTextFormat,
     caption_hover: Option<caption::Hit>,
     caption_pressed: Option<caption::Hit>,
     caption_maximized: bool,
@@ -855,7 +875,7 @@ impl Renderer {
         let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
         // Family name is diagnostics-only; the formats carry the chosen face.
         let (_family, formats, metrics) = build_font_resources(&dwrite, dpi, font)?;
-        let (tab_format, tab_close_format) = make_tab_formats(&dwrite)?;
+        let (tab_format, tab_close_format, rail_small_format) = make_tab_formats(&dwrite)?;
         let caption_format = make_icon_format(&dwrite, CAPTION_GLYPH_SIZE);
         let typography = build_typography(&dwrite, font)?;
         let width = dips_to_px(cols.max(1) as f32 * metrics.cell_width, dpi).max(1);
@@ -897,6 +917,13 @@ impl Renderer {
             tab_close_format,
             caption_format,
             caption_height: 0.0,
+            rail_width: 0.0,
+            rail_rows: Vec::new(),
+            rail_placed: Vec::new(),
+            rail_hover: rail::Hit::None,
+            rail_scroll: 0.0,
+            rail_pulse: 1.0,
+            rail_small_format,
             caption_hover: None,
             caption_pressed: None,
             caption_maximized: false,
@@ -959,6 +986,316 @@ impl Renderer {
         self.tab_bar_height
     }
 
+    /// Set the sessions sidebar's width: 0 hides it. Callers re-read
+    /// [`Renderer::grid_size`] afterwards.
+    pub fn set_rail_width(&mut self, width: f32) {
+        self.rail_width = width.max(0.0);
+    }
+
+    /// The sessions sidebar's width.
+    #[must_use]
+    pub const fn rail_width(&self) -> f32 {
+        self.rail_width
+    }
+
+    /// The rows the sidebar shows.
+    #[must_use]
+    pub fn rail_rows(&self) -> &[rail::Row] {
+        &self.rail_rows
+    }
+
+    /// Replace the sidebar's rows.
+    pub fn set_rail_rows(&mut self, rows: Vec<rail::Row>) {
+        self.rail_rows = rows;
+        self.layout_rail();
+    }
+
+    /// Set what the pointer is over in the sidebar. `true` when that changed.
+    pub fn set_rail_hover(&mut self, hover: rail::Hit) -> bool {
+        let changed = self.rail_hover != hover;
+        self.rail_hover = hover;
+        changed
+    }
+
+    /// Set how bright a working session's dot is, 0 to 1. `true` when that
+    /// changed.
+    pub fn set_rail_pulse(&mut self, pulse: f32) -> bool {
+        let changed = (self.rail_pulse - pulse).abs() > f32::EPSILON;
+        self.rail_pulse = pulse;
+        changed
+    }
+
+    /// Scroll the sidebar's list by `delta` DIPs.
+    pub fn scroll_rail(&mut self, delta: f32) {
+        self.rail_scroll += delta;
+        self.layout_rail();
+    }
+
+    /// What the point (`x`, `y`) is over in the sidebar.
+    #[must_use]
+    pub fn rail_hit(&self, x: f32, y: f32) -> rail::Hit {
+        rail::hit_test(
+            x,
+            y,
+            caption::STRIP_HEIGHT,
+            &self.rail_rows,
+            &self.rail_placed,
+            self.tab_close_button,
+        )
+    }
+
+    /// The rectangle of the sidebar row for tab `tab`, for screen readers.
+    #[must_use]
+    pub fn rail_tab_rect(&self, tab: usize) -> Option<(f32, f32, f32, f32)> {
+        self.rail_placed
+            .iter()
+            .find_map(|placed| match placed.kind {
+                rail::ItemKind::Row(i)
+                    if self.rail_rows.get(i).map(|row| row.target)
+                        == Some(rail::Target::Tab(tab)) =>
+                {
+                    Some((0.0, placed.top, self.rail_width, placed.bottom))
+                }
+                _ => None,
+            })
+    }
+
+    fn layout_rail(&mut self) {
+        let list_top = caption::STRIP_HEIGHT + rail::NEW_ROW_HEIGHT;
+        let height = self.client_dips().1;
+        self.rail_scroll = rail::clamp_scroll(
+            self.rail_scroll,
+            &self.rail_rows,
+            (height - list_top).max(0.0),
+        );
+        rail::layout_into(
+            &self.rail_rows,
+            caption::STRIP_HEIGHT,
+            self.rail_scroll,
+            &mut self.rail_placed,
+        );
+    }
+
+    /// Draw `text` in `rect` with `format`, using the reused buffer.
+    fn draw_rail_text(
+        &mut self,
+        text: &str,
+        format: &IDWriteTextFormat,
+        rect: D2D_RECT_F,
+        color: Color,
+    ) {
+        let Some(brush) = self.brush(color) else {
+            return;
+        };
+        let mut units = std::mem::take(&mut self.utf16);
+        units.clear();
+        units.extend(text.encode_utf16());
+        // No shaping: DrawText keeps the format's ellipsis at the rect's edge.
+        unsafe {
+            self.target.DrawText(
+                &units,
+                format,
+                &rect,
+                &brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+        units.clear();
+        self.utf16 = units;
+    }
+
+    /// The sessions sidebar: its heading, "New session" and the session rows.
+    fn paint_rail(&mut self, theme: &Theme, height: f32) {
+        let w = self.rail_width;
+        if w <= 0.0 {
+            return;
+        }
+        let ui = theme.ui_colors();
+        let surface = theme.tab_bar;
+        let top = caption::STRIP_HEIGHT;
+        self.layout_rail();
+        unsafe {
+            self.target
+                .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
+        };
+        self.fill_rect(0.0, 0.0, w, height, surface);
+        self.fill_rect(w - 1.0, 0.0, w, height, ui.border);
+        let title_format = self.tab_format.clone();
+        let small_format = self.rail_small_format.clone();
+        let glyph_format = self.tab_close_format.clone();
+        let text_rect = |left: f32, top: f32, right: f32, bottom: f32| D2D_RECT_F {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        self.draw_rail_text(
+            "rustty",
+            &title_format,
+            text_rect(16.0, 0.0, w - 12.0, top),
+            ui.muted,
+        );
+        let list_top = top + rail::NEW_ROW_HEIGHT;
+        if self.rail_hover == rail::Hit::New {
+            self.fill_rect(
+                0.0,
+                top,
+                w - 1.0,
+                list_top,
+                surface.mix(ui.foreground, 0.08),
+            );
+        }
+        self.draw_rail_text(
+            "+",
+            &glyph_format,
+            text_rect(8.0, top, 24.0, list_top),
+            ui.accent,
+        );
+        self.draw_rail_text(
+            "New session",
+            &title_format,
+            text_rect(30.0, top, w - 12.0, list_top),
+            ui.foreground,
+        );
+        let clip = D2D_RECT_F {
+            left: 0.0,
+            top: list_top,
+            right: w,
+            bottom: height,
+        };
+        unsafe {
+            self.target
+                .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED)
+        };
+        let rows = std::mem::take(&mut self.rail_rows);
+        let placed = std::mem::take(&mut self.rail_placed);
+        for item in &placed {
+            if item.bottom <= list_top || item.top >= height {
+                continue;
+            }
+            match item.kind {
+                rail::ItemKind::Section(i) => {
+                    if let Some(row) = rows.get(i) {
+                        self.draw_rail_text(
+                            &row.project,
+                            &small_format,
+                            text_rect(16.0, item.top + 6.0, w - 12.0, item.bottom),
+                            ui.muted,
+                        );
+                    }
+                }
+                rail::ItemKind::Row(i) => {
+                    let Some(row) = rows.get(i) else { continue };
+                    let hovered = matches!(
+                        self.rail_hover,
+                        rail::Hit::Row(h) | rail::Hit::Close(h) if h == i
+                    );
+                    if row.active {
+                        self.fill_rect(0.0, item.top, w - 1.0, item.bottom, theme.tab_active);
+                        self.fill_rect(0.0, item.top, 2.0, item.bottom, ui.accent);
+                    } else if hovered {
+                        self.fill_rect(
+                            0.0,
+                            item.top,
+                            w - 1.0,
+                            item.bottom,
+                            surface.mix(ui.foreground, 0.06),
+                        );
+                    }
+                    // BELL-003: the tab strip is hidden, so the row flashes.
+                    if self.bell_flash
+                        && matches!(
+                            row.target,
+                            rail::Target::Tab(tab) if self.bell_tabs.get(tab) == Some(&true)
+                        )
+                    {
+                        self.fill_rect(
+                            0.0,
+                            item.top,
+                            w - 1.0,
+                            item.bottom,
+                            mix(theme.search_highlight, theme.tab_bar, 0.25),
+                        );
+                    }
+                    self.paint_rail_dot(row.status, item.top, surface, theme);
+                    let closable = hovered
+                        && self.tab_close_button
+                        && matches!(row.target, rail::Target::Tab(_));
+                    let right = w - if closable { rail::CLOSE_WIDTH } else { 12.0 };
+                    self.draw_rail_text(
+                        &row.title,
+                        &title_format,
+                        text_rect(30.0, item.top + 5.0, right, item.top + 26.0),
+                        ui.foreground,
+                    );
+                    let detail_color = if row.status == rail::Status::NeedsYou {
+                        theme.palette[1]
+                    } else {
+                        ui.muted
+                    };
+                    self.draw_rail_text(
+                        &row.detail,
+                        &small_format,
+                        text_rect(30.0, item.top + 25.0, right, item.bottom - 4.0),
+                        detail_color,
+                    );
+                    if closable {
+                        let color = if self.rail_hover == rail::Hit::Close(i) {
+                            ui.foreground
+                        } else {
+                            ui.muted
+                        };
+                        self.draw_rail_text(
+                            "\u{2715}",
+                            &glyph_format,
+                            text_rect(w - rail::CLOSE_WIDTH, item.top, w - 2.0, item.bottom),
+                            color,
+                        );
+                    }
+                }
+            }
+        }
+        self.rail_rows = rows;
+        self.rail_placed = placed;
+        unsafe {
+            self.target.PopAxisAlignedClip();
+            self.target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+        }
+    }
+
+    /// A session's status dot, centred in its row's left margin.
+    fn paint_rail_dot(&mut self, status: rail::Status, top: f32, surface: Color, theme: &Theme) {
+        let ui = theme.ui_colors();
+        let color = match status {
+            // Red in every preset, so it stands apart from the accent.
+            rail::Status::NeedsYou => theme.palette[1],
+            rail::Status::Working => surface.mix(ui.accent, self.rail_pulse),
+            rail::Status::Finished => theme.palette[2],
+            rail::Status::Idle => surface.mix(ui.muted, 0.6),
+            rail::Status::Exited => ui.muted,
+            rail::Status::Background => theme.palette[4],
+        };
+        let Some(brush) = self.brush(color) else {
+            return;
+        };
+        let dot = D2D1_ELLIPSE {
+            point: Vector2 {
+                X: 17.0,
+                Y: top + rail::ROW_HEIGHT / 2.0,
+            },
+            radiusX: 4.0,
+            radiusY: 4.0,
+        };
+        unsafe {
+            if status == rail::Status::Exited {
+                self.target.DrawEllipse(&dot, &brush, 1.2, None);
+            } else {
+                self.target.FillEllipse(&dot, &brush);
+            }
+        }
+    }
+
     /// Set the caption strip height: 0 for quick and fullscreen windows. Callers
     /// re-read [`Renderer::grid_size`] afterwards.
     pub fn set_caption_height(&mut self, height: f32) {
@@ -1001,16 +1338,16 @@ impl Renderer {
         let ui = theme.ui_colors();
         let strip = theme.strip_color();
         if !self.tabs_on_top() || self.tab_bar_height <= 0.0 {
-            self.fill_rect(0.0, 0.0, width, height, strip);
+            self.fill_rect(self.rail_width, 0.0, width, height, strip);
             if let (Some(tab), Some(brush)) = (app.active_tab(), self.brush(ui.muted)) {
                 let mut units = std::mem::take(&mut self.utf16);
                 units.clear();
                 units.extend(tab.title().encode_utf16());
                 let rect = D2D_RECT_F {
-                    left: TAB_CHROME / 2.0,
+                    left: self.rail_width + TAB_CHROME / 2.0,
                     top: 0.0,
                     right: (width - 3.0 * caption::BUTTON_WIDTH - TAB_CHROME / 2.0)
-                        .max(TAB_CHROME / 2.0),
+                        .max(self.rail_width + TAB_CHROME / 2.0),
                     bottom: height,
                 };
                 self.draw_units(&units, &self.tab_format, rect, &brush);
@@ -1193,7 +1530,7 @@ impl Renderer {
     /// Left edge of the grid in client DIPs (the window padding).
     #[must_use]
     pub fn grid_left(&self) -> f32 {
-        self.pad_x
+        self.rail_width + self.pad_x
     }
 
     /// Client-area size in DIPs (UIA-002 bounds building).
@@ -1344,7 +1681,7 @@ impl Renderer {
     #[must_use]
     pub fn grid_size(&self) -> (usize, usize) {
         let px = unsafe { self.target.GetPixelSize() };
-        let w = (px_to_dips(px.width, self.dpi) - 2.0 * self.pad_x).max(0.0);
+        let w = (px_to_dips(px.width, self.dpi) - self.rail_width - 2.0 * self.pad_x).max(0.0);
         let chrome =
             caption::total_chrome(self.tabs_on_top(), self.tab_bar_height, self.caption_height);
         let h = (px_to_dips(px.height, self.dpi) - chrome - 2.0 * self.pad_y).max(0.0);
@@ -1562,7 +1899,7 @@ impl Renderer {
     /// Columns this frame may paint: the client width measured in cells.
     /// Each leaf clamps this further to its own box (SPLIT-002).
     fn frame_cols(&self, width: f32) -> usize {
-        ((width - 2.0 * self.pad_x).max(0.0) / self.metrics.cell_width)
+        ((width - self.rail_width - 2.0 * self.pad_x).max(0.0) / self.metrics.cell_width)
             .floor()
             .max(1.0) as usize
     }
@@ -1759,6 +2096,21 @@ impl Renderer {
         if self.caption_height > 0.0 {
             self.paint_caption(app, theme, width);
         }
+        self.paint_rail(theme, height);
+        // Overlays belong to the terminal area, beside the sidebar.
+        let rail_shift = self.rail_width;
+        let width = width - rail_shift;
+        if rail_shift > 0.0 {
+            let shift = Matrix3x2 {
+                M11: 1.0,
+                M12: 0.0,
+                M21: 0.0,
+                M22: 1.0,
+                M31: rail_shift,
+                M32: 0.0,
+            };
+            unsafe { self.target.SetTransform(&shift) };
+        }
         // TAB-013: the rename prompt takes the overlay strip from search.
         // PALETTE-001 (issue #39): the palette takes it from search too, and
         // sits above the rename prompt (only one is open at a time in
@@ -1774,6 +2126,9 @@ impl Renderer {
             self.paint_bookmarks(rows, sel, theme, width, height);
         } else if let Some(search) = search {
             self.paint_search_bar(search, search_ctx, theme, width, height);
+        }
+        if rail_shift > 0.0 {
+            unsafe { self.target.SetTransform(&Matrix3x2::identity()) };
         }
         unsafe {
             self.target

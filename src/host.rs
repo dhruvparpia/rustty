@@ -291,6 +291,13 @@ pub fn write_frame(w: &mut impl Write, v: &Value) -> io::Result<()> {
     w.write_all(&bytes)
 }
 
+/// Whether a request should keep an idle host alive. A sidebar polling the
+/// session list is not someone using the host.
+#[must_use]
+pub fn counts_as_activity(request: &Value) -> bool {
+    request.get("method").and_then(Value::as_str) != Some("session.list")
+}
+
 /// Read one frame, enforcing `max` on the declared length.
 ///
 /// # Errors
@@ -497,6 +504,8 @@ pub mod server {
                         ParserEvent::Respond(reply) => replies.extend_from_slice(&reply),
                         // Watchers need no host-side bookkeeping for these.
                         ParserEvent::Hyperlink(_)
+                        | ParserEvent::Notify(_)
+                        | ParserEvent::Progress(_)
                         | ParserEvent::Bell
                         | ParserEvent::PromptStart
                         | ParserEvent::CommandStart
@@ -878,6 +887,7 @@ pub mod server {
             // Self-attach prevention (attach ADR): a shell started by the
             // host knows its alias and refuses to attach to its own session.
             opts.env.insert("RUSTTY_SESSION".into(), alias.to_string());
+            opts.add_terminal_identity(env!("CARGO_PKG_VERSION"));
             // The host sits beside rustty.exe, so its shells get the same PATH.
             if let Some(dir) = crate::shell::own_exe_dir() {
                 opts.add_own_dir(&dir, &std::env::var("PATH").unwrap_or_default());
@@ -2557,6 +2567,16 @@ mod tests {
         // Clean up the live session (kills the shell via the job).
         let v = json!({"method": "session.terminate", "params": {"alias": alias}, "id": 6});
         server::handle(&app, &v, &conn);
+    }
+
+    #[test]
+    fn listing_sessions_does_not_keep_the_host_alive() {
+        // Break caught: a host with no sessions never reaching its idle exit
+        // while a window's sidebar polls it.
+        let call = |method: &str| serde_json::json!({ "method": method });
+        assert!(!crate::host::counts_as_activity(&call("session.list")));
+        assert!(crate::host::counts_as_activity(&call("session.create")));
+        assert!(crate::host::counts_as_activity(&serde_json::json!({})));
     }
 
     #[cfg(windows)]
