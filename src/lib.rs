@@ -19,6 +19,8 @@ pub mod attach;
 /// Bookmarks over a pane's history (issue #53, SPEC BKMK-001..003). Pure
 /// anchor math.
 pub mod bookmark;
+/// Characters drawn as geometry (block elements, Powerline separators).
+pub mod cellart;
 pub mod cli;
 pub mod color;
 /// Per-command metadata from OSC 133 transitions (SHELLINT-006/010/013-019,

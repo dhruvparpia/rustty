@@ -16,7 +16,8 @@ use std::collections::HashMap;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+    D2D1_FIGURE_END_CLOSED, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
@@ -24,7 +25,8 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_WINDOW_STATE_OCCLUDED,
-    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1PathGeometry,
+    ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG,
@@ -40,9 +42,10 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::core::{Interface, PCWSTR};
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::app::App;
+use crate::cellart;
 use crate::color::Color;
 use crate::config::{CursorShape, FontConfig, TabBarPlacement};
 use crate::glyph_cache::{self, GlyphAtlas, GlyphKey, Tile};
@@ -146,6 +149,54 @@ pub(crate) const fn color_key(c: Color) -> u32 {
 /// Used for dimmed tab-bar labels on the predawn palette.
 fn mix(from: Color, to: Color, t: f32) -> Color {
     from.mix(to, t)
+}
+
+/// Position of a separator in [`Renderer::powerline`].
+const fn powerline_index(side: cellart::PowerlineSide) -> usize {
+    match side {
+        cellart::PowerlineSide::SolidRight => 0,
+        cellart::PowerlineSide::ThinRight => 1,
+        cellart::PowerlineSide::SolidLeft => 2,
+        cellart::PowerlineSide::ThinLeft => 3,
+    }
+}
+
+/// Build the four Powerline separators in unit cell coordinates.
+fn powerline_geometries(factory: &ID2D1Factory) -> windows::core::Result<[ID2D1PathGeometry; 4]> {
+    /// Stroke width of the thin chevrons, as a fraction of the cell.
+    const T: f32 = 0.12;
+    let v = |x: f32, y: f32| Vector2 { X: x, Y: y };
+    let polygon = |points: &[Vector2]| -> windows::core::Result<ID2D1PathGeometry> {
+        let geometry = unsafe { factory.CreatePathGeometry() }?;
+        let sink = unsafe { geometry.Open() }?;
+        unsafe {
+            sink.BeginFigure(points[0], D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLines(&points[1..]);
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+        }
+        Ok(geometry)
+    };
+    Ok([
+        polygon(&[v(0.0, 0.0), v(1.0, 0.5), v(0.0, 1.0)])?,
+        polygon(&[
+            v(0.0, 0.0),
+            v(T, 0.0),
+            v(1.0, 0.5),
+            v(T, 1.0),
+            v(0.0, 1.0),
+            v(1.0 - T, 0.5),
+        ])?,
+        polygon(&[v(1.0, 0.0), v(0.0, 0.5), v(1.0, 1.0)])?,
+        polygon(&[
+            v(1.0, 0.0),
+            v(1.0 - T, 0.0),
+            v(0.0, 0.5),
+            v(1.0 - T, 1.0),
+            v(1.0, 1.0),
+            v(T, 0.5),
+        ])?,
+    ])
 }
 
 /// Measure cell geometry for the configured font at `dpi` (FONT-002/011).
@@ -406,6 +457,9 @@ pub struct Renderer {
     dwrite: IDWriteFactory,
     typography: Option<IDWriteTypography>,
     formats: [IDWriteTextFormat; 4],
+    /// Powerline separators in cell coordinates, built on first use. They
+    /// belong to the factory, so they survive render-target recreation.
+    powerline: Option<[ID2D1PathGeometry; 4]>,
     /// Tab-bar shell icon face ("Segoe Fluent Icons" / "Segoe MDL2 Assets");
     /// `None` when neither is installed, which disables tab icons.
     icon_format: Option<IDWriteTextFormat>,
@@ -699,6 +753,7 @@ impl Renderer {
             dwrite,
             typography,
             formats,
+            powerline: None,
             icon_format,
             metrics,
             dpi,
@@ -2322,6 +2377,12 @@ impl Renderer {
                 i += 1;
                 continue;
             }
+            if let Some(shape) = cellart::shape(cell.char) {
+                let (fg, bg) = Self::effective_colors(cell, theme);
+                self.paint_shape(shape, left + i as f32 * cw, top, fg, bg);
+                i += 1;
+                continue;
+            }
             let key = Self::cell_key(cell, i, span, theme);
             let tile = key
                 .as_ref()
@@ -2342,6 +2403,7 @@ impl Renderer {
                 if next.char == ' '
                     || next.attributes.contains(CellAttribute::HIDDEN)
                     || next.attributes != attrs
+                    || cellart::shape(next.char).is_some()
                     || Self::effective_colors(next, theme).0 != fg
                 {
                     break;
@@ -2607,6 +2669,60 @@ impl Renderer {
         units.clear();
         self.utf16 = units;
         self.label = label;
+    }
+
+    /// Draw a [`cellart::Shape`] over the cell at (`left`, `top`). Runs in
+    /// the text pass, where aliased fills land on whole pixels, so
+    /// neighbouring cells share an edge with no seam.
+    fn paint_shape(&mut self, shape: cellart::Shape, left: f32, top: f32, fg: Color, bg: Color) {
+        let cw = self.metrics.cell_width;
+        let ch = self.metrics.cell_height;
+        match shape {
+            cellart::Shape::Fill {
+                rects,
+                count,
+                alpha,
+            } => {
+                let color = bg.mix(fg, alpha);
+                for r in rects.iter().take(usize::from(count)) {
+                    self.fill_rect(
+                        left + r.x0 * cw,
+                        top + r.y0 * ch,
+                        left + r.x1 * cw,
+                        top + r.y1 * ch,
+                        color,
+                    );
+                }
+            }
+            cellart::Shape::Triangle(side) => {
+                if self.powerline.is_none() {
+                    self.powerline = powerline_geometries(&self.factory).ok();
+                }
+                let Some(brush) = self.brush(fg) else {
+                    return;
+                };
+                let Some(shapes) = &self.powerline else {
+                    return;
+                };
+                let geometry = &shapes[powerline_index(side)];
+                let place = Matrix3x2 {
+                    M11: cw,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: ch,
+                    M31: left,
+                    M32: top,
+                };
+                unsafe {
+                    self.target
+                        .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    self.target.SetTransform(&place);
+                    self.target.FillGeometry(geometry, &brush, None);
+                    self.target.SetTransform(&Matrix3x2::identity());
+                    self.target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+                }
+            }
+        }
     }
 
     fn fill_rect(&mut self, left: f32, top: f32, right: f32, bottom: f32, color: Color) {

@@ -32,6 +32,8 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Fixed
 
+- Block characters and Powerline separators are drawn as geometry, so rows and prompt
+  segments join with no gaps at any line height.
 - Theme palettes now colour ANSI output, so each theme shows its own 16 colors. Text
   already on screen keeps its colors after a theme switch, and a session host's snapshot
   of existing text uses the default palette.

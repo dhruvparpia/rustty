@@ -112,6 +112,19 @@ unsafe extern "system" fn bench_wnd_proc(
 /// invisible windows and `Renderer` skips those frames, which would time an
 /// empty paint instead of a real one.
 fn bench_target(cols: usize, rows: usize) -> (HWND, Renderer) {
+    // Ligatures off (the shipped default is on): with ligatures on the
+    // atlas is never built (FONT-010), and the bench would measure the
+    // DrawText fallback while reporting a "healthy" atlas. Issue #28
+    // requires real blit counters.
+    let font = FontConfig {
+        ligatures: false,
+        ..FontConfig::default()
+    };
+    bench_target_with_font(cols, rows, &font)
+}
+
+/// Same window and renderer as [`bench_target`], with a chosen font setup.
+fn bench_target_with_font(cols: usize, rows: usize, font: &FontConfig) -> (HWND, Renderer) {
     static REGISTER: Once = Once::new();
     let hinstance = unsafe { GetModuleHandleW(None) }.expect("bench: module handle");
     let class_name = wstr(CLASS_NAME);
@@ -153,15 +166,7 @@ fn bench_target(cols: usize, rows: usize) -> (HWND, Renderer) {
     }
     .expect("bench: window creation failed");
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-    // Ligatures off (the shipped default is on): with ligatures on the
-    // atlas is never built (FONT-010), and the bench would measure the
-    // DrawText fallback while reporting a "healthy" atlas. Issue #28
-    // requires real blit counters.
-    let font = FontConfig {
-        ligatures: false,
-        ..FontConfig::default()
-    };
-    let renderer = Renderer::new(hwnd, dpi, &font, cols, rows, TAB_BAR_HEIGHT)
+    let renderer = Renderer::new(hwnd, dpi, font, cols, rows, TAB_BAR_HEIGHT)
         .expect("bench: renderer creation failed");
     (hwnd, renderer)
 }
@@ -564,6 +569,76 @@ fn capture_window(hwnd: HWND) -> Vec<u8> {
         ReleaseDC(Some(hwnd), dc);
     }
     buf
+}
+
+/// Full blocks in one column must form an unbroken bar at any line height.
+/// A font glyph stops at the font's line box, which would show the background
+/// between rows at line height 1.2.
+#[test]
+#[ignore = "needs a desktop session: cargo test --release -- --ignored"]
+fn block_rows_have_no_gaps() {
+    let _guard = bench_lock();
+    for line_height in [1.0_f32, 1.2] {
+        let font = FontConfig {
+            line_height,
+            ..FontConfig::default()
+        };
+        let (hwnd, mut renderer) = bench_target_with_font(80, 24, &font);
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        }
+        .expect("bench: moving the bench window on-screen failed");
+        let (cols, rows) = renderer.grid_size();
+        let mut app = App::with_size(cols, rows, 100);
+        let theme = Theme::default();
+        // Bright red blocks in the first column of six rows.
+        app.feed_active("\x1b[38;2;255;0;0m".as_bytes());
+        for _ in 0..6 {
+            app.feed_active("\u{2588}\r\n".as_bytes());
+        }
+        let _ = app.take_dirty();
+        renderer.paint_damage(&app, &theme, None, None, None, None, &[], None);
+        let shot = capture_presented(hwnd, None);
+        assert!(!is_flat(&shot), "bench: the capture is one flat colour");
+
+        let mut rect = RECT::default();
+        unsafe { GetClientRect(hwnd, &mut rect) }.expect("bench: client rect");
+        let width = (rect.right - rect.left) as usize;
+        let height = shot.len() / 4 / width;
+        let m = renderer.metrics();
+        // This process is not DPI-aware, so the capture can be scaled to the
+        // display. Find the bar rather than computing where it should be.
+        let x = (renderer.grid_left() + m.cell_width / 2.0) as usize;
+        let is_red = |y: usize| {
+            let at = (y * width + x) * 4;
+            shot[at..at + 3] == [0, 0, 255]
+        };
+        let first = (0..height).find(|&y| is_red(y));
+        let last = (0..height).rev().find(|&y| is_red(y));
+        let (Some(first), Some(last)) = (first, last) else {
+            panic!("bench: no block pixels in column {x}");
+        };
+        assert!(
+            (last - first) as f32 >= 5.0 * m.cell_height,
+            "line height {line_height}: bar spans only {first}..={last}"
+        );
+        let gap = (first..=last).find(|&y| !is_red(y));
+        assert_eq!(
+            gap, None,
+            "line height {line_height}: gap in bar {first}..={last}"
+        );
+        // The target must go before its window.
+        drop(renderer);
+        let _ = unsafe { DestroyWindow(hwnd) };
+    }
 }
 
 /// True when every pixel equals the first: a flat capture means the
