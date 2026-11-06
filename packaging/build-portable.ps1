@@ -7,6 +7,7 @@
 #     rustty.portable      <- selects local config (CONFIG-020, PKG-004)
 #     config.example.toml
 #     LICENSE                  <- MIT, in the package (OSS-003)
+#     fonts/                   <- licence for the embedded symbols font
 #     README.md
 #
 # Run from the repo root:
@@ -56,6 +57,8 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item "$bindir\rustty.exe" $stage
 Copy-Item "$bindir\rustty-host.exe" $stage
 Copy-Item LICENSE, README.md, config.example.toml $stage
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'fonts') | Out-Null
+Copy-Item assets\fonts\LICENSE, assets\fonts\README.md (Join-Path $stage 'fonts')
 New-Item -ItemType File -Path (Join-Path $stage 'rustty.portable') | Out-Null
 
 Compress-Archive -Path $stage -DestinationPath $zip

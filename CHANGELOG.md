@@ -30,6 +30,11 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
   one. An explicit theme in config still wins. The tab strip now matches the terminal
   background unless `tab-bar` is set explicitly.
 
+### Added
+
+- Symbols Nerd Font Mono v3.5.1 is embedded as a fallback, so prompt icons work with no
+  setup. It adds about 2.6 MB to the executable. A chosen font that has the glyph keeps it.
+
 ### Fixed
 
 - Block characters and Powerline separators are drawn as geometry, so rows and prompt

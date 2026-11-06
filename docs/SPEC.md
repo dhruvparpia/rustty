@@ -791,6 +791,7 @@ The product must support common terminal/TUI applications.
 | FONT-001 | The terminal shall use DirectWrite for font rendering. | P0 |
 | FONT-002 | The terminal shall support configurable font family. | P0 |
 | FONT-003 | The terminal shall support font fallback chains. | P0 |
+| FONT-031 | The terminal shall embed Symbols Nerd Font Mono as a fallback for private-use characters, so prompt icons work with no setup. A chosen font that has the glyph keeps it. | P1 |
 | FONT-030 | Block Elements (U+2580-259F) and Powerline separators (U+E0B0-E0B3) shall be drawn as geometry rather than font glyphs, so rows and segments join with no gaps at any line height. | P1 |
 | FONT-004 | The terminal shall support user-installed fonts. | P0 |
 | FONT-005 | The terminal shall support system fonts. | P0 |

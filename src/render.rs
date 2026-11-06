@@ -32,8 +32,9 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWriteCreateFactory, IDWriteFactory,
-    IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout, IDWriteTypography,
+    DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_UNICODE_RANGE, DWriteCreateFactory,
+    IDWriteFactory, IDWriteFactory5, IDWriteFontCollection, IDWriteFontFallback, IDWriteTextFormat,
+    IDWriteTextFormat1, IDWriteTextLayout, IDWriteTypography,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Imaging::{
@@ -336,6 +337,18 @@ fn build_font_resources(
             DWRITE_FONT_STYLE_ITALIC,
         )?,
     ];
+    // Prompt icons work with no setup. Without the bundled font, those glyphs
+    // show as empty boxes, which is ugly but not fatal (NFR-216).
+    match symbol_fallback(dwrite) {
+        Some(fallback) => {
+            for format in &formats {
+                if let Ok(format) = format.cast::<IDWriteTextFormat1>() {
+                    let _ = unsafe { format.SetFontFallback(&fallback) };
+                }
+            }
+        }
+        None => eprintln!("rustty: the bundled symbols font could not be loaded"),
+    }
     let metrics = measure_cells_with(dwrite, &formats[0], font.line_height)?;
     Ok((chosen.to_string(), formats, metrics))
 }
@@ -365,6 +378,74 @@ fn make_format(
         )
     }?;
     Ok(format)
+}
+
+/// Symbols Nerd Font Mono, embedded so prompt icons work with no setup.
+static SYMBOLS_FONT: &[u8] = include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
+
+/// Family name inside [`SYMBOLS_FONT`].
+const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
+
+/// Private-use ranges the bundled font answers for: the BMP area and plane 15.
+const SYMBOL_RANGES: [DWRITE_UNICODE_RANGE; 2] = [
+    DWRITE_UNICODE_RANGE {
+        first: 0xE000,
+        last: 0xF8FF,
+    },
+    DWRITE_UNICODE_RANGE {
+        first: 0xF0000,
+        last: 0xFFFFD,
+    },
+];
+
+/// A font fallback that sends private-use characters to the bundled symbols
+/// font and everything else to the system fallback. DirectWrite only consults
+/// it for characters the chosen font lacks, so the user's font still wins.
+/// `None` when the font cannot be loaded. Built once per thread: font changes
+/// rebuild the text formats, and each build would register another loader.
+fn symbol_fallback(dwrite: &IDWriteFactory) -> Option<IDWriteFontFallback> {
+    thread_local! {
+        static FALLBACK: std::cell::OnceCell<Option<IDWriteFontFallback>> =
+            const { std::cell::OnceCell::new() };
+    }
+    FALLBACK.with(|cell| cell.get_or_init(|| build_symbol_fallback(dwrite)).clone())
+}
+
+fn build_symbol_fallback(dwrite: &IDWriteFactory) -> Option<IDWriteFontFallback> {
+    let factory: IDWriteFactory5 = dwrite.cast().ok()?;
+    unsafe {
+        let loader = factory.CreateInMemoryFontFileLoader().ok()?;
+        factory.RegisterFontFileLoader(&loader).ok()?;
+        // SYMBOLS_FONT is 'static, so the loader can reference it directly.
+        let file = loader
+            .CreateInMemoryFontFileReference(
+                &factory,
+                SYMBOLS_FONT.as_ptr().cast(),
+                SYMBOLS_FONT.len() as u32,
+                None,
+            )
+            .ok()?;
+        let set_builder = factory.CreateFontSetBuilder().ok()?;
+        set_builder.AddFontFile(&file).ok()?;
+        let set = set_builder.CreateFontSet().ok()?;
+        let collection = factory.CreateFontCollectionFromFontSet(&set).ok()?;
+        let builder = factory.CreateFontFallbackBuilder().ok()?;
+        let family = wstr(SYMBOLS_FAMILY);
+        let families = [family.as_ptr()];
+        builder
+            .AddMapping(
+                &SYMBOL_RANGES,
+                &families,
+                &collection,
+                PCWSTR::null(),
+                PCWSTR::null(),
+                1.0,
+            )
+            .ok()?;
+        let system = factory.GetSystemFontFallback().ok()?;
+        builder.AddMappings(&system).ok()?;
+        builder.CreateFontFallback().ok()
+    }
 }
 
 /// Icon-only text face for the tab bar: the system icon font carrying the
@@ -2840,5 +2921,143 @@ mod tests {
             let pairs: Vec<(&str, bool)> = got.iter().map(|(t, e)| (t.as_str(), *e)).collect();
             assert_eq!(pairs, want, "feature string {text:?}");
         }
+    }
+
+    use super::{
+        DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_WEIGHT_NORMAL, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
+        PCWSTR, symbol_fallback, wstr,
+    };
+
+    /// A one-string text source for `MapCharacters`.
+    #[windows::core::implement(windows::Win32::Graphics::DirectWrite::IDWriteTextAnalysisSource)]
+    struct OneString(Vec<u16>);
+
+    #[allow(non_snake_case, reason = "COM method names")]
+    impl windows::Win32::Graphics::DirectWrite::IDWriteTextAnalysisSource_Impl for OneString_Impl {
+        fn GetTextAtPosition(
+            &self,
+            position: u32,
+            text: *mut *mut u16,
+            length: *mut u32,
+        ) -> windows::core::Result<()> {
+            let rest = self.0.get(position as usize..).unwrap_or(&[]);
+            unsafe {
+                *text = if rest.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    rest.as_ptr().cast_mut()
+                };
+                *length = rest.len() as u32;
+            }
+            Ok(())
+        }
+        fn GetTextBeforePosition(
+            &self,
+            _position: u32,
+            text: *mut *mut u16,
+            length: *mut u32,
+        ) -> windows::core::Result<()> {
+            unsafe {
+                *text = std::ptr::null_mut();
+                *length = 0;
+            }
+            Ok(())
+        }
+        fn GetParagraphReadingDirection(
+            &self,
+        ) -> windows::Win32::Graphics::DirectWrite::DWRITE_READING_DIRECTION {
+            windows::Win32::Graphics::DirectWrite::DWRITE_READING_DIRECTION_LEFT_TO_RIGHT
+        }
+        fn GetLocaleName(
+            &self,
+            _position: u32,
+            length: *mut u32,
+            locale: *mut *mut u16,
+        ) -> windows::core::Result<()> {
+            unsafe {
+                *length = 0;
+                *locale = std::ptr::null_mut();
+            }
+            Ok(())
+        }
+        fn GetNumberSubstitution(
+            &self,
+            _position: u32,
+            length: *mut u32,
+            substitution: windows::core::OutRef<
+                windows::Win32::Graphics::DirectWrite::IDWriteNumberSubstitution,
+            >,
+        ) -> windows::core::Result<()> {
+            unsafe { *length = 0 };
+            substitution.write(None)
+        }
+    }
+
+    /// The family DirectWrite picks for `ch` when `base` is the font.
+    fn mapped_family(ch: char, base: &str) -> Option<String> {
+        let dwrite: IDWriteFactory =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.expect("factory");
+        let fallback = symbol_fallback(&dwrite).expect("fallback");
+        let mut collection: Option<IDWriteFontCollection> = None;
+        unsafe { dwrite.GetSystemFontCollection(&raw mut collection, false) }.expect("fonts");
+        let mut units = [0u16; 2];
+        let text = ch.encode_utf16(&mut units).to_vec();
+        let count = text.len() as u32;
+        let source: windows::Win32::Graphics::DirectWrite::IDWriteTextAnalysisSource =
+            OneString(text).into();
+        let family = wstr(base);
+        let (mut mapped_length, mut scale) = (0u32, 0f32);
+        let mut font = None;
+        unsafe {
+            fallback.MapCharacters(
+                &source,
+                0,
+                count,
+                collection.as_ref(),
+                PCWSTR::from_raw(family.as_ptr()),
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                &raw mut mapped_length,
+                &raw mut font,
+                &raw mut scale,
+            )
+        }
+        .expect("MapCharacters");
+        let font: windows::Win32::Graphics::DirectWrite::IDWriteFont = font?;
+        let names =
+            unsafe { font.GetFontFamily().and_then(|f| f.GetFamilyNames()) }.expect("names");
+        let len = unsafe { names.GetStringLength(0) }.expect("length") as usize;
+        let mut buf = vec![0u16; len + 1];
+        unsafe { names.GetString(0, &mut buf) }.expect("name");
+        Some(String::from_utf16_lossy(&buf[..len]))
+    }
+
+    #[test]
+    fn powerline_and_icon_glyphs_map_to_the_bundled_font() {
+        // Break caught: prompt icons showing as empty boxes.
+        for ch in ['\u{E0A0}', '\u{F115}'] {
+            let family = mapped_family(ch, "Consolas").unwrap_or_default();
+            assert!(family.contains("Symbols Nerd Font"), "{ch:?}: {family}");
+        }
+    }
+
+    #[test]
+    fn a_font_with_the_glyph_keeps_it() {
+        // Break caught: the bundled font overriding the user's chosen font.
+        assert_eq!(mapped_family('A', "Consolas").as_deref(), Some("Consolas"));
+        assert_eq!(
+            mapped_family('\u{E8BB}', "Segoe MDL2 Assets").as_deref(),
+            Some("Segoe MDL2 Assets"),
+            "a private-use glyph the chosen font has stays with that font"
+        );
+    }
+
+    #[test]
+    fn non_symbol_text_still_uses_system_fallback() {
+        // Break caught: losing system fallback for everything else.
+        let family = mapped_family('\u{4E2D}', "Consolas").unwrap_or_default();
+        assert!(!family.contains("Symbols Nerd Font"), "{family}");
     }
 }
