@@ -149,6 +149,13 @@ pub fn settings(cfg: &Config) -> Vec<Setting> {
     );
     add(
         &mut out,
+        "automation-writes",
+        format!("{}", cfg.automation_writes),
+        "global",
+        false,
+    );
+    add(
+        &mut out,
         "welcome",
         format!("{}", cfg.welcome),
         "global",

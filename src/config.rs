@@ -835,6 +835,10 @@ pub struct Config {
     /// RAIL-001: show the sessions sidebar.
     #[serde(rename = "session-rail", default = "default_true")]
     pub session_rail: bool,
+    /// AUTO-007: let any local client of this user open tabs and type into
+    /// sessions. Off, writes need this window's token.
+    #[serde(rename = "automation-writes", default)]
+    pub automation_writes: bool,
     /// WELCOME-001: show the crab banner when rustty starts.
     #[serde(default = "default_true")]
     pub welcome: bool,
@@ -899,6 +903,7 @@ impl Default for Config {
             session_restore: true,
             welcome: true,
             session_rail: true,
+            automation_writes: false,
             shell_integration: false,
             command_notify_ms: default_notify_ms(),
             detach_prefix: default_detach_prefix(),
@@ -934,6 +939,7 @@ impl PartialEq for Config {
             && self.session_restore == other.session_restore
             && self.welcome == other.welcome
             && self.session_rail == other.session_rail
+            && self.automation_writes == other.automation_writes
             && self.shell_integration == other.shell_integration
             && self.command_notify_ms == other.command_notify_ms
             && self.detach_prefix == other.detach_prefix

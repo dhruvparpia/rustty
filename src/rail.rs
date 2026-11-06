@@ -360,15 +360,23 @@ pub fn detail_for(status: Status, message: Option<&str>) -> String {
 }
 
 /// The line under a row's title, given what a session's panes report: a stopped
-/// agent while it is interrupted, otherwise what a notification said.
+/// agent while it is interrupted, otherwise what the first pane in that status
+/// has to say. `messages` is each pane's status and message, in pane order.
 #[must_use]
-pub fn tab_detail(status: Status, stopped: Option<&str>, message: Option<&str>) -> String {
+pub fn tab_detail(
+    status: Status,
+    stopped: Option<&str>,
+    messages: &[(Status, Option<String>)],
+) -> String {
     detail_for(
         status,
         if status == Status::Interrupted {
             stopped
         } else {
-            message
+            messages
+                .iter()
+                .find(|(pane_status, _)| *pane_status == status)
+                .and_then(|(_, message)| message.as_deref())
         },
     )
 }

@@ -10,6 +10,11 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Added
 
+- Local automation API (AUTO-001..015): `rustty ctl <verb>` and `rustty mcp` control a running
+  window over a per-window pipe, so a script or a coding agent can start sessions, read their
+  output, type into them and see whether they need attention. Reading is always allowed; writes
+  need `automation-writes = true` or the window's token. See
+  [the design record](docs/design-automation-api.md).
 - Per-project 1Password secrets (SECRET-001..012): `rustty secrets setup`, `add`, `list` and
   `run --only A,B -- cmd` give each project its own small vault and read-only service account, so
   agents stop prompting for approval in every sub-shell. Values are held in locked, encrypted memory
@@ -33,6 +38,8 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Changed
 
+- A pane now closes when its program exits even if the pseudo-console keeps its output pipe open,
+  as it does on current Windows builds, where `exit` used to leave the pane open and blank.
 - The permanent menu bar is gone. Tap Alt to open the same menu as a popup; every menu
   command is also in the command palette, including minimize, maximize, close window, about
   and saving workspaces.

@@ -75,6 +75,12 @@ bell = "audible"
 # while it is on, and it collapses when the window is under 720 DIPs wide.
 session-rail = true
 
+# Let scripts and agents running as you open tabs, close them and type into
+# sessions through `rustty ctl` and `rustty mcp` (AUTO-007). Reading is always
+# allowed. Off, a write needs this window's token, which only a session the window
+# starts for a boss is given. Takes effect on the next request, no restart needed.
+automation-writes = false
+
 # Show the crab banner when rustty starts with no other rustty window open
 # (WELCOME-001). It never appears on new tabs or splits.
 welcome = true

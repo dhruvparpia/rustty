@@ -772,6 +772,41 @@ fn setup_sized(cols: usize, rows: usize, scrollback: usize) -> (Dispatcher, Fake
     (d, w)
 }
 
+/// The most one request can hold the UI thread for. Run with `--release`.
+#[test]
+#[ignore = "bench: run individually in release"]
+fn a_full_page_read_stays_well_inside_a_tick() {
+    let (mut d, mut w) = setup_sized(200, 50, 50_000);
+    let pane = first_pane(&w);
+    let row = "x".repeat(190);
+    if let Some(mut p) = w.app.tab_at_mut(0).and_then(|t| t.pane_at_mut(0)) {
+        for _ in 0..50_000 {
+            p.feed(format!("{row}\r\n").as_bytes());
+        }
+    }
+    let mut slowest = std::time::Duration::ZERO;
+    let mut bytes = 0;
+    for _ in 0..20 {
+        let start = std::time::Instant::now();
+        let frame = call(
+            &mut d,
+            &mut w,
+            CLIENT,
+            "pane.read",
+            json!({"pane": pane, "scrollback": true}),
+        );
+        let encoded = crate::host::encode_frame(&frame).expect("under the cap");
+        slowest = slowest.max(start.elapsed());
+        bytes = encoded.len();
+    }
+    println!("one full page ({bytes} bytes) read and encoded: worst {slowest:?}");
+    assert!(bytes > 900 * 1024, "that was not a full page: {bytes}");
+    assert!(
+        slowest < std::time::Duration::from_millis(33),
+        "longer than the 33 ms poll: {slowest:?}"
+    );
+}
+
 #[test]
 fn every_page_fits_the_frame_cap_even_when_all_of_it_escapes() {
     // Break caught: a megabyte of `"` doubling past the 1 MiB frame cap, so

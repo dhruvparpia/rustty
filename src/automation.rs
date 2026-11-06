@@ -13,10 +13,23 @@
 //! - [`client`]: how an encoder reaches a window.
 //! - [`ctl`] and [`mcp`]: the `rustty ctl` and `rustty mcp` encoders.
 
+/// How an encoder reaches a window: discovery, selection and the transport.
+pub mod client;
+/// `rustty ctl <verb>`: the command-line encoder.
+pub mod ctl;
 /// The event stream: read off each tick by diffing, never from the PTY path.
 pub mod events;
+/// `rustty mcp`: the MCP-over-stdio encoder.
+pub mod mcp;
 /// The dispatcher: the only code that resolves targets and checks grants.
 pub mod ops;
+/// Per-window pipe server and client connect (Windows FFI boundary).
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "AUTO-003: the automation pipe is a raw Win32 FFI boundary"
+)]
+pub mod pipe;
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -343,7 +356,7 @@ pub const OPERATIONS: &[OpSpec] = &[
     OpSpec {
         name: "list",
         write: false,
-        description: "List this window's tabs and panes: ids, title, status, detail, project, cwd, agent, active flag and whether a pane has exited. Status is one of needs-you, interrupted, working, finished, idle or exited.",
+        description: "List this window's tabs and panes: ids, title, status, detail, project, cwd, agent, active flag and whether a pane has exited. Status is one of needs-you, failed, interrupted, working, finished, idle or exited.",
         params: no_params,
     },
     OpSpec {

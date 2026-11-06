@@ -1152,10 +1152,11 @@ impl Pane {
     /// The line the sidebar shows for the last computed status.
     #[must_use]
     pub fn rail_detail(&self) -> String {
+        let status = self.rail_status;
         crate::rail::tab_detail(
-            self.rail_status,
+            status,
             self.interrupted(),
-            self.attention_message(),
+            &[(status, self.status_message(status))],
         )
     }
 

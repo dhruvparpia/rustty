@@ -58,6 +58,10 @@ pub struct Cli {
     /// `secrets ...` as the first argument (SECRET-008). `Err` holds the usage
     /// text for a malformed verb, which must not open a GUI window.
     pub secrets: Option<Result<crate::secrets::SecretsVerb, String>>,
+    /// `ctl ...` as the first argument (AUTO-012): its arguments.
+    pub ctl: Option<Vec<OsString>>,
+    /// `mcp` as the first argument (AUTO-013).
+    pub mcp: bool,
 }
 
 /// Parse `args` (argv without the program name). A flag without its value
@@ -69,6 +73,15 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Cli {
     // SECRET-008: only as the first argument; `.\secrets` still opens a folder.
     if args.next_if(|first| *first == "secrets").is_some() {
         cli.secrets = Some(crate::secrets::parse_verb(args));
+        return cli;
+    }
+    // AUTO-012: same rule. These never open a window; `.\ctl` still opens a folder.
+    if args.next_if(|first| *first == "ctl").is_some() {
+        cli.ctl = Some(args.collect());
+        return cli;
+    }
+    if args.next_if(|first| *first == "mcp").is_some() {
+        cli.mcp = true;
         return cli;
     }
     while let Some(arg) = args.next() {
@@ -134,7 +147,8 @@ fn alias<I: Iterator<Item = OsString>>(args: &mut I) -> Option<u32> {
 pub const fn usage() -> &'static str {
     "usage: rustty [directory] [--profile <name>] [--theme <name>] [--workspace <name> | --workspaces] [--version] [-h|--help]\n\
        session host: rustty --list-sessions [--json] | --new-session [--profile <name>] [--name <label>] [--cwd <dir>] [--cols <n>] [--rows <n>] [--detach] [--ephemeral] | --session-info <n> [--json] | --terminate-session <n> [--force] | --attach <n> [--read-only | --take-control]\n\
-       1Password secrets: rustty secrets setup | add <NAME> --from op://... | list | run --only <NAME,NAME> -- <command> (see rustty secrets --help)"
+       1Password secrets: rustty secrets setup | add <NAME> --from op://... | list | run --only <NAME,NAME> -- <command> (see rustty secrets --help)\n\
+       automation: rustty ctl <verb> (see rustty ctl --help) | rustty mcp"
 }
 
 /// Attach to the calling console so a GUI-subsystem exe can print to
@@ -289,6 +303,29 @@ mod tests {
         assert_eq!(parse(os(&["--session-info"])).session_info, Some(0));
         assert_eq!(parse(os(&["--attach", "4"])).attach, Some(4));
         assert_eq!(parse(os(&["--attach"])).attach, Some(0));
+    }
+
+    /// AUTO-012: `ctl` and `mcp` as the first argument are verbs. Reading one as
+    /// a directory would open a window, which these must never do.
+    #[test]
+    fn automation_verbs_never_read_as_a_directory() {
+        let cli = parse(os(&["ctl", "list", "--window", "7"]));
+        assert_eq!(cli.ctl, Some(os(&["list", "--window", "7"])));
+        assert_eq!(cli.directory, None);
+        assert!(cli.unknown.is_empty());
+        assert_eq!(parse(os(&["ctl"])).ctl, Some(Vec::new()));
+
+        let cli = parse(os(&["mcp"]));
+        assert!(cli.mcp);
+        assert_eq!(cli.directory, None);
+
+        // Only as the first argument; a folder can still be opened by path.
+        let cli = parse(os(&["./ctl"]));
+        assert_eq!(cli.ctl, None);
+        assert_eq!(cli.directory.as_deref(), Some("./ctl"));
+        let cli = parse(os(&["--profile", "x", "ctl"]));
+        assert_eq!(cli.ctl, None);
+        assert_eq!(cli.directory.as_deref(), Some("ctl"));
     }
 
     /// SECRET-008: `secrets` as the first argument is a verb. It can never

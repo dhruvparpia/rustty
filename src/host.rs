@@ -274,21 +274,32 @@ pub fn error(id: Value, code: &str, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
-/// Write one frame: 4-byte little-endian length + UTF-8 JSON.
+/// One frame as bytes: 4-byte little-endian length + UTF-8 JSON.
 ///
 /// # Errors
 ///
-/// Propagates the writer's errors.
-pub fn write_frame(w: &mut impl Write, v: &Value) -> io::Result<()> {
-    let bytes = serde_json::to_vec(v).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    if bytes.len() > MAX_PAGE_BYTES {
+/// A value that can't serialize, or a frame over the page cap.
+pub fn encode_frame(v: &Value) -> io::Result<Vec<u8>> {
+    let body = serde_json::to_vec(v).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    if body.len() > MAX_PAGE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "frame exceeds page cap",
         ));
     }
-    w.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    w.write_all(&bytes)
+    let mut frame = Vec::with_capacity(body.len() + 4);
+    frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&body);
+    Ok(frame)
+}
+
+/// Write one frame.
+///
+/// # Errors
+///
+/// Propagates the writer's errors.
+pub fn write_frame(w: &mut impl Write, v: &Value) -> io::Result<()> {
+    w.write_all(&encode_frame(v)?)
 }
 
 /// Whether a request should keep an idle host alive. A sidebar polling the
@@ -358,22 +369,76 @@ pub fn overlapped_write(
             Some(core::ptr::from_mut(&mut done)),
             Some(core::ptr::from_mut(&mut ov)),
         );
-        let n = if started.is_ok() {
-            done
+        let result = if started.is_ok() {
+            Ok(done)
         } else if GetLastError() == ERROR_IO_PENDING {
             WaitForSingleObject(event, INFINITE);
             GetOverlappedResult(handle, core::ptr::from_ref(&ov), &mut done, false)
-                .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
-            done
+                .map(|()| done)
+                .map_err(|e| io::Error::from_raw_os_error(e.code().0))
         } else {
-            let code = GetLastError();
-            CloseHandle(event).ok();
-            return Err(io::Error::from_raw_os_error(code.0 as i32));
+            Err(io::Error::from_raw_os_error(GetLastError().0 as i32))
         };
+        // Every path closes it: a cancelled write must not leak the event.
         CloseHandle(event).ok();
-        Ok(usize::try_from(n).unwrap_or(0))
+        result.map(|n| usize::try_from(n).unwrap_or(0))
     }
 }
+
+/// `ReadFile` with an event + wait, the counterpart of [`overlapped_write`]. A
+/// zero-length result is EOF.
+///
+/// # Errors
+/// Transport errors.
+#[cfg(windows)]
+#[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
+pub fn overlapped_read(
+    handle: windows::Win32::Foundation::HANDLE,
+    buf: &mut [u8],
+) -> io::Result<usize> {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, GetLastError};
+    use windows::Win32::Storage::FileSystem::ReadFile;
+    use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+    use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    // Safety: event + OVERLAPPED live through the wait; `handle` is a valid pipe
+    // handle opened with FILE_FLAG_OVERLAPPED.
+    unsafe {
+        let Ok(event) = CreateEventW(None, true, false, None) else {
+            return Err(io::Error::last_os_error());
+        };
+        let mut ov = OVERLAPPED {
+            hEvent: event,
+            ..Default::default()
+        };
+        let mut done = 0u32;
+        let started = ReadFile(
+            handle,
+            Some(buf),
+            Some(core::ptr::from_mut(&mut done)),
+            Some(core::ptr::from_mut(&mut ov)),
+        );
+        let result = if started.is_ok() {
+            Ok(done)
+        } else if GetLastError() == ERROR_IO_PENDING {
+            WaitForSingleObject(event, INFINITE);
+            GetOverlappedResult(handle, core::ptr::from_ref(&ov), &mut done, false)
+                .map(|()| done)
+                .map_err(|e| io::Error::from_raw_os_error(e.code().0))
+        } else {
+            Err(io::Error::from_raw_os_error(GetLastError().0 as i32))
+        };
+        CloseHandle(event).ok();
+        result.map(|n| usize::try_from(n).unwrap_or(0))
+    }
+}
+
+/// Named-pipe server plumbing shared with the automation server (AUTO-003).
+#[cfg(windows)]
+pub mod pipe;
 
 /// The Windows session host: App state, per-session job objects, the
 /// RPC dispatch table. The `rustty-host.exe` bin drives it; clients
@@ -395,7 +460,7 @@ pub mod server {
     use windows::Win32::Security::*;
     use windows::Win32::Storage::FileSystem::SYNCHRONIZE;
     use windows::Win32::System::JobObjects::*;
-    use windows::Win32::System::Pipes::GetNamedPipeClientProcessId;
+    use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
     use windows::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
     use windows::Win32::System::Threading::*;
     use windows::core::{Owned, PCWSTR};
@@ -1693,12 +1758,31 @@ pub mod server {
         /// clients get `integrity-mismatch`, and vice versa.
         #[must_use]
         pub fn peer_ok(&self, pipe: HANDLE) -> bool {
+            let mut pid = 0u32;
+            // Safety: `pipe` is a valid handle and `pid` a real out-param.
+            if unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) }.is_err() {
+                return false;
+            }
+            self.process_ok(pid)
+        }
+
+        /// The same check on the far end of a pipe this process opened as a
+        /// client (AUTO-004), with the process it must be: a process squatting
+        /// on the pipe's name never gets to see the write token.
+        #[must_use]
+        pub fn server_ok(&self, pipe: HANDLE, expected_pid: u32) -> bool {
+            let mut pid = 0u32;
+            // Safety: `pipe` is a valid handle and `pid` a real out-param.
+            if unsafe { GetNamedPipeServerProcessId(pipe, &mut pid) }.is_err() {
+                return false;
+            }
+            pid == expected_pid && self.process_ok(pid)
+        }
+
+        /// Whether a process runs as this user at this integrity level.
+        fn process_ok(&self, pid: u32) -> bool {
             // Safety: all handles are short-lived query handles we close.
             unsafe {
-                let mut pid = 0u32;
-                if GetNamedPipeClientProcessId(pipe, &mut pid).is_err() {
-                    return false;
-                }
                 let Ok(peer) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
                     return false;
                 };
@@ -2114,13 +2198,20 @@ pub mod client {
     /// writer (see [`super::overlapped_write`]).
     #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
     pub fn open_pipe() -> io::Result<DupHandle> {
+        open_named_pipe(&pipe_name(), 0)
+    }
+
+    /// Open a named pipe read+write and overlapped. `extra_flags` adds file
+    /// flags, such as the security quality of service for a server that isn't
+    /// trusted yet.
+    #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
+    pub fn open_named_pipe(name: &str, extra_flags: u32) -> io::Result<DupHandle> {
         use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE};
         use windows::Win32::Storage::FileSystem::{
             CreateFileW, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE,
             OPEN_EXISTING,
         };
 
-        let name = pipe_name();
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         // Safety: FFI boundary (NFR-401); `wide` lives through the call.
         unsafe {
@@ -2130,7 +2221,7 @@ pub mod client {
                 FILE_SHARE_MODE::default(),
                 None,
                 OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(FILE_FLAG_OVERLAPPED.0),
+                FILE_FLAGS_AND_ATTRIBUTES(FILE_FLAG_OVERLAPPED.0 | extra_flags),
                 Some(HANDLE::default()),
             )
             .map(DupHandle)
@@ -2329,6 +2420,14 @@ pub mod client {
     #[cfg(windows)]
     pub struct DupHandle(windows::Win32::Foundation::HANDLE);
     #[cfg(windows)]
+    impl DupHandle {
+        /// The raw handle, valid while this lives.
+        #[must_use]
+        pub const fn raw(&self) -> windows::Win32::Foundation::HANDLE {
+            self.0
+        }
+    }
+    #[cfg(windows)]
     unsafe impl Send for DupHandle {}
     // Safety: every I/O call uses its own event and completes before
     // the call returns; concurrent read (reader thread) + write (main
@@ -2345,59 +2444,10 @@ pub mod client {
         }
     }
 
-    /// `ReadFile` with an event + wait (the overlapped pattern; see
-    /// [`super::overlapped_write`]). A zero-length result is EOF.
-    #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
-    fn overlapped_read(
-        handle: windows::Win32::Foundation::HANDLE,
-        buf: &mut [u8],
-    ) -> io::Result<usize> {
-        use windows::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, GetLastError};
-        use windows::Win32::Storage::FileSystem::ReadFile;
-        use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
-        use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
-
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        // Safety: event + OVERLAPPED live through the wait; `handle` is
-        // a valid pipe handle opened with FILE_FLAG_OVERLAPPED.
-        unsafe {
-            let Ok(event) = CreateEventW(None, true, false, None) else {
-                return Err(io::Error::last_os_error());
-            };
-            let mut ov = OVERLAPPED {
-                hEvent: event,
-                ..Default::default()
-            };
-            let mut done = 0u32;
-            let started = ReadFile(
-                handle,
-                Some(buf),
-                Some(core::ptr::from_mut(&mut done)),
-                Some(core::ptr::from_mut(&mut ov)),
-            );
-            let n = if started.is_ok() {
-                done
-            } else if GetLastError() == ERROR_IO_PENDING {
-                WaitForSingleObject(event, INFINITE);
-                GetOverlappedResult(handle, core::ptr::from_ref(&ov), &mut done, false)
-                    .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
-                done
-            } else {
-                let code = GetLastError();
-                CloseHandle(event).ok();
-                return Err(io::Error::from_raw_os_error(code.0 as i32));
-            };
-            CloseHandle(event).ok();
-            Ok(usize::try_from(n).unwrap_or(0))
-        }
-    }
-
     #[cfg(windows)]
     impl io::Read for DupHandle {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            overlapped_read(self.0, buf)
+            super::overlapped_read(self.0, buf)
         }
     }
 
@@ -2431,7 +2481,7 @@ pub mod client {
     #[cfg(windows)]
     impl io::Read for DupReader {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            overlapped_read(self.handle.0, buf)
+            super::overlapped_read(self.handle.0, buf)
         }
     }
 

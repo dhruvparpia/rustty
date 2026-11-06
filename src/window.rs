@@ -1289,6 +1289,10 @@ unsafe extern "system" fn ws_name_dlgproc(
 
 /// Per-window state, boxed onto the heap and pointed at by
 /// `GWLP_USERDATA` (created in `WM_CREATE`, reclaimed in `WM_DESTROY`).
+/// The window's side of the local automation API (AUTO-003).
+mod automation;
+pub use automation::open_boss_tab;
+
 struct WindowState {
     app: App,
     theme: Theme,
@@ -1443,6 +1447,8 @@ struct WindowState {
     /// the render target follows live, the grid/ConPTY reflow lands once at
     /// the end (mid-drag reflow was the visible text bounce).
     drag_resize: bool,
+    /// The local automation API (AUTO-003); `None` if its pipe couldn't start.
+    automation: Option<automation::Binding>,
 }
 
 impl WindowState {
@@ -2061,6 +2067,7 @@ unsafe extern "system" fn wnd_proc(
                 search_step_tick(hwnd);
             }
             drain_and_cleanup(hwnd);
+            automation::tick(hwnd);
             LRESULT(0)
         }
         WM_COMMAND => {
@@ -2173,6 +2180,8 @@ fn reclaim_state(hwnd: HWND) -> Option<*mut WindowState> {
 /// WM_CREATE follow-up: show the window, build the renderer, size the
 /// grid, spawn the first shell, start the output-poll timer.
 fn init_window(hwnd: HWND) {
+    // First: the shells started below are told which window they are in.
+    automation::start(hwnd);
     let quick = state_ref(hwnd).is_some_and(|s| s.quick);
     if !quick {
         // The window draws its own title bar: keep DWM's shadow and border, and
@@ -2442,6 +2451,7 @@ fn create_quick_window() {
         ws_pending: None,
         cmd_notified: 0,
         drag_resize: false,
+        automation: None,
         app: {
             let mut app = App::with_size(spawn.cols, spawn.rows, cfg.scrollback);
             app.set_show_cwd(cfg.tab_bar.show_cwd);
@@ -2729,7 +2739,8 @@ fn spawn_restored(s: &mut WindowState) {
         let spec = profile_spec_named(s, &st.profile);
         let mut cwds = Vec::new();
         st.shape.leaf_cwds(&mut cwds);
-        let opts = spec_opts(&spec, cols, rows, s.cfg.shell_integration);
+        let mut opts = spec_opts(&spec, cols, rows, s.cfg.shell_integration);
+        s.app.apply_session_env(&mut opts);
         let cmds: &[Option<Vec<String>>] = ws_cmds
             .as_deref()
             .and_then(|tabs| tabs.get(i))
@@ -3391,7 +3402,9 @@ fn build_rail_rows(s: &mut WindowState, focused: bool, now_ms: u64) -> Vec<rail:
         let mut statuses = Vec::new();
         let mut messages = Vec::new();
         let mut stopped = None;
+        let mut typed = None;
         tab.for_each_pane(|pane, _| {
+            typed = typed.into_iter().chain(pane.automation_input_age()).min();
             let status = pane.rail_step(viewed, now_ms);
             statuses.push(status);
             messages.push((status, pane.status_message(status)));
@@ -3409,17 +3422,11 @@ fn build_rail_rows(s: &mut WindowState, focused: bool, now_ms: u64) -> Vec<rail:
         rows.push(rail::Row {
             target: rail::Target::Tab(i),
             title,
-            detail: rail::detail_for(
-                status,
-                if status == rail::Status::Interrupted {
-                    stopped.as_deref()
-                } else {
-                    messages
-                        .iter()
-                        .find(|(pane_status, _)| *pane_status == status)
-                        .and_then(|(_, message)| message.as_deref())
-                },
-            ),
+            detail: rail::automation_detail(
+                &rail::tab_detail(status, stopped.as_deref(), &messages),
+                typed,
+            )
+            .to_string(),
             project,
             status,
             active: i == active,
@@ -6836,6 +6843,7 @@ fn drain_and_cleanup(hwnd: HWND) {
     let changed = {
         let Some(s) = state_mut(hwnd) else { return };
         s.app.drain_shells();
+        automation::scan(s, hwnd);
         s.take_bell(hwnd);
         s.notify_finished_command(hwnd);
         s.watch_config(hwnd);
@@ -8356,6 +8364,7 @@ pub fn run(
         ws_pending,
         cmd_notified: 0,
         drag_resize: false,
+        automation: None,
         app: {
             let mut app = App::with_size(cols, rows, cfg.scrollback);
             // TAB-025: tab titles fall back to the pane's OSC 7 cwd.

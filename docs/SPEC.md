@@ -1345,6 +1345,83 @@ user for agents is the real boundary, and it is not built.
 | SECRET-011 | The command starts through `CreateProcessW` with an environment block built in locked memory and wiped straight after the call, along with each secret, before the wait. It inherits stdio and no other handle, and its working directory is unchanged by `--dir`. A bare command name is searched on the absolute `PATH` entries only, never the current directory. A `.cmd` or `.bat` runs through `cmd.exe` from the system directory with every argument quoted, and an argument holding a quote, a percent sign or a line break is refused. | P2 |
 | SECRET-012 | The documentation shall state the limit above plainly. This feature shall not be described as protecting secrets from code running as the same Windows user. | P2 |
 
+## 9.34 Local automation API
+
+Design record: `docs/design-automation-api.md`. Scripts, editors and coding agents
+control a running window through one set of operations, whichever encoder they use.
+
+| ID | Requirement | Priority |
+|---|---|---|
+| AUTO-001 | Every window, tab and pane shall have a u64 id assigned at creation and never reused, stable across split, resize and closing a neighbour, and valid as an exact integer in JSON. A closed or unknown id shall answer `target-stale`, never a different target. | P1 |
+| AUTO-002 | Requests shall be JSON-RPC 2.0 with a version agreed in `initialize`, this build's or the one before; anything else is `protocol-mismatch`. Errors shall be `{code, message, target?, retryAfterMs?}` from the fixed table below. `capabilities` shall list operations, grants, events, errors and limits, and be the only such list. | P1 |
+| AUTO-003 | Each window shall serve a named pipe, `\\.\pipe\rustty.<user>.<pid>.<seq>`, published in `%APPDATA%\rustty\ipc\` while it lives; a file whose process is gone shall be removed. Pipe I/O shall stay off the UI thread. The window shall serve at most 16 requests or 4 ms per tick, and shall never wait on a client. | P1 |
+| AUTO-004 | The pipe shall take local clients of the same user and integrity level only. The first instance shall refuse a name already taken, and a client shall check the server's process and identity before sending anything. | P0 |
+| AUTO-005 | The operations are in the table below. Status and detail shall be the sidebar's own, read from its last step: reading shall never step them, and they shall stay current with the sidebar off. | P1 |
+| AUTO-006 | Every shell a window starts shall have `RUSTTY_WINDOW` naming that window, which clients use by default. A named window that is gone shall be `target-stale`, never whichever is left. With nothing named and several windows, a client shall fail and list them; the quick terminal answers only when it is the only window. | P1 |
+| AUTO-007 | Writes shall need `automation-writes = true` (read fresh per request) or this window's token shown in `initialize`, which grants that connection only. The token shall come from the OS's random source, be compared in constant time, never be logged or written to a file, and reach only sessions the window starts for a boss. Shells shall not inherit `RUSTTY_AUTOMATION_TOKEN` or `RUSTTY_WINDOW`. | P0 |
+| AUTO-008 | A request frame shall be at most 64 KiB and a response at most 1 MiB, counting JSON escapes. Scrollback reads return pages with a cursor that belongs to one pane. `pane.read` shows the live screen wherever the person has scrolled, and history stays the main screen's while a program holds the alternate one. | P1 |
+| AUTO-009 | Each client shall have at most 32 queued requests and 4 MiB queued output. Past that it is disconnected with `slow-client`; nobody else is affected. A client that leaves shall take its queued requests with it. At most 32 clients per window. | P0 |
+| AUTO-010 | Events, in order with a rising `seq`: `tab-opened`, `tab-closed`, `pane-closed`, `bell`, `command-started`, `command-finished`, `pane-output`, `status-changed`. One subscription per client per pane; a closed pane's subscription ends with `pane-closed`, and no event for a subscription follows the reply to its unsubscribe. A pane opened after a window-wide `pane-output` subscribe is reported from its first line. | P1 |
+| AUTO-011 | `pane.send-text` shall go through the keyboard's path, at most 8 KiB a call and 64 KiB/s per pane, answering `rate-limited` with `retryAfterMs` over that. The pane's sidebar row shall say it was typed by automation for 5 s. A read-only view refuses with `denied-grant`. | P1 |
+| AUTO-012 | `rustty ctl <verb>` shall never open a window or start a process, and shall exit with the code in the table below and a one-line message. `--json` puts the result, or the error as well as on stderr, on stdout. | P1 |
+| AUTO-013 | `rustty mcp` shall speak MCP over stdio, revision `2026-07-28` and `initialize` for earlier ones, with one tool per operation except `initialize`, generated from the capability list, and writing only MCP messages to stdout. An operation's failure is a tool error; only a malformed request is a protocol error. | P1 |
+| AUTO-014 | Nothing here shall touch the PTY read loop, the parser or the render hot path. With nobody subscribed, a scan shall cost one check. | P0 |
+| AUTO-015 | A shell's exit shall be noticed when its process ends, even if the output pipe stays open, after what it printed last has reached the pane. | P0 |
+
+**Operations.** Ids are integers. Everything after `initialize` needs it first.
+
+| Method | Params | Result | Grant |
+|---|---|---|---|
+| `initialize` | `protocolVersion`, `clientName?`, `token?` | `protocolVersion`, `serverProtocolVersion`, `capabilities`, `window`, `grants: {writes}`, `serverVersion` | none |
+| `capabilities` | none | `protocolVersion`, `operations`, `events`, `errors`, `limits` | none |
+| `list` | none | `window`, `tabs: [{id, number, title, status, detail, project, profile, active, panes: [{id, path, title, status, detail, project, cwd, agent, active, exited, exitCode, commandRunning}]}]` | none |
+| `pane.read` | `pane`, `scrollback?`, `cursor?` | Screen: `pane`, `text`, `cols`, `rows`, `cursorRow`, `cursorCol`, `altScreen`. History: `pane`, `text`, `fromLine`, `cursor`, `more`, `skipped?` | none |
+| `events.subscribe` | `pane?`, `events?` | `pane`, `subscribed` | none |
+| `events.unsubscribe` | `pane?` | `pane`, `removed` | none |
+| `tab.open` | `dir?`, `profile?`, `name?`, `command?`, `env?` | `tab`, `pane` | write |
+| `tab.close` | `tab` | `tab`, `closed` | write |
+| `tab.focus` | `tab` | `tab` | write |
+| `pane.split` | `pane`, `direction?` (`right`, `down`), `dir?`, `profile?`, `command?`, `env?` | `tab`, `pane` | write |
+| `pane.focus` | `pane` | `tab`, `pane` | write |
+| `pane.send-text` | `pane`, `text` | `pane`, `bytes` | write |
+
+`tab.open` leaves the selected tab alone and `pane.split` leaves focus alone, so a
+person's typing never moves to another shell. `tab.close` doesn't ask, and closing
+the last tab closes the window. A pane closes as soon as its program exits, so a
+finished program is reported by `pane-closed {pane, tab, exitCode}` and its id is
+stale from then on. Unknown params are refused rather than ignored.
+
+Status is one of `needs-you`, `failed`, `interrupted`, `working`, `finished`, `idle`
+or `exited`. Each event is `{event, seq, ...}` with: `tab-opened {tab, panes, title}`,
+`tab-closed {tab}`, `pane-closed {pane, tab, exitCode}`, `bell {pane, tab}`,
+`command-started {pane, tab, command, cwd, startedAtMs}`, `command-finished {pane,
+tab, command, exitCode, durationMs}`, `pane-output {pane, tab, text, fromLine,
+nextLine, cursor, skipped?}`, `status-changed {pane, tab, status, detail}`.
+
+**Errors and `rustty ctl` exit codes.**
+
+| Code | Exit | Meaning |
+|---|---|---|
+| (success) | 0 | |
+| `internal` | 1 | A bug or unexpected failure |
+| `bad-params` | 2 | Usage error, malformed request, unknown method, or several windows and none named |
+| `target-stale` | 3 | The id names nothing open |
+| `denied-grant` | 4 | A write with no grant, or a read-only view |
+| `no-instance` | 5 | No window can be reached |
+| `protocol-mismatch` | 6 | No protocol version in common |
+| `target-closed` | 8 | The shell exited, or the window closed the connection |
+| `timeout` | 9 | The window did not answer in 10 s |
+| `slow-client` | 10 | Disconnected for reading too slowly |
+| `rate-limited` | 11 | Over the send-text rate; `ctl send` waits and retries |
+
+**CLI.** `rustty ctl [--window <id>] [--json] <verb>`, where the verb is `list`,
+`capabilities`, `open [--dir d] [--profile p] [--name n] [--env K=V]... [-- argv...]`,
+`close <tab>`, `focus <tab>`, `focus --pane <pane>`, `split <pane> [--direction
+right|down] [--dir d] [--profile p] [--env K=V]... [-- argv...]`, `read <pane>
+[--scrollback [--cursor c] [--all]]`, `send <pane> [--enter] <text>...` (use `--`
+before text starting with `-`), `send <pane> [--enter] --stdin` or `watch [--pane
+pane] [--events a,b]`. `ctl send` splits long text at character boundaries.
+
 ---
 
 # 10. Non-Functional Requirements

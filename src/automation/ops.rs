@@ -551,14 +551,13 @@ fn list(win: &dyn WindowOps) -> Result<Value, RpcError> {
         let focused = tab.focused_index();
         let mut panes = Vec::with_capacity(tab.pane_count());
         let mut statuses = Vec::with_capacity(tab.pane_count());
-        let mut message = None;
+        let mut messages = Vec::with_capacity(tab.pane_count());
         let mut stopped = None;
         let mut slot = 0;
         tab.for_each_pane_ref(|pane, _| {
-            statuses.push(pane.rail_status());
-            if message.is_none() {
-                message = pane.attention_message().map(str::to_string);
-            }
+            let status = pane.rail_status();
+            statuses.push(status);
+            messages.push((status, pane.status_message(status)));
             if stopped.is_none() {
                 stopped = pane.interrupted().map(str::to_string);
             }
@@ -577,7 +576,7 @@ fn list(win: &dyn WindowOps) -> Result<Value, RpcError> {
             "number": index + 1,
             "title": rail::row_title(tab.title(), tab.profile()),
             "status": status.as_str(),
-            "detail": rail::tab_detail(status, stopped.as_deref(), message.as_deref()),
+            "detail": rail::tab_detail(status, stopped.as_deref(), &messages),
             "project": project_of_pane(&tab.pane(), &home),
             "profile": tab.profile(),
             "active": index == selected,
