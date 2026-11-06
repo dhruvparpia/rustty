@@ -36,8 +36,9 @@ fn the_approval_dialog_names_both_ends_and_no_is_no() {
     }
     let hwnd = found.expect("the dialog appeared");
     let mut text = [0u16; 1024];
-    // Safety: the buffer is valid for its length; 0xFFFF is a message box's text.
-    let len = unsafe { GetDlgItemTextW(hwnd, 0xFFFF, &mut text) };
+    // Safety: the buffer is valid for its length.
+    let id = i32::from(crate::dialog::ID_MESSAGE);
+    let len = unsafe { GetDlgItemTextW(hwnd, id, &mut text) };
     let text = String::from_utf16_lossy(&text[..len as usize]);
     // Answer the box this test opened, and nothing else.
     // Safety: posting a message to a window handle that was just found.

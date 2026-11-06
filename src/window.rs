@@ -73,29 +73,26 @@ use windows::Win32::UI::Shell::{
     SetCurrentProcessExplicitAppUserModelID, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRect, AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreatePopupMenu, CreateWindowExW, DLGPROC,
-    DLGTEMPLATE, DS_MODALFRAME, DefWindowProcW, DeleteMenu, DestroyMenu, DestroyWindow,
-    DialogBoxIndirectParamW, DispatchMessageW, EnableMenuItem, EndDialog, GW_CHILD, GW_HWNDNEXT,
-    GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClientRect, GetCursorPos, GetForegroundWindow,
-    GetMenuItemCount, GetMessageW, GetSubMenu, GetWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, HMENU, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM, IDCANCEL, IDOK, IDYES,
-    IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW, LoadIconW,
-    MB_DEFBUTTON2, MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_BYPOSITION,
-    MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
-    MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_HIDE,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND,
-    WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
-    WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INITDIALOG, WM_INITMENUPOPUP, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION,
-    WS_CHILD, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    AdjustWindowRect, AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+    CheckMenuItem, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DeleteMenu, DestroyMenu,
+    DestroyWindow, DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetMenuItemCount, GetMessageW, GetSubMenu,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, HMENU, HTCLIENT, HWND_TOPMOST, IDC_ARROW,
+    IDC_IBEAM, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW, LoadIconW,
+    MB_ICONASTERISK, MF_BYCOMMAND, MF_BYPOSITION, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, PostMessageW, PostQuitMessage,
+    RegisterClassW, SIZE_MINIMIZED, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE,
+    WM_DESTROY, WM_DROPFILES, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO,
+    WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT,
+    WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR,
+    WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     HTCAPTION, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
@@ -914,19 +911,36 @@ fn open_preferences(hwnd: HWND) {
 }
 
 fn show_about(hwnd: HWND) {
-    let text = wstr(&format!(
-        "rustty {}\n\nA native Windows terminal emulator.\nMIT licensed. No telemetry.",
-        env!("CARGO_PKG_VERSION")
-    ));
-    let caption = wstr("About rustty");
-    unsafe {
-        let _ = MessageBoxW(
-            Some(hwnd),
-            PCWSTR(text.as_ptr()),
-            PCWSTR(caption.as_ptr()),
-            MB_OK,
-        );
-    }
+    let heading = format!("rustty {}", env!("CARGO_PKG_VERSION"));
+    let spec = crate::dialog::Spec {
+        title: "About rustty",
+        heading: Some(&heading),
+        ..crate::dialog::Spec::message(
+            "A native Windows terminal emulator.\nMIT licensed. No telemetry.",
+        )
+    };
+    crate::dialog::show(Some(hwnd), &dialog_palette(hwnd), &spec);
+}
+
+/// The dialog colors for this window's theme (DIALOG-001).
+fn dialog_palette(hwnd: HWND) -> crate::dialog::Palette {
+    state_ref(hwnd).map_or_else(
+        || crate::dialog::palette(&Theme::copper_dark()),
+        |s| crate::dialog::palette(&s.theme),
+    )
+}
+
+/// A question with its own button labels. The focus starts on cancel.
+fn ask(
+    hwnd: HWND,
+    heading: Option<&str>,
+    message: &str,
+    confirm: &str,
+    cancel: &str,
+    tone: crate::dialog::Tone,
+) -> bool {
+    let spec = crate::dialog::Spec::question(heading, message, confirm, cancel, tone);
+    crate::dialog::show(Some(hwnd), &dialog_palette(hwnd), &spec).confirmed
 }
 
 // ---- workspace templates (WORKSPACE-003..008) ---------------------------
@@ -937,29 +951,16 @@ fn ws_menu_label(name: &str) -> String {
 }
 
 fn ws_report(hwnd: HWND, text: &str) {
-    let text = wstr(text);
-    let caption = wstr("rustty");
-    unsafe {
-        let _ = MessageBoxW(
-            Some(hwnd),
-            PCWSTR(text.as_ptr()),
-            PCWSTR(caption.as_ptr()),
-            MB_OK | MB_ICONWARNING,
-        );
-    }
+    show_message(hwnd, text);
 }
 
 fn ws_confirm(hwnd: HWND, text: &str, caption: &str) -> bool {
-    let text = wstr(text);
-    let caption = wstr(caption);
-    unsafe {
-        MessageBoxW(
-            Some(hwnd),
-            PCWSTR(text.as_ptr()),
-            PCWSTR(caption.as_ptr()),
-            MB_YESNO | MB_DEFBUTTON2,
-        ) == IDYES
-    }
+    let tone = if caption.starts_with("Delete") {
+        crate::dialog::Tone::Danger
+    } else {
+        crate::dialog::Tone::Normal
+    };
+    ask(hwnd, Some(caption), text, "&Yes", "&No", tone)
 }
 
 /// WORKSPACE-003: rebuild the Workspaces submenu every time it opens:
@@ -1134,157 +1135,18 @@ fn delete_workspace_by_index(hwnd: HWND, idx: usize) {
 /// template (no .rc resource): a label, an edit seeded with `initial`,
 /// OK and Cancel. Returns the typed name on OK, `None` on Cancel.
 fn prompt_workspace_name(parent: HWND, title: &str, initial: &str) -> Option<String> {
-    let mut answer = initial.to_owned();
-    let template = ws_name_dialog_template(title);
-    let hinstance = unsafe { GetModuleHandleW(None) }.ok()?;
-    let dlg: DLGPROC = Some(ws_name_dlgproc);
-    let res = unsafe {
-        DialogBoxIndirectParamW(
-            Some(hinstance.into()),
-            template.as_ptr().cast::<DLGTEMPLATE>(),
-            Some(parent),
-            dlg,
-            LPARAM(&mut answer as *mut String as isize),
-        )
+    let spec = crate::dialog::Spec {
+        title,
+        heading: Some(title),
+        message: "Workspace name:",
+        confirm: "OK",
+        cancel: Some("Cancel"),
+        tone: crate::dialog::Tone::Normal,
+        input: Some(initial),
+        focus_confirm: true,
     };
-    (res == IDOK.0 as isize).then_some(answer)
-}
-
-/// Pack a UTF-16 word stream into the DWORD-aligned buffer a dialog
-/// template pointer must be.
-fn pack_words(words: Vec<u16>) -> Vec<u32> {
-    words
-        .chunks(2)
-        .map(|c| u32::from(c[0]) | c.get(1).map_or(0, |w| u32::from(*w) << 16))
-        .collect()
-}
-
-fn dlg_push_str(words: &mut Vec<u16>, s: &str) {
-    words.extend(s.encode_utf16());
-    words.push(0);
-    if words.len() % 2 == 1 {
-        words.push(0);
-    }
-}
-
-fn dlg_push_atom(words: &mut Vec<u16>, atom: u16) {
-    words.extend([0xFFFF, atom]);
-}
-
-fn dlg_item(words: &mut Vec<u16>, style: u32, id: u16, class: u16, rect: [i16; 4], text: &str) {
-    let [x, y, cx, cy] = rect;
-    words.extend([
-        (style & 0xFFFF) as u16,
-        (style >> 16) as u16,
-        0,
-        0,
-        x as u16,
-        y as u16,
-        cx as u16,
-        cy as u16,
-        id,
-    ]);
-    dlg_push_atom(words, class);
-    dlg_push_str(words, text);
-}
-
-/// The name prompt layout: label, edit, OK, Cancel (dialog units).
-/// Built to the documented DLGTEMPLATE layout: dialog header, then four
-/// DLGITEMTEMPLATE records (style, extended style, x/y/cx/cy, id, class
-/// atom, text), every field WORD-aligned.
-fn ws_name_dialog_template(title: &str) -> Vec<u32> {
-    const WS_STATIC: u32 = WS_CHILD.0 | WS_VISIBLE.0; // SS_LEFT is 0
-    const WS_EDIT: u32 = WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | WS_BORDER.0;
-    const WS_BTN: u32 = WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0;
-    const ID_EDIT: u16 = 1000;
-    const ID_OK: u16 = 1; // IDOK
-    const ID_CANCEL: u16 = 2; // IDCANCEL
-    let style = WS_POPUP.0 | DS_MODALFRAME as u32 | WS_CAPTION.0 | WS_SYSMENU.0;
-    let mut w: Vec<u16> = vec![
-        (style & 0xFFFF) as u16,
-        (style >> 16) as u16,
-        0,
-        0,
-        4, // item count
-        0,
-        0,
-        220,
-        42, // dialog size in dialog units
-        0,
-        0, // menu: none
-        0,
-        0, // window class: default
-    ];
-    dlg_push_str(&mut w, title);
-    dlg_item(
-        &mut w,
-        WS_STATIC,
-        1001,
-        0x0082,
-        [10, 8, 200, 10],
-        "Workspace name:",
-    );
-    dlg_item(&mut w, WS_EDIT, ID_EDIT, 0x0081, [10, 20, 200, 12], "");
-    dlg_item(
-        &mut w,
-        WS_BTN | BS_DEFPUSHBUTTON as u32,
-        ID_OK,
-        0x0080,
-        [90, 35, 50, 14],
-        "OK",
-    );
-    dlg_item(
-        &mut w,
-        WS_BTN | BS_PUSHBUTTON as u32,
-        ID_CANCEL,
-        0x0080,
-        [145, 35, 50, 14],
-        "Cancel",
-    );
-    pack_words(w)
-}
-
-unsafe extern "system" fn ws_name_dlgproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> isize {
-    // The edit is the second template control (after the label), which is
-    // its child-window order.
-    let edit = || -> Option<HWND> {
-        let first = unsafe { GetWindow(hwnd, GW_CHILD) }.ok()?;
-        unsafe { GetWindow(first, GW_HWNDNEXT) }.ok()
-    };
-    match msg {
-        WM_INITDIALOG => {
-            let seed = unsafe { &*(lparam.0 as *const String) };
-            if let Some(edit) = edit() {
-                let text = wstr(seed);
-                let _ = unsafe { SetWindowTextW(edit, PCWSTR(text.as_ptr())) };
-                let _ = unsafe { SetFocus(Some(edit)) };
-            }
-            1
-        }
-        WM_COMMAND => {
-            if wparam.0 as u32 == IDOK.0 as u32 {
-                let answer = unsafe { &mut *(lparam.0 as *mut String) };
-                if let Some(edit) = edit() {
-                    let mut buf = [0u16; 512];
-                    let n = unsafe { GetWindowTextW(edit, &mut buf) };
-                    *answer = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
-                }
-                let _ = unsafe { EndDialog(hwnd, IDOK.0 as isize) };
-                1
-            } else if wparam.0 as u32 == IDCANCEL.0 as u32 {
-                let _ = unsafe { EndDialog(hwnd, IDCANCEL.0 as isize) };
-                1
-            } else {
-                0
-            }
-        }
-        _ => 0,
-    }
+    let answer = crate::dialog::show(Some(parent), &dialog_palette(parent), &spec);
+    answer.text.filter(|_| answer.confirmed)
 }
 
 /// Per-window state, boxed onto the heap and pointed at by
@@ -2115,7 +1977,16 @@ unsafe extern "system" fn wnd_proc(
             }
             // WINDOW-014: quitting asks first when the profile wants it.
             let ask = state_ref(hwnd).is_some_and(|s| s.app.tab_confirm_close());
-            if ask && !confirm_yes_no(hwnd, "Quit rustty?") {
+            if ask
+                && !self::ask(
+                    hwnd,
+                    Some("Quit rustty?"),
+                    "Every session in this window will close.",
+                    "&Quit",
+                    "&Cancel",
+                    crate::dialog::Tone::Danger,
+                )
+            {
                 return LRESULT(0);
             }
             let _ = unsafe { DestroyWindow(hwnd) };
@@ -3367,7 +3238,15 @@ fn start_boss(hwnd: HWND) {
     let Some(s) = state_ref(hwnd) else { return };
     let root = active_project_root(s);
     let root_text = root.to_string_lossy().into_owned();
-    if !confirm_yes_no(hwnd, &crate::boss::confirm_text(&root_text)) {
+    let question = format!("Start {}?", crate::boss::NAME);
+    if !ask(
+        hwnd,
+        Some(&question),
+        &crate::boss::confirm_text(&root_text),
+        "&Start",
+        "&Cancel",
+        crate::dialog::Tone::Normal,
+    ) {
         return;
     }
     let exe = std::env::current_exe().unwrap_or_default();
@@ -3375,7 +3254,7 @@ fn start_boss(hwnd: HWND) {
         command: Some(crate::boss::command(&exe.to_string_lossy(), &root_text)),
         dir: Some(root_text),
         profile: None,
-        name: Some("Boss".to_string()),
+        name: Some(crate::boss::NAME.to_string()),
         env: std::collections::BTreeMap::new(),
     };
     match open_boss_tab(hwnd, &request) {
@@ -3388,7 +3267,7 @@ fn start_boss(hwnd: HWND) {
         Err(e) => show_message(
             hwnd,
             &format!(
-                "Could not start the Boss Agent. Is Claude Code installed? {}",
+                "Could not start King Crab. Is Claude Code installed? {}",
                 e.message
             ),
         ),
@@ -5414,7 +5293,7 @@ fn standard_rows(ctx: &RowCtx, shortcut: impl Fn(KeyAction) -> Option<String>) -
         KeyAction::NewWorktreeSession,
         None,
     );
-    push("Start Boss Agent", "Project", KeyAction::StartBoss, None);
+    push("Start King Crab", "Project", KeyAction::StartBoss, None);
     push(
         "Create Project Brain",
         "Project",
@@ -7049,20 +6928,10 @@ fn split_pane(hwnd: HWND, dir: Dir) {
 /// with a confirm box when its shell is live); otherwise close the tab,
 /// and closing the last tab closes the window (WM_DESTROY reclaims the
 /// state and quits the loop).
-/// TAB-014/021: a native yes/no box. The default button is "No", so a
-/// stray Enter keeps the shells alive.
+/// TAB-014/021: a yes/no question whose focus starts on "No", so a stray Enter
+/// keeps the shells alive. These close things, so the button says so.
 fn confirm_yes_no(hwnd: HWND, text: &str) -> bool {
-    let text = wstr(text);
-    let caption = wstr("rustty");
-    let answer = unsafe {
-        MessageBoxW(
-            Some(hwnd),
-            PCWSTR::from_raw(text.as_ptr()),
-            PCWSTR::from_raw(caption.as_ptr()),
-            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
-        )
-    };
-    answer == IDYES
+    ask(hwnd, None, text, "&Yes", "&No", crate::dialog::Tone::Danger)
 }
 
 fn close_pane_or_tab(hwnd: HWND) {
@@ -7199,16 +7068,8 @@ fn live_sessions() -> Vec<serde_json::Value> {
 }
 
 fn show_message(hwnd: HWND, text: &str) {
-    let text = wstr(text);
-    let caption = wstr("rustty");
-    unsafe {
-        let _ = MessageBoxW(
-            Some(hwnd),
-            PCWSTR::from_raw(text.as_ptr()),
-            PCWSTR::from_raw(caption.as_ptr()),
-            MB_OK | MB_ICONWARNING,
-        );
-    }
+    let spec = crate::dialog::Spec::message(text);
+    crate::dialog::show(Some(hwnd), &dialog_palette(hwnd), &spec);
 }
 
 fn task_runner() -> crate::task_runner::TaskRunner {
@@ -7283,16 +7144,7 @@ fn open_session_view(hwnd: HWND, alias: u32, take_control: bool) {
         .into_iter()
         .find(|rec| rec.get("alias").and_then(serde_json::Value::as_u64) == Some(u64::from(alias)))
     else {
-        let text = wstr(&format!("Session {alias} is not live."));
-        let caption = wstr("rustty");
-        unsafe {
-            let _ = MessageBoxW(
-                Some(hwnd),
-                PCWSTR::from_raw(text.as_ptr()),
-                PCWSTR::from_raw(caption.as_ptr()),
-                MB_OK | MB_ICONASTERISK,
-            );
-        }
+        show_message(hwnd, &format!("Session {alias} is not live."));
         return;
     };
     let cols = usize::try_from(
@@ -8559,19 +8411,11 @@ pub fn run(
     }
     if let Some(name) = ws_miss {
         // WORKSPACE-007: a missing template opens a plain window and says why.
-        let msg = wstr(&format!(
+        let msg = format!(
             "rustty: no workspace template named {name:?}.\n\nA plain window opened instead."
-        ));
-        let caption = wstr("rustty");
+        );
         if let Ok(main) = created {
-            unsafe {
-                let _ = MessageBoxW(
-                    Some(main),
-                    PCWSTR(msg.as_ptr()),
-                    PCWSTR(caption.as_ptr()),
-                    MB_OK | MB_ICONWARNING,
-                );
-            }
+            show_message(main, &msg);
         }
     }
 

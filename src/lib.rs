@@ -93,8 +93,11 @@ pub mod parser;
 /// The sessions sidebar: session status and row layout.
 pub mod agents;
 pub mod board;
-/// The Boss Agent's command and brief (BOSS-001).
+/// King Crab, the boss agent: its command and brief (BOSS-001).
 pub mod boss;
+/// Skinned dialogs (DIALOG-001).
+#[allow(unsafe_code, reason = "DIALOG-001: Win32 dialog FFI")]
+pub mod dialog;
 #[cfg(all(test, windows))]
 #[allow(
     unsafe_code,

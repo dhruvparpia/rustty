@@ -1,6 +1,9 @@
-//! The Boss Agent (BOSS-001): a Claude Code session given rustty's automation tools
+//! King Crab, the boss agent (BOSS-001): a Claude Code session given rustty's automation tools
 //! and a brief, so it can split work across sessions in their own worktrees and
 //! watch them. rustty adds no agent of its own: this is one `claude` command.
+
+/// What people call the boss. The code still says `boss`, which is what it does.
+pub const NAME: &str = "King Crab";
 
 /// Tools the boss may use without asking: they only read. Anything that starts a
 /// session or types into one stays behind Claude Code's own permission prompt.
@@ -30,7 +33,7 @@ pub fn mcp_config(exe: &str) -> String {
 #[must_use]
 pub fn brief(exe: &str, root: &str) -> String {
     format!(
-        r#"You are the Boss Agent for the project at {root}. You run in RusTTY, a terminal. You split work across other agent sessions, watch them and report to the person. You do not do the work yourself unless it is too small to hand out.
+        r#"You are King Crab, the boss agent for the project at {root}. You run in RusTTY, a terminal. You split work across other agent sessions, watch them and report to the person. You do not do the work yourself unless it is too small to hand out.
 
 Start by reading .rustty/brain/BRAIN.md, roadmap.md and decisions.md in the project, if they exist. Keep them current as work finishes: roadmap.md has the columns Idea bank, Backlog, In progress and Done, and the person sees it as a board.
 
@@ -65,9 +68,9 @@ pub fn confirm_text(root: &str) -> String {
         }
     }
     format!(
-        "Start a Boss Agent in this folder?\n\n{shown}\n\nIt gets tools to read every session \
+        "King Crab will work in this folder:\n\n{shown}\n\nIt gets tools to read every session \
          in this window and to start new ones. A program can report a folder of its own \
-         choosing, so say yes only if this is the project you meant."
+         choosing, so start it only if this is the project you meant."
     )
 }
 
@@ -181,7 +184,7 @@ mod tests {
     fn the_confirmation_names_the_folder_and_hides_nothing_in_it() {
         let text = confirm_text(r"C:\src\api");
         assert!(text.contains(r"C:\src\api"), "{text}");
-        assert!(text.contains("Boss Agent"), "{text}");
+        assert!(text.contains("King Crab"), "{text}");
         // A right-to-left override would show the end of the path first.
         let text = confirm_text("C:\\src\\\u{202e}ipa\n\u{200b}x");
         assert!(
@@ -191,5 +194,13 @@ mod tests {
         assert!(text.contains(r"\u{202e}"), "{text}");
         assert!(text.contains(r"\u{200b}"), "{text}");
         assert!(text.contains(r"\u{a}"), "{text}");
+    }
+
+    #[test]
+    fn the_boss_is_called_king_crab() {
+        assert_eq!(NAME, "King Crab");
+        let text = brief(EXE, "C:/src/api");
+        assert!(text.starts_with("You are King Crab"), "{text}");
+        assert!(confirm_text("C:/src/api").contains("King Crab"));
     }
 }

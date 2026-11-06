@@ -35,9 +35,6 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Shell::{
     FOLDERID_LocalAppData, FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO, MessageBoxW,
-};
 use windows::core::{BOOL, GUID, PCWSTR, PWSTR};
 
 use crate::program_search::{is_batch, is_runnable_file, resolve_command};
@@ -757,19 +754,15 @@ pub struct NativeApproval;
 
 impl CopyApproval for NativeApproval {
     fn approve(&self, from: &str, vault: &str, name: &str) -> bool {
-        let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() };
-        let text = wide(&copy_prompt(from, vault, name));
-        let caption = wide(APPROVAL_CAPTION);
-        // Safety: both strings are NUL-terminated and outlive the call.
-        let answer = unsafe {
-            MessageBoxW(
-                None,
-                PCWSTR::from_raw(text.as_ptr()),
-                PCWSTR::from_raw(caption.as_ptr()),
-                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
-            )
+        use crate::dialog;
+        let text = copy_prompt(from, vault, name);
+        let spec = dialog::Spec {
+            title: APPROVAL_CAPTION,
+            ..dialog::Spec::question(None, &text, "&Yes", "&No", dialog::Tone::Danger)
         };
-        answer == IDYES
+        // No window here, so no window's theme: the dark skin everywhere.
+        let colors = dialog::palette(&crate::theme::Theme::copper_dark());
+        dialog::show(None, &colors, &spec).confirmed
     }
 }
 

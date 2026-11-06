@@ -131,6 +131,24 @@ One real run: Claude Code 2.1.319 as boss in a scratch Git repository, launched 
 | A worker asking a permission question, several workers at once, a real merge | Not run |
 | Boss after a restart | Not supported: a resumed `claude --continue` has neither the tools nor a token. Start a new boss |
 
+## Skinned dialogs (DIALOG-001), 2026-11-06
+
+`tests/dialog_live.rs` drives real dialogs, posting keys to the focused control so they go through the dialog's own message loop. Screenshots were read by eye in `copper-dark` and `copper-light`.
+
+| Check | Result |
+|---|---|
+| Enter on a question | Takes the safe answer |
+| Tab, then Enter | Takes the button moved to. Fails if `answer_for` ignores the focus |
+| Esc from any button, close box, a button's letter | Work |
+| Field | Starting text selected, typing replaces it, cancel returns nothing |
+| Paints in the theme's colors | Pixels checked in a capture |
+| Text at 4.5:1 in every preset | Unit test. It caught `solarized-light`, whose chrome text is too weak, so dialogs fall back to black or white there |
+| Layout at 100% to 300% scale | Unit test on the numbers. Not seen on a real high-DPI display |
+| A real keyboard and mouse, hover state | Not run: the pointer was left alone |
+| A screen reader | Not run. The controls are real, so their names should read |
+| High contrast mode | Not handled: dialogs keep the theme's colors. Not run |
+| Windows 10 title bar | Not run: it may stay system-colored |
+
 ## Boss Agent after the security fixes, 2026-11-06
 
 A second real run, on the final launch: inline config and brief, `--strict-mcp-config`, `--permission-mode manual`, and the folder dialog. Keys were sent as window messages in the order a real keypress produces them.
