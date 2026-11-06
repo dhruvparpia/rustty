@@ -766,6 +766,12 @@ impl Pane {
         }
     }
 
+    /// Colors for ANSI-16 output from now on. Text already on screen keeps
+    /// the colors it was written with.
+    pub const fn set_palette(&mut self, palette: [crate::color::Color; 16]) {
+        self.parser.palette = palette;
+    }
+
     /// Whether the viewport follows new output at the live edge (issue #42).
     #[must_use]
     pub const fn follow(&self) -> bool {

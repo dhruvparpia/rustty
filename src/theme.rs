@@ -54,6 +54,10 @@ pub struct UiOverrides {
     pub accent: Option<Color>,
     /// Chrome separators.
     pub border: Option<Color>,
+    /// Tab strip fill, set only by an explicit `tab-bar` key. Without one
+    /// the strip matches the terminal background, so the window reads as
+    /// one surface.
+    pub strip: Option<Color>,
 }
 
 /// Resolved semantic chrome colors; cheap to compute and allocation-free.
@@ -162,11 +166,7 @@ impl Theme {
                     Some(std::ptr::addr_of_mut!(size)),
                 )
             };
-            if status.is_ok() && value != 0 {
-                "solarized-light"
-            } else {
-                crate::config::DEFAULT_THEME
-            }
+            system_preset_for(status.is_ok() && value != 0)
         }
         #[cfg(not(windows))]
         {
@@ -333,11 +333,12 @@ impl Theme {
             selection: Color::from_hex(0x41464F),
             search_highlight: Color::from_hex(0x55402F),
             tab_bar: Color::from_hex(0x202328),
-            tab_active: Color::from_hex(0x30353C),
+            tab_active: Color::from_hex(0x202328),
             split_border: Color::from_hex(0x3D424A),
             split_focus: Color::from_hex(0xE0A477),
             link: Color::from_hex(0x8CBCEB),
             ui: UiOverrides {
+                strip: None,
                 foreground: Some(Color::from_hex(0xF0EAE2)),
                 muted: Some(Color::from_hex(0xB6B0A8)),
                 accent: Some(Color::from_hex(0xE0A477)),
@@ -367,6 +368,7 @@ impl Theme {
             split_focus: Color::from_hex(0x924923),
             link: Color::from_hex(0x245E91),
             ui: UiOverrides {
+                strip: None,
                 foreground: Some(Color::from_hex(0x292D32)),
                 muted: Some(Color::from_hex(0x655D54)),
                 accent: Some(Color::from_hex(0x924923)),
@@ -419,11 +421,18 @@ impl Theme {
         }
     }
 
-    /// Resolve a configured theme name, falling back to `predawn` when the
+    /// Fill for the tab strip: the terminal background unless the user set
+    /// the `tab-bar` key.
+    #[must_use]
+    pub fn strip_color(&self) -> Color {
+        self.ui.strip.unwrap_or(self.background)
+    }
+
+    /// Resolve a configured theme name, falling back to the default when the
     /// name is unknown (THEME-014: invalid themes fall back safely).
     #[must_use]
     pub fn resolve(name: &str) -> Self {
-        Self::preset(name).unwrap_or_else(Self::predawn)
+        Self::preset(name).unwrap_or_default()
     }
 
     /// Apply a table of colour overrides (CONFIG-003). Each key that parses
@@ -448,6 +457,9 @@ impl Theme {
             &mut self.search_highlight,
         );
         apply("tab-bar", &file.tab_bar, &mut self.tab_bar);
+        if let Some(color) = file.tab_bar.as_deref().and_then(Color::parse_hex) {
+            self.ui.strip = Some(color);
+        }
         apply("tab-active", &file.tab_active, &mut self.tab_active);
         apply("split-border", &file.split_border, &mut self.split_border);
         apply("split-focus", &file.split_focus, &mut self.split_focus);
@@ -565,7 +577,7 @@ pub fn resolve_configured(
     theme_dir: Option<&Path>,
 ) -> (Theme, Vec<String>) {
     let mut problems = Vec::new();
-    let mut theme = Theme::preset(name).unwrap_or_else(Theme::predawn);
+    let mut theme = Theme::preset(name).unwrap_or_default();
     let mut from_file = false;
     if let Some(dir) = theme_dir {
         match Theme::load_file(dir, name) {
@@ -624,9 +636,19 @@ pub fn list_files(theme_dir: Option<&Path>) -> Vec<String> {
     names
 }
 
+/// The preset for a light or dark system (THEME-010).
+#[must_use]
+pub const fn system_preset_for(light: bool) -> &'static str {
+    if light {
+        "copper-light"
+    } else {
+        crate::config::DEFAULT_THEME
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
-        Self::predawn()
+        Self::copper_dark()
     }
 }
 
@@ -635,10 +657,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn predawn_is_the_default() {
+    fn copper_dark_is_the_default() {
         let theme = Theme::default();
-        assert_eq!(theme.name, "predawn");
-        assert_eq!(theme.background, Color::from_hex(0x23212E));
+        assert_eq!(theme.name, "copper-dark");
+        assert_eq!(theme.background, Color::from_hex(0x17191C));
         assert_eq!(theme.palette.len(), 16);
     }
 
@@ -668,9 +690,31 @@ mod tests {
     }
 
     #[test]
-    fn unknown_preset_falls_back_to_predawn() {
+    fn default_and_unknown_themes_are_copper_dark() {
         assert_eq!(Theme::preset("not-a-theme"), None);
-        assert_eq!(Theme::resolve("not-a-theme"), Theme::predawn());
+        assert_eq!(Theme::resolve("not-a-theme"), Theme::copper_dark());
+        assert_eq!(Theme::default(), Theme::copper_dark());
+        assert_eq!(crate::config::DEFAULT_THEME, "copper-dark");
+    }
+
+    #[test]
+    fn light_system_maps_to_copper_light() {
+        assert_eq!(system_preset_for(true), "copper-light");
+        assert_eq!(system_preset_for(false), "copper-dark");
+    }
+
+    #[test]
+    fn strip_is_the_background_unless_tab_bar_is_set_explicitly() {
+        // Break caught: a band above the text on presets whose tab_bar
+        // differs from the background, or an ignored user tab-bar key.
+        for name in PRESETS {
+            let theme = Theme::preset(name).expect("preset");
+            assert_eq!(theme.strip_color(), theme.background, "{name}");
+        }
+        let (theme, problems) =
+            resolve_configured("copper-dark", &table("tab-bar = \"#010203\"\n"), None);
+        assert!(problems.is_empty());
+        assert_eq!(theme.strip_color(), Color::rgb(1, 2, 3));
     }
 
     fn table(text: &str) -> ThemeFile {
@@ -821,7 +865,7 @@ mod tests {
     #[test]
     fn a_missing_theme_name_falls_back_and_says_so() {
         let (theme, problems) = resolve_configured("nope", &ThemeFile::default(), None);
-        assert_eq!(theme, Theme::predawn());
+        assert_eq!(theme, Theme::copper_dark());
         assert_eq!(problems.len(), 1, "{problems:?}");
     }
 

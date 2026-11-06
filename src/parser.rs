@@ -168,6 +168,9 @@ pub struct Parser {
     pub string_utf8: u8,
     /// Saved cursor, if any.
     pub saved: Option<SavedCursor>,
+    /// ANSI-16 colors used by SGR 30-37, 40-47, 90-97, 100-107 and the low
+    /// indices of SGR 38;5 / 48;5. The window sets it from the theme.
+    pub palette: [Color; 16],
     /// Current foreground pen.
     pub pen_fg: Option<Color>,
     /// Current background pen.
@@ -221,6 +224,7 @@ impl Parser {
             region_follows_bottom: true,
             string_utf8: 0,
             saved: None,
+            palette: ansi_palette(),
             pen_fg: None,
             pen_bg: None,
             pen_attrs: CellAttribute::empty(),
@@ -497,7 +501,19 @@ impl Parser {
 
     /// Full terminal reset (`ESC c`): state back to power-on defaults.
     pub fn reset(&mut self) {
+        let palette = self.palette;
         *self = Self::new();
+        // The palette belongs to the theme, not to terminal state.
+        self.palette = palette;
+    }
+
+    /// Color for an ANSI-256 index: the theme's palette for 0-15, the fixed
+    /// cube and gray ramp above that.
+    fn indexed_color(&self, n: u8) -> Color {
+        self.palette
+            .get(usize::from(n))
+            .copied()
+            .unwrap_or_else(|| ansi256(n))
     }
 
     /// The OSC 8 URI a cell's link id points to, `None` if the target
@@ -1165,7 +1181,7 @@ impl Parser {
                     Some((5, _)) => (
                         params
                             .get(i + 2)
-                            .map(|&(idx, _)| ansi256(u8::try_from(idx).unwrap_or(0))),
+                            .map(|&(idx, _)| self.indexed_color(u8::try_from(idx).unwrap_or(0))),
                         3,
                     ),
                     Some((2, _)) => {
@@ -1226,10 +1242,10 @@ impl Parser {
                 29 => self.pen_attrs = self.pen_attrs.without(CellAttribute::STRIKE),
                 39 => self.pen_fg = None,
                 49 => self.pen_bg = None,
-                30..=37 => self.pen_fg = Some(ansi_palette()[p as usize - 30]),
-                40..=47 => self.pen_bg = Some(ansi_palette()[p as usize - 40]),
-                90..=97 => self.pen_fg = Some(ansi_palette()[p as usize - 90 + 8]),
-                100..=107 => self.pen_bg = Some(ansi_palette()[p as usize - 100 + 8]),
+                30..=37 => self.pen_fg = Some(self.palette[p as usize - 30]),
+                40..=47 => self.pen_bg = Some(self.palette[p as usize - 40]),
+                90..=97 => self.pen_fg = Some(self.palette[p as usize - 90 + 8]),
+                100..=107 => self.pen_bg = Some(self.palette[p as usize - 100 + 8]),
                 _ => {}
             }
             i += 1;

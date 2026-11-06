@@ -36,6 +36,8 @@ pub struct App {
     /// TAB-025: a pane that sets no title shows the directory it reported
     /// with OSC 7.
     show_cwd: bool,
+    /// Colors for ANSI-16 output in every pane (the window's theme).
+    palette: [Color; 16],
 }
 
 impl App {
@@ -46,6 +48,7 @@ impl App {
             tabs: vec![Tab::new()],
             active: 0,
             show_cwd: true,
+            palette: crate::color::ansi_palette(),
         }
     }
 
@@ -57,6 +60,7 @@ impl App {
             tabs: vec![Tab::with_size(cols, rows, scrollback)],
             active: 0,
             show_cwd: true,
+            palette: crate::color::ansi_palette(),
         }
     }
 
@@ -111,6 +115,21 @@ impl App {
         self.tabs.get_mut(idx)
     }
 
+    /// Colors for ANSI-16 output in every pane, now and in panes opened later.
+    pub fn set_palette(&mut self, palette: [Color; 16]) {
+        self.palette = palette;
+        self.apply_palette();
+    }
+
+    /// Push the current palette to every pane. Panes are few, and this only
+    /// runs when a tab or pane opens or the theme changes.
+    fn apply_palette(&mut self) {
+        let palette = self.palette;
+        for tab in &mut self.tabs {
+            tab.for_each_pane(|pane, _| pane.set_palette(palette));
+        }
+    }
+
     /// Append a new tab (sized like the current one) and make it active;
     /// returns its index.
     pub fn add_tab(&mut self) -> usize {
@@ -119,6 +138,7 @@ impl App {
         });
         self.tabs.push(Tab::with_size(cols, rows, scrollback));
         self.active = self.tabs.len() - 1;
+        self.apply_palette();
         self.active
     }
 
@@ -127,6 +147,7 @@ impl App {
     pub fn add_tab_sized(&mut self, cols: usize, rows: usize, scrollback: usize) -> usize {
         self.tabs.push(Tab::with_size(cols, rows, scrollback));
         self.active = self.tabs.len() - 1;
+        self.apply_palette();
         self.active
     }
 
@@ -146,6 +167,7 @@ impl App {
         tab.set_color(color);
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.apply_palette();
         self.active
     }
 
@@ -168,6 +190,7 @@ impl App {
         tab.set_color(color);
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.apply_palette();
         self.active
     }
 
@@ -301,6 +324,7 @@ impl App {
     pub fn split_active(&mut self, dir: Dir) -> Option<usize> {
         let tab = self.active_tab_mut()?;
         let idx = tab.split_active(dir)?;
+        self.apply_palette();
         self.sync_tab_titles();
         Some(idx)
     }
@@ -686,5 +710,22 @@ mod tests {
         app.focus_pane(0);
         app.feed_active(b"x");
         assert!(app.take_dirty(), "an unfocused pane's output repaints");
+    }
+
+    #[test]
+    fn new_tabs_and_splits_use_the_app_palette() {
+        // Break caught: a tab or split opened after a theme change keeping
+        // the default colours, and existing panes not following the change.
+        let palette = [Color::rgb(7, 8, 9); 16];
+        let mut app = App::new();
+        app.set_palette(palette);
+        let first = app.active_tab().map(|t| t.pane().parser().palette);
+        assert_eq!(first, Some(palette));
+        app.add_tab();
+        let added = app.active_tab().map(|t| t.pane().parser().palette);
+        assert_eq!(added, Some(palette));
+        assert!(app.split_active(Dir::Vertical).is_some());
+        let split = app.active_tab().map(|t| t.pane().parser().palette);
+        assert_eq!(split, Some(palette));
     }
 }

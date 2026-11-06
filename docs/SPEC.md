@@ -763,13 +763,13 @@ The product must support common terminal/TUI applications.
 | THEME-001 | The terminal shall support color themes. | P0 |
 | THEME-002 | The terminal shall define foreground color. | P0 |
 | THEME-003 | The terminal shall define background color. | P0 |
-| THEME-004 | The terminal shall define ANSI 16 palette. | P0 |
+| THEME-004 | The terminal shall define ANSI 16 palette, used for ANSI-16 output and the low indices of 256-color output written under that theme. | P0 |
 | THEME-005 | The terminal shall define cursor color. | P0 |
 | THEME-006 | The terminal shall define selection color. | P0 |
-| THEME-007 | The terminal shall define tab bar colors. | P1 |
+| THEME-007 | The terminal shall define tab bar colors. The tab strip uses the terminal background unless `tab-bar` is set explicitly, so the window reads as one surface. | P1 |
 | THEME-008 | The terminal shall define pane border colors. | P1 |
 | THEME-009 | The terminal shall support named theme files. | P1 |
-| THEME-010 | The terminal shall support system dark/light theme detection. | P1 |
+| THEME-010 | The terminal shall support system dark/light theme detection. With no configured theme, a dark system uses `copper-dark` and a light system uses `copper-light`. | P1 |
 | THEME-011 | The terminal shall support per-profile themes. | P1 |
 | THEME-012 | The terminal shall support theme hot reload. | P2 |
 | THEME-013 | Themes shall be validated on load. | P0 |

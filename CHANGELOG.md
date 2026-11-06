@@ -24,8 +24,17 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 - Command timeline slice (#90): palette rows expose retained command ids, exit status and duration; jump/copy/export actions use canonical command ids from the active pane. Finished-command rows also open a search overlay scoped to that command's output range. Durable cross-restart indexing remains later.
 - TaskRunner seam (#89 architecture): task lifecycle moved from `window.rs` into a deep `TaskRunner` module with a `HostAdapter` seam, explicit outcomes, and synthetic host tests.
 
+### Changed
+
+- Copper is the default skin: `copper-dark` on a dark system and `copper-light` on a light
+  one. An explicit theme in config still wins. The tab strip now matches the terminal
+  background unless `tab-bar` is set explicitly.
+
 ### Fixed
 
+- Theme palettes now colour ANSI output, so each theme shows its own 16 colors. Text
+  already on screen keeps its colors after a theme switch, and a session host's snapshot
+  of existing text uses the default palette.
 - Reading scrollback: the view now keeps its text while output arrives, and line
   edits (erase, insert, delete) apply to the live screen, never the history on screen.
   Images placed while scrolled back anchor to the live cursor.

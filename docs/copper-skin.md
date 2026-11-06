@@ -27,8 +27,8 @@ ui-border = "#454B54"
 These four keys affect application chrome, not terminal foreground, cursor or
 ANSI colors. Presets include their own terminal palette. Existing presets,
 per-profile themes and theme-file/config override precedence still apply.
-Saving the config reloads colors; no shell restart is needed. The default and
-automatic system-theme mapping remain unchanged.
+Saving the config reloads colors; no shell restart is needed. With no configured
+theme, a dark system uses `copper-dark` and a light system uses `copper-light`.
 
 ## Validation
 

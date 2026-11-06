@@ -18,6 +18,18 @@ pub struct Color {
 }
 
 impl Color {
+    /// Blend toward `other` by `t` (0 keeps `self`, 1 gives `other`).
+    #[must_use]
+    pub fn mix(self, other: Self, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let blend = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+        Self {
+            r: blend(self.r, other.r),
+            g: blend(self.g, other.g),
+            b: blend(self.b, other.b),
+        }
+    }
+
     /// Build a color from 8-bit channels.
     #[must_use]
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {

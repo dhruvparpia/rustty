@@ -22,9 +22,9 @@
 
 # Theme preset. Known: predawn, catppuccin-mocha, gruvbox-dark, one-dark,
 # solarized-dark, solarized-light, copper-dark, copper-light.
-# An unknown name warns and falls back to predawn. A [theme]
+# An unknown name warns and falls back to copper-dark. A [theme]
 # table (below) can name a theme file and override single colors.
-theme = "predawn"
+theme = "copper-dark"
 
 # Font family, as installed on the system.
 font = "Cascadia Mono"
@@ -88,7 +88,7 @@ editor = "code --goto {file}:{line}:{column}"
 # gruvbox-dark, one-dark, solarized-dark, solarized-light, copper-dark, copper-light.
 # With no `theme` key
 # the app follows the Windows dark/light setting (THEME-010): light picks
-# solarized-light, dark picks predawn.
+# copper-light, dark picks copper-dark.
 #
 # A [theme] table replaces the plain `theme` key. `name` picks the base: a
 # preset, or the name of themes\<name>.toml beside this file (that file may

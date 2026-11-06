@@ -145,13 +145,7 @@ pub(crate) const fn color_key(c: Color) -> u32 {
 /// Blend two colors: `t` is the fraction of `to` (0 = `from`, 1 = `to`).
 /// Used for dimmed tab-bar labels on the predawn palette.
 fn mix(from: Color, to: Color, t: f32) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    let blend = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-    Color {
-        r: blend(from.r, to.r),
-        g: blend(from.g, to.g),
-        b: blend(from.b, to.b),
-    }
+    from.mix(to, t)
 }
 
 /// Measure cell geometry for the configured font at `dpi` (FONT-002/011).

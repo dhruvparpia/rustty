@@ -765,4 +765,53 @@ mod tests {
         feed(&mut p, &mut g, "\x1b[1;2r\x1b[1;1H\x1b[5B");
         assert_eq!(p.cursor_row, 1);
     }
+
+    #[test]
+    fn sgr_16_colors_use_the_parser_palette() {
+        // Break caught: SGR 30-37 reading the fixed table, so every theme
+        // shows the same colours.
+        let mut p = Parser::new();
+        let mut g = grid();
+        p.palette[1] = Color::rgb(1, 2, 3);
+        p.palette[4] = Color::rgb(4, 5, 6);
+        feed(&mut p, &mut g, "\x1b[31;44m");
+        assert_eq!(p.pen_fg, Some(Color::rgb(1, 2, 3)));
+        assert_eq!(p.pen_bg, Some(Color::rgb(4, 5, 6)));
+    }
+
+    #[test]
+    fn sgr_bright_and_256_low_indices_use_the_parser_palette() {
+        // Break caught: bright colours or 38;5;n bypassing the theme.
+        let mut p = Parser::new();
+        let mut g = grid();
+        p.palette[9] = Color::rgb(9, 9, 9);
+        p.palette[2] = Color::rgb(2, 2, 2);
+        p.palette[12] = Color::rgb(12, 12, 12);
+        feed(&mut p, &mut g, "\x1b[91;104m");
+        assert_eq!(p.pen_fg, Some(Color::rgb(9, 9, 9)));
+        assert_eq!(p.pen_bg, Some(Color::rgb(12, 12, 12)));
+        feed(&mut p, &mut g, "\x1b[38;5;2m");
+        assert_eq!(p.pen_fg, Some(Color::rgb(2, 2, 2)));
+    }
+
+    #[test]
+    fn sgr_256_cube_ignores_the_palette() {
+        // Break caught: the palette leaking into the fixed 6x6x6 cube.
+        let mut p = Parser::new();
+        let mut g = grid();
+        p.palette = [Color::rgb(1, 1, 1); 16];
+        feed(&mut p, &mut g, "\x1b[38;5;196m");
+        assert_eq!(p.pen_fg, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn reset_keeps_the_palette() {
+        // Break caught: ESC c dropping the theme back to the fixed colours.
+        let mut p = Parser::new();
+        let mut g = grid();
+        p.palette[1] = Color::rgb(1, 2, 3);
+        feed(&mut p, &mut g, "\x1bc");
+        feed(&mut p, &mut g, "\x1b[31m");
+        assert_eq!(p.pen_fg, Some(Color::rgb(1, 2, 3)));
+    }
 }

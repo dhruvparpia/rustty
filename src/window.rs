@@ -783,6 +783,7 @@ fn set_theme(hwnd: HWND, idx: usize) {
         for problem in problems {
             eprintln!("rustty: {problem}");
         }
+        s.app.set_palette(theme.palette);
         s.theme = theme;
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -1969,6 +1970,7 @@ fn init_window(hwnd: HWND) {
     if let Some(s) = state_mut(hwnd) {
         s.renderer = renderer;
         sync_chrome(s);
+        s.app.set_palette(s.theme.palette);
         if s.restore.is_some() {
             // TAB-026: rebuild saved tabs; shells spawn after the tab bar
             // has taken its final height.
@@ -5811,6 +5813,7 @@ fn reload_config(s: &mut WindowState, hwnd: HWND) {
     }
     let font = cfg.font();
     let font_changed = font != s.font;
+    s.app.set_palette(new_theme.palette);
     s.theme = new_theme;
     s.cfg = cfg;
     // PALETTE-001: shortcuts and profiles changed; rebuild the registry on
@@ -5934,6 +5937,7 @@ fn apply_profile_theme(s: &mut WindowState, spec: &ProfileSpec) {
     for problem in &problems {
         eprintln!("rustty: {problem}");
     }
+    s.app.set_palette(theme.palette);
     s.theme = theme;
 }
 
@@ -6313,6 +6317,7 @@ fn cycle_theme(hwnd: HWND, delta: i32) {
     let n = theme::PRESETS.len() as i32;
     let idx = (active_theme_index(s) as i32 + delta).rem_euclid(n) as usize;
     s.theme = Theme::preset(theme::PRESETS[idx]).unwrap_or_default();
+    s.app.set_palette(s.theme.palette);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 

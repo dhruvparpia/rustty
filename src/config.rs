@@ -25,7 +25,7 @@ pub const DEFAULT_FONT_SIZE: f32 = 11.0;
 pub const DEFAULT_LINE_HEIGHT: f32 = 1.2;
 
 /// Default theme preset name (SPEC §14).
-pub const DEFAULT_THEME: &str = "predawn";
+pub const DEFAULT_THEME: &str = "copper-dark";
 
 /// Default scrollback depth (matches [`Grid::new`](crate::grid::Grid::new)).
 pub const DEFAULT_SCROLLBACK: usize = 1000;
