@@ -150,7 +150,7 @@ JSON-RPC 2.0 (same base as MCP, so the adapter is a thin encoder):
     `RUSTTY_AUTOMATION_TOKEN` and only `rustty mcp` reads it, so running a command
     inside a boss session is not enough to write. `tab.open` and `pane.split` refuse
     it in `env`, and it is never in `WSLENV`. The boss starts with
-    `--strict-mcp-config` and `--permission-mode default`. Anything the boss session
+    `--strict-mcp-config` and `--permission-mode manual`. Anything the boss session
     starts itself still inherits the variable and can read it: this scopes a grant,
     and is not a boundary against code running as this user.
 13. **Discovery is a claim to check** (§2, amendment 5). The folder is writable by

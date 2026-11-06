@@ -127,9 +127,23 @@ One real run: Claude Code 2.1.319 as boss in a scratch Git repository, launched 
 | Stops before merging | Asked the person. `master` unchanged, nothing pushed |
 | Write token on disk | `mcp.json` holds only `${RUSTTY_AUTOMATION_TOKEN}` |
 | Permission prompts in the default mode | Not run. Write tools were approved by auto mode in this run |
-| After this run: inline `--mcp-config` and `--append-system-prompt`, `--strict-mcp-config`, `--permission-mode default`, the Yes/No dialog naming the folder | Not run end to end, since no test may start the real `claude` as a session. Flags checked against `claude --help` 2.1.319, whose help lists `manual` but whose parser also accepts `default`. The command line is parsed back with `CommandLineToArgvW` and is about 2,800 characters with ordinary paths. To be run by the owner |
+| After this run: inline `--mcp-config` and `--append-system-prompt`, `--strict-mcp-config`, `--permission-mode manual`, the Yes/No dialog naming the folder | Not run end to end, since no test may start the real `claude` as a session. Flags checked against `claude --help` 2.1.319, whose help lists `manual` but whose parser also accepts `default`. The command line is parsed back with `CommandLineToArgvW` and is about 2,800 characters with ordinary paths. To be run by the owner |
 | A worker asking a permission question, several workers at once, a real merge | Not run |
 | Boss after a restart | Not supported: a resumed `claude --continue` has neither the tools nor a token. Start a new boss |
+
+## Boss Agent after the security fixes, 2026-11-06
+
+A second real run, on the final launch: inline config and brief, `--strict-mcp-config`, `--permission-mode manual`, and the folder dialog. Keys were sent as window messages in the order a real keypress produces them.
+
+| Check | Result |
+|---|---|
+| Folder dialog, then trust prompt | Both shown. The first attempt found a real bug: a palette command that opens a dialog swallowed the next key, here the Enter on the trust prompt. Fixed. There is no dedicated test: this run is the proof |
+| Boss in manual mode | Status line reads "manual mode on" |
+| `tab_open` permission prompt | Shown before the worker starts. Row reads "Do you want to proceed?" in the Needs you colour |
+| Worker and result | Own worktree and branch, commit with only `hello.txt`, boss checked the diff |
+| Stops before merging | Did not merge or push, and left the worktree and tab open until told |
+| Token scoping on a real window | Dispatcher tests only |
+| A worker's permission prompt refused by the server | Dispatcher tests only: this worker was not asked anything, since it ran in the owner's default mode |
 
 ## Real Claude Code in the sidebar (STATUS-001, STATUS-002), 2026-11-06
 

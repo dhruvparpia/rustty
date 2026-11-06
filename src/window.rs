@@ -5540,8 +5540,15 @@ fn handle_palette_keydown(hwnd: HWND, vk: u16) -> bool {
         0x26 => step_palette(hwnd, -1),
         0x28 => step_palette(hwnd, 1),
         0x0D | 0x0A => {
+            // Set before running it. A command that opens a dialog has this
+            // key's character delivered inside the dialog's message loop, so
+            // setting it afterwards would swallow the next key instead.
+            if let Some(s) = state_mut(hwnd) {
+                s.suppress_char = true;
+            }
             execute_palette_current(hwnd);
-            true
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            return true;
         }
         0x08 => {
             if let Some(s) = state_mut(hwnd)

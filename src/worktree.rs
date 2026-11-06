@@ -248,12 +248,19 @@ pub fn discover() -> Vec<Worktree> {
         "list".into(),
         "--porcelain".into(),
     ];
-    let Ok(out) = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(&args)
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        /// `CREATE_NO_WINDOW`: a GUI app must not flash a console.
+        const NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(NO_WINDOW);
+    }
+    let Ok(out) = command.output() else {
         return Vec::new();
     };
     if !out.status.success() {

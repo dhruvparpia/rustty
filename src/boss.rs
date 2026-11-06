@@ -87,7 +87,7 @@ pub fn command(exe: &str, root: &str) -> Vec<String> {
         "--strict-mcp-config".to_string(),
         // A saved setting can't turn the permission prompts off.
         "--permission-mode".to_string(),
-        "default".to_string(),
+        "manual".to_string(),
     ]
 }
 
@@ -129,7 +129,7 @@ mod tests {
         // Break caught: a project's own .mcp.json starting servers that inherit
         // the token, or a saved setting turning prompts off.
         assert!(args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
-        assert_eq!(at("--permission-mode"), "default");
+        assert_eq!(at("--permission-mode"), "manual");
         for write in ["tab_open", "tab_close", "send-text", "pane_split"] {
             assert!(!READ_ONLY_TOOLS.contains(write), "{write}");
         }
