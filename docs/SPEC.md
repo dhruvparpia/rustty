@@ -789,6 +789,8 @@ The product must support common terminal/TUI applications.
 
 | ID | Requirement | Priority |
 |---|---|---|
+| STATUS-001 | rustty shall implement the Program Status Protocol (OSC 7501, revision 0.4): answer its support query and show what programs report on their row, ahead of any status it would guess. On Windows the answer is sent as console key events, because the console's input layer drops an OSC reply. | P1 |
+| STATUS-002 | For a known agent that does not report through OSC 7501, rustty shall read a question off the agent's screen and show it as Needs you with the question's text. A control sequence with a private marker shall never run as the plain command. | P1 |
 | WORKTREE-010 | "New Session in Worktree" shall create a Git worktree on a new branch under the main checkout's `.worktrees` folder, keep that folder out of `git status`, and open a session in it. A taken name gets a number. Sessions in these worktrees group with their project in the sidebar. | P1 |
 | BRAIN-001 | "Create Project Brain" shall create `BRAIN.md`, `roadmap.md` and `decisions.md` in `.rustty/brain`, and never overwrite a file that exists. | P2 |
 | BOARD-001 | Ctrl+Shift+R shall show the project's `roadmap.md` as a board with the columns Idea bank, Backlog, In progress and Done. The file stays hand-editable, is read again before every change, and keeps every line that is not a card. Cards can be added, and moved by keyboard or drag. Enter opens a session for a card, W opens one in its own worktree, and both move the card to In progress. | P2 |

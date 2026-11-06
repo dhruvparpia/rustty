@@ -507,6 +507,7 @@ pub mod server {
                         | ParserEvent::Notify(_)
                         | ParserEvent::Progress(_)
                         | ParserEvent::CwdPath(_)
+                        | ParserEvent::ProgramStatus(_)
                         | ParserEvent::Bell
                         | ParserEvent::PromptStart
                         | ParserEvent::CommandStart

@@ -1390,6 +1390,7 @@ impl Renderer {
             // Red in every preset, so it stands apart from the accent.
             rail::Status::NeedsYou => theme.palette[1],
             rail::Status::Interrupted => theme.palette[3],
+            rail::Status::Failed => theme.palette[1],
             rail::Status::Working => surface.mix(ui.accent, self.rail_pulse),
             rail::Status::Finished => theme.palette[2],
             rail::Status::Idle => surface.mix(ui.muted, 0.6),

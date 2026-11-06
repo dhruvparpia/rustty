@@ -396,6 +396,12 @@ pub struct Pane {
     interrupted: Option<String>,
     /// Where the agent, or else the shell, is really running.
     process_cwd: Option<String>,
+    /// What programs have reported about themselves (STATUS-001).
+    program_status: crate::program_status::Records,
+    /// What the agent is asking on screen (STATUS-002).
+    screen_question: Option<String>,
+    /// The output the screen was last read at.
+    screen_read_at: Option<std::time::Instant>,
     /// What the sessions sidebar remembers about this pane.
     activity: crate::rail::Activity,
     /// Grid changed since the renderer last asked (repaint hint).
@@ -445,6 +451,9 @@ impl Pane {
             agent: None,
             interrupted: None,
             process_cwd: None,
+            program_status: crate::program_status::Records::default(),
+            screen_question: None,
+            screen_read_at: None,
             activity: crate::rail::Activity::default(),
             dirty: true,
             selection: None,
@@ -484,6 +493,9 @@ impl Pane {
             agent: None,
             interrupted: None,
             process_cwd: None,
+            program_status: crate::program_status::Records::default(),
+            screen_question: None,
+            screen_read_at: None,
             activity: crate::rail::Activity::default(),
             dirty: true,
             selection: None,
@@ -718,8 +730,10 @@ impl Pane {
                         self.attention_message = Some(crate::rail::clean_message(&text));
                     }
                     ParserEvent::Progress(active) => self.progress = active,
+                    ParserEvent::ProgramStatus(report) => self.program_status.apply(report),
                     ParserEvent::PromptStart => {
                         self.progress = false;
+                        self.program_status.program_gone();
                         self.at_prompt = true;
                         self.command_running = false;
                         let abs = self.cursor_abs();
@@ -972,6 +986,10 @@ impl Pane {
 
     /// Record the agent CLI now running here.
     pub fn set_agent(&mut self, agent: Option<&'static str>) {
+        if self.agent.is_some() && agent.is_none() {
+            // It ended without a new prompt to say so.
+            self.program_status.program_gone();
+        }
         self.agent = agent;
         if agent.is_some() {
             self.interrupted = None;
@@ -1014,6 +1032,76 @@ impl Pane {
             .or_else(|| self.agent.filter(|_| self.saved_cwd().is_some()))
     }
 
+    /// Read the agent's question off the screen, when new output arrived.
+    fn read_screen(&mut self) {
+        /// Rows from the bottom a prompt can occupy.
+        const ROWS: usize = 24;
+        let Some(agent) = self.agent else {
+            self.screen_question = None;
+            return;
+        };
+        if self.screen_read_at == self.last_output {
+            return;
+        }
+        self.screen_read_at = self.last_output;
+        let rows = self.grid.rows;
+        let lines: Vec<String> = (rows.saturating_sub(ROWS)..rows)
+            .filter_map(|row| self.grid.line_text(row))
+            .collect();
+        self.screen_question = crate::agents::waiting_on_screen(agent, &lines);
+    }
+
+    /// The status a program reported, when it reported one.
+    fn reported_status(&mut self, viewed: bool) -> Option<crate::rail::Status> {
+        use crate::program_status::State;
+        use crate::rail::Status;
+        let state = self.program_status.summary()?.state;
+        Some(match state {
+            State::Blocked => Status::NeedsYou,
+            State::Working => Status::Working,
+            State::Idle => Status::Idle,
+            State::Done | State::Error => {
+                if viewed {
+                    self.program_status.mark_seen();
+                    return self.reported_status(viewed);
+                }
+                if state == State::Done {
+                    Status::Finished
+                } else {
+                    Status::Failed
+                }
+            }
+        })
+    }
+
+    /// What the row should say for `status`, when there is more to say than
+    /// its name: a program's report, or an unseen notification.
+    #[must_use]
+    pub fn status_message(&self, status: crate::rail::Status) -> Option<String> {
+        use crate::rail::Status;
+        if let Some(record) = self.program_status.summary() {
+            if let Some(msg) = &record.msg {
+                return Some(crate::rail::clean_message(msg));
+            }
+            if status == Status::NeedsYou {
+                let said = match record.kind.as_deref() {
+                    Some("permission") => "Needs your permission",
+                    Some("question") => "Has a question for you",
+                    Some("auth") => "Needs you to sign in",
+                    _ => return None,
+                };
+                return Some(said.to_string());
+            }
+            return None;
+        }
+        if status != Status::NeedsYou {
+            return None;
+        }
+        self.screen_question
+            .clone()
+            .or_else(|| self.attention_message().map(str::to_string))
+    }
+
     /// Forget work the sidebar was not watching, so showing it again does not
     /// report a false "Finished".
     pub const fn reset_rail_activity(&mut self) {
@@ -1026,18 +1114,32 @@ impl Pane {
         if viewed {
             self.mark_seen();
         }
+        self.read_screen();
+        // Claude Code's title says when it is busy, and its status bar redraws
+        // when it is not, so its output says nothing.
+        let title_tells = self.agent == Some("claude");
         let signals = crate::rail::Signals {
             title: self.title.as_deref().unwrap_or(""),
             command_running: self.command_running,
             exited: matches!(self.shell.state(), crate::shell::ShellState::Exited(_)),
             attention: self.attention,
             progress: self.progress,
-            output_age: self.output_age(),
+            output_age: self.output_age().filter(|_| !title_tells),
             input_age: self.input_age(),
         };
         let status = self.activity.step(&signals, viewed, now_ms);
-        if self.interrupted.is_some() && !signals.exited && status != crate::rail::Status::NeedsYou
-        {
+        let exited = signals.exited;
+        if exited {
+            self.program_status.program_gone();
+        }
+        // A program saying what it is doing beats any guess from the outside.
+        if let Some(reported) = self.reported_status(viewed) {
+            return reported;
+        }
+        if self.screen_question.is_some() && !exited {
+            return crate::rail::Status::NeedsYou;
+        }
+        if self.interrupted.is_some() && !exited && status != crate::rail::Status::NeedsYou {
             return crate::rail::Status::Interrupted;
         }
         status
@@ -1548,6 +1650,107 @@ mod tests {
             Some("C:/old"),
             "no agent: the shell's report wins"
         );
+    }
+
+    #[test]
+    fn a_program_saying_it_waits_shows_as_needs_you_even_while_viewed() {
+        // Break caught: Claude's trust prompt reading as "Ready".
+        use crate::rail::Status;
+        let mut pane = Pane::with_size(40, 5, 10);
+        // base64 of "Approve?"
+        pane.feed(b"\x1b]7501;state=blocked:kind=permission:msg=QXBwcm92ZT8=\x07");
+        assert_eq!(pane.rail_step(true, 0), Status::NeedsYou);
+        assert_eq!(pane.rail_step(false, 0), Status::NeedsYou);
+        assert_eq!(
+            pane.status_message(Status::NeedsYou).as_deref(),
+            Some("Approve?")
+        );
+        pane.feed(b"\x1b]7501;state=blocked:kind=question\x07");
+        assert_eq!(
+            pane.status_message(Status::NeedsYou).as_deref(),
+            Some("Has a question for you")
+        );
+    }
+
+    #[test]
+    fn a_report_beats_guessing_from_output() {
+        // Break caught: a status bar redrawing making an idle agent "Working".
+        use crate::rail::Status;
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.feed(b"\x1b]7501;state=idle\x07noise");
+        assert_eq!(pane.rail_step(false, 0), Status::Idle);
+        pane.feed(b"\x1b]7501;state=working\x07");
+        assert_eq!(pane.rail_step(false, 10), Status::Working);
+    }
+
+    #[test]
+    fn a_result_shows_until_seen_and_then_gives_way() {
+        use crate::rail::Status;
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.feed(b"\x1b]7501;state=done\x07");
+        assert_eq!(pane.rail_step(false, 0), Status::Finished);
+        assert_eq!(
+            pane.rail_step(true, 1),
+            Status::Working,
+            "falls back: output just arrived"
+        );
+        pane.feed(b"\x1b]7501;state=error\x07");
+        assert_eq!(pane.rail_step(false, 2), Status::Failed);
+    }
+
+    #[test]
+    fn an_agent_that_ended_is_not_working_any_more() {
+        // Break caught: a killed agent showing Working forever.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.set_agent(Some("claude"));
+        pane.feed(b"\x1b]7501;state=working\x07");
+        assert!(pane.program_status.summary().is_some());
+        pane.set_agent(None);
+        assert!(pane.program_status.summary().is_none());
+        pane.feed(b"\x1b]7501;state=blocked\x07\x1b]133;A\x07");
+        assert!(
+            pane.program_status.summary().is_none(),
+            "a new prompt ends it too"
+        );
+    }
+
+    #[test]
+    fn an_agents_question_on_screen_needs_you_until_it_is_answered() {
+        use crate::rail::Status;
+        let mut pane = Pane::with_size(60, 10, 10);
+        pane.set_agent(Some("claude"));
+        pane.feed(
+            "Do you want to create a.txt?\r\n\u{276F} 1. Yes\r\n  2. No\r\nEsc to cancel"
+                .as_bytes(),
+        );
+        assert_eq!(
+            pane.rail_step(true, 0),
+            Status::NeedsYou,
+            "even while viewed"
+        );
+        assert_eq!(
+            pane.status_message(Status::NeedsYou).as_deref(),
+            Some("Do you want to create a.txt?")
+        );
+        pane.feed(b"\x1b[2J\x1b[H");
+        assert_ne!(pane.rail_step(true, 1), Status::NeedsYou);
+        // Not an agent: those words mean nothing.
+        let mut shell = Pane::with_size(60, 10, 10);
+        shell.feed("Do you want to create a.txt?\r\n1. Yes\r\nEsc to cancel".as_bytes());
+        assert_ne!(shell.rail_step(false, 0), Status::NeedsYou);
+    }
+
+    #[test]
+    fn a_redrawing_status_bar_is_not_an_agent_working() {
+        // Break caught: Claude showing Working long after it finished, and
+        // Finished without doing anything, because its status line redraws.
+        use crate::rail::Status;
+        let mut pane = Pane::with_size(60, 10, 10);
+        pane.set_agent(Some("claude"));
+        pane.feed(b"\x1b]0;\xE2\x9C\xB3 Done\x07status bar redraw");
+        assert_eq!(pane.rail_step(false, 0), Status::Idle);
+        pane.feed(b"\x1b]0;\xE2\xA0\x82 Busy\x07");
+        assert_eq!(pane.rail_step(false, 10), Status::Working);
     }
 
     #[test]

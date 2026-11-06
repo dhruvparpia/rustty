@@ -97,6 +97,7 @@ pub mod board;
 )]
 mod perf_bench;
 pub mod portable;
+pub mod program_status;
 pub mod project_brain;
 pub mod rail;
 /// Terminal search over screen + scrollback (SPEC SEARCH-001..015).

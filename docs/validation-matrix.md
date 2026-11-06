@@ -79,6 +79,21 @@ Driven through the real window, with screenshots read by hand.
 | Windows animation effects off | Not run live, to leave system settings alone. Covered by a unit test |
 | Windows 10 | Not run: no machine |
 
+## Real Claude Code in the sidebar (STATUS-001, STATUS-002), 2026-11-06
+
+Claude Code 2.1.319 in a scratch folder, in a test window that was not in the foreground.
+
+| Check | Result |
+|---|---|
+| Trust prompt | Row reads "Trust this folder?" in the Needs you colour |
+| Permission prompt | Row reads "Do you want to create a.txt?" in the Needs you colour |
+| Working, then Ready, then Finished while unseen | As expected, in an earlier run |
+| Text after a link or startup | No longer underlined |
+| OSC 7501 reply crossing ConPTY | A probe reads the reply, as key events. The console answers DA1 itself and first, so a program that treats DA1 as "no reply coming" concludes there is no support. Claude Code still shows its title glyph, so it most likely does this. The reports themselves are covered by unit tests only |
+| Display after a redraw with a startup notice above the prompt | **Open bug:** some text garbled and a line doubled. Not diagnosed |
+| Answering a prompt, then the row clearing | Not confirmed live: the test's Esc did not reach Claude Code. A unit test covers the screen changing |
+| Codex, Gemini | Not run. Their questions are not read off the screen |
+
 ## Roadmap board, project brain, worktree sessions, 2026-11-06
 
 Driven through the real window against a scratch Git repository.

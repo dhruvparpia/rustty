@@ -44,6 +44,8 @@ const MESSAGE_MAX_CHARS: usize = 120;
 pub enum Status {
     /// Asked for attention: a bell or a notification.
     NeedsYou,
+    /// A program reported that it failed (STATUS-001).
+    Failed,
     /// A restart stopped its agent (RESTORE-003).
     Interrupted,
     /// Busy right now.
@@ -80,10 +82,9 @@ pub struct Signals<'a> {
 /// Whether a title starts with a spinner: agent CLIs animate one while busy.
 #[must_use]
 pub fn has_spinner(title: &str) -> bool {
-    title
-        .chars()
-        .next()
-        .is_some_and(|c| ('\u{2801}'..='\u{28FF}').contains(&c))
+    title.chars().next().is_some_and(|c| {
+        ('\u{2801}'..='\u{28FF}').contains(&c) || ('\u{25D0}'..='\u{25D3}').contains(&c)
+    })
 }
 
 /// Whether the pane is busy right now.
@@ -216,12 +217,13 @@ impl Activity {
 pub fn most_urgent(statuses: impl IntoIterator<Item = Status>) -> Status {
     let rank = |status: &Status| match status {
         Status::NeedsYou => 0,
-        Status::Interrupted => 1,
-        Status::Working => 2,
-        Status::Finished => 3,
-        Status::Idle => 4,
-        Status::Background => 5,
-        Status::Exited => 6,
+        Status::Failed => 1,
+        Status::Interrupted => 2,
+        Status::Working => 3,
+        Status::Finished => 4,
+        Status::Idle => 5,
+        Status::Background => 6,
+        Status::Exited => 7,
     };
     statuses
         .into_iter()
@@ -235,6 +237,7 @@ pub fn clean_title(title: &str) -> &str {
     let is_mark = |c: char| {
         c.is_whitespace()
             || ('\u{2800}'..='\u{28FF}').contains(&c)
+            || ('\u{25D0}'..='\u{25D3}').contains(&c)
             || matches!(
                 c,
                 '\u{2733}' | '\u{2736}' | '\u{273B}' | '\u{273D}' | '\u{2722}' | '\u{FE0F}'
@@ -305,6 +308,12 @@ pub fn detail_for(status: Status, message: Option<&str>) -> String {
     match (status, message) {
         (Status::NeedsYou, Some(message)) if !message.is_empty() => message.to_string(),
         (Status::NeedsYou, _) => "Needs you".to_string(),
+        (Status::Working | Status::Finished | Status::Failed, Some(message))
+            if !message.is_empty() =>
+        {
+            message.to_string()
+        }
+        (Status::Failed, _) => "Failed".to_string(),
         (Status::Interrupted, Some(agent)) if !agent.is_empty() => {
             format!("Interrupted. Click to resume {agent}")
         }
@@ -1003,5 +1012,40 @@ mod tests {
             "api"
         );
         assert_eq!(project_of(Some("C:/src/api")), "api");
+    }
+
+    #[test]
+    fn a_reported_message_shows_on_the_row() {
+        assert_eq!(
+            detail_for(Status::Working, Some("Running tests")),
+            "Running tests"
+        );
+        assert_eq!(detail_for(Status::Working, None), "Working");
+        assert_eq!(
+            detail_for(Status::Failed, Some("Build broke")),
+            "Build broke"
+        );
+        assert_eq!(detail_for(Status::Failed, None), "Failed");
+        assert_eq!(detail_for(Status::Finished, Some("All green")), "All green");
+        assert_eq!(
+            most_urgent([Status::Working, Status::Failed]),
+            Status::Failed
+        );
+        assert_eq!(
+            most_urgent([Status::Failed, Status::NeedsYou]),
+            Status::NeedsYou
+        );
+    }
+
+    #[test]
+    fn a_circle_spinner_is_not_part_of_the_title() {
+        assert_eq!(clean_title("\u{25D0} Claude Code"), "Claude Code");
+    }
+
+    #[test]
+    fn a_circle_spinner_counts_as_a_spinner() {
+        assert!(has_spinner("\u{25D0} Claude Code"));
+        assert!(has_spinner("\u{25D3} x"));
+        assert!(!has_spinner("\u{2733} Claude Code"));
     }
 }

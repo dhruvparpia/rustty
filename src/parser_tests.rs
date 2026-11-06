@@ -880,4 +880,57 @@ mod tests {
             vec![ParserEvent::Notify("2 tests failed".to_string())]
         );
     }
+
+    #[test]
+    fn a_program_can_ask_whether_status_reports_are_welcome() {
+        // Break caught: Claude Code staying silent because nothing answered.
+        let mut p = Parser::new();
+        let mut g = grid();
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]7501;?\x1b\\"),
+            vec![ParserEvent::Respond(crate::program_status::query_reply())]
+        );
+        assert_eq!(feed(&mut p, &mut g, "\x1b]7501;state=bad\x07"), vec![]);
+    }
+
+    #[test]
+    fn a_status_report_reaches_the_pane() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        let events = feed(&mut p, &mut g, "\x1b]7501;state=working\x07");
+        assert!(
+            matches!(events.as_slice(), [ParserEvent::ProgramStatus(_)]),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_private_marker_never_means_the_plain_command() {
+        // Break caught: Claude Code's `CSI > 4 m` (a keyboard mode) turning on
+        // underline for every later character; `CSI ? u` moving the cursor.
+        let mut p = Parser::new();
+        let mut g = grid();
+        feed(&mut p, &mut g, "\x1b[>4m\x1b[>4;2m\x1b[>0q\x1b[=1m\x1b[<1m");
+        assert_eq!(p.pen_attrs, crate::grid::CellAttribute::empty());
+        feed(&mut p, &mut g, "\x1b[3;4H\x1b[s\x1b[5;6H\x1b[?u");
+        assert_eq!((p.cursor_row, p.cursor_col), (4, 5), "`? u` is a query");
+        feed(&mut p, &mut g, "\x1b[?s\x1b[9;9H\x1b[u");
+        assert_eq!((p.cursor_row, p.cursor_col), (2, 3), "`? s` saved nothing");
+    }
+
+    #[test]
+    fn real_private_modes_still_work() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        let events = feed(&mut p, &mut g, "\x1b[?25l");
+        assert!(
+            events.contains(&ParserEvent::CursorVisibility(false)),
+            "{events:?}"
+        );
+        feed(&mut p, &mut g, "\x1b[2;3H");
+        let events = feed(&mut p, &mut g, "\x1b[?6n");
+        assert_eq!(events, vec![ParserEvent::Respond(b"\x1b[2;3R".to_vec())]);
+        feed(&mut p, &mut g, "\x1b[4m");
+        assert_ne!(p.pen_attrs, crate::grid::CellAttribute::empty());
+    }
 }

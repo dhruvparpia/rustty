@@ -40,6 +40,10 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Added
 
+- The sidebar now shows when Claude Code is waiting on you, with its actual question, read from its
+  screen. Programs can also report their status directly through OSC 7501.
+- Fixed: `CSI > 4 m`, which Claude Code sends at startup, turned on underline for all later text.
+  A private marker now never runs as the plain command.
 - Worktree sessions, a project brain and a roadmap board: "New Session in Worktree" gives a session
   its own branch and folder; "Create Project Brain" adds plain files agents can read in
   `.rustty/brain`; Ctrl+Shift+R shows `roadmap.md` as a board where each card can open a session.

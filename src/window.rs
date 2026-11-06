@@ -3316,13 +3316,12 @@ fn build_rail_rows(s: &mut WindowState, focused: bool, now_ms: u64) -> Vec<rail:
         };
         let viewed = i == active && focused;
         let mut statuses = Vec::new();
-        let mut message = None;
+        let mut messages = Vec::new();
         let mut stopped = None;
         tab.for_each_pane(|pane, _| {
-            statuses.push(pane.rail_step(viewed, now_ms));
-            if message.is_none() {
-                message = pane.attention_message().map(str::to_string);
-            }
+            let status = pane.rail_step(viewed, now_ms);
+            statuses.push(status);
+            messages.push((status, pane.status_message(status)));
             if stopped.is_none() {
                 stopped = pane.interrupted().map(str::to_string);
             }
@@ -3342,7 +3341,10 @@ fn build_rail_rows(s: &mut WindowState, focused: bool, now_ms: u64) -> Vec<rail:
                 if status == rail::Status::Interrupted {
                     stopped.as_deref()
                 } else {
-                    message.as_deref()
+                    messages
+                        .iter()
+                        .find(|(pane_status, _)| *pane_status == status)
+                        .and_then(|(_, message)| message.as_deref())
                 },
             ),
             project,

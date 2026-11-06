@@ -26,6 +26,8 @@ pub enum ParserEvent {
     Title(String),
     /// OSC 9 or OSC 777;notify: a program is asking for attention.
     Notify(String),
+    /// OSC 7501: a program reports its status (STATUS-001).
+    ProgramStatus(crate::program_status::Report),
     /// OSC 9;9: a prompt reports its folder as a plain path.
     CwdPath(String),
     /// OSC 9;4: a program reports progress (`true`) or that it has stopped.
@@ -819,6 +821,13 @@ impl Parser {
                         events.push(ParserEvent::Hyperlink(Some(uri.to_string())));
                     }
                 }
+                "7501" => match crate::program_status::parse(rest) {
+                    crate::program_status::Report::Query => {
+                        events.push(ParserEvent::Respond(crate::program_status::query_reply()));
+                    }
+                    crate::program_status::Report::Ignored => {}
+                    report => events.push(ParserEvent::ProgramStatus(report)),
+                },
                 "133" => {
                     let (marker, code) = match rest.split_once(':') {
                         Some((m, c)) => (m, c.parse().ok()),
@@ -938,6 +947,14 @@ impl Parser {
         printed: &mut bool,
     ) {
         if !self.intermediates.is_empty() {
+            return;
+        }
+        // A private marker makes it a different command: `CSI > 4 m` is a
+        // keyboard mode, not underline, and `CSI ? u` a query, not a restore.
+        // Only the DEC forms this parser really implements get through.
+        if !self.private.is_empty()
+            && !(self.private == b"?" && matches!(final_byte, b'h' | b'l' | b'n' | b'J' | b'K'))
+        {
             return;
         }
         let params = self.param_list();

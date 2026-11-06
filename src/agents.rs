@@ -99,6 +99,38 @@ pub fn inspect(table: &[Proc], root: u32) -> Inspection {
     }
 }
 
+/// What an agent is asking on screen, when it stopped to ask (STATUS-002). This
+/// reads an agent's own screen, so it is a best guess for agents that do not
+/// report their status through OSC 7501.
+#[must_use]
+pub fn waiting_on_screen(agent: &str, lines: &[String]) -> Option<String> {
+    if agent != "claude" {
+        return None;
+    }
+    let line_is = |wanted: &dyn Fn(&str) -> bool| lines.iter().any(|line| wanted(line.trim()));
+    let hint =
+        line_is(&|line| line.starts_with("Esc to cancel") || line.starts_with("Enter to confirm"));
+    if !hint {
+        return None;
+    }
+    if line_is(&|line| line.ends_with("Yes, I trust this folder")) {
+        return Some("Trust this folder?".to_string());
+    }
+    let has_yes = line_is(&|line| {
+        line.trim_start_matches('\u{276F}')
+            .trim_start()
+            .starts_with("1. Yes")
+    });
+    if !has_yes {
+        return None;
+    }
+    lines
+        .iter()
+        .map(|line| line.trim())
+        .find(|line| line.starts_with("Do you want"))
+        .map(str::to_string)
+}
+
 /// Every running process, or nothing when the system will not say.
 #[cfg(windows)]
 #[allow(unsafe_code, reason = "RESTORE-002: Toolhelp process snapshot FFI")]
@@ -319,5 +351,66 @@ mod tests {
         let want = std::env::current_dir().expect("current dir");
         let want = clean_process_cwd(&want.to_string_lossy());
         assert_eq!(process_cwd(std::process::id()), want);
+    }
+
+    fn screen(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_string()).collect()
+    }
+
+    #[test]
+    fn claudes_permission_prompt_is_read_from_the_screen() {
+        // Copied from a real session. Break caught: it reading as "Finished".
+        let lines = screen(&[
+            " Create file",
+            " a.txt",
+            "  1 x",
+            " Do you want to create a.txt?",
+            " \u{276F} 1. Yes",
+            "   2. Yes, and switch to accept edits (auto-approve file edits and common file",
+            "      commands) for this session (shift+tab)",
+            "   3. No",
+            "",
+            " Esc to cancel \u{b7} Tab to amend",
+        ]);
+        assert_eq!(
+            waiting_on_screen("claude", &lines).as_deref(),
+            Some("Do you want to create a.txt?")
+        );
+    }
+
+    #[test]
+    fn claudes_trust_prompt_is_read_from_the_screen() {
+        let lines = screen(&[
+            " Quick safety check: Is this a project you created or one you trust?",
+            " \u{276F} No, exit",
+            "   Yes, I trust this folder",
+            "",
+            " Enter to confirm \u{b7} Esc to cancel",
+        ]);
+        assert_eq!(
+            waiting_on_screen("claude", &lines).as_deref(),
+            Some("Trust this folder?")
+        );
+    }
+
+    #[test]
+    fn talking_about_a_prompt_is_not_a_prompt() {
+        // Break caught: an agent's answer mentioning these words raising a
+        // false "Needs you".
+        let lines = screen(&[
+            " \u{25CF} It asks: Do you want to create a.txt? Then 1. Yes or 2. No.",
+            "",
+            " \u{276F} ",
+            " auto mode on (shift+tab to cycle)",
+        ]);
+        assert_eq!(waiting_on_screen("claude", &lines), None);
+        assert_eq!(
+            waiting_on_screen(
+                "codex",
+                &screen(&[" Do you want to x?", " 1. Yes", " Esc to cancel"])
+            ),
+            None
+        );
+        assert_eq!(waiting_on_screen("claude", &[]), None);
     }
 }
