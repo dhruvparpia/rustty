@@ -839,7 +839,8 @@ pub struct Config {
     #[serde(rename = "session-rail", default = "default_true")]
     pub session_rail: bool,
     /// AUTO-007: let any local client of this user open tabs and type into
-    /// sessions. Off, writes need this window's token.
+    /// sessions. Off, writes need this window's token. A window reads it once, when
+    /// it starts: a reload never changes what a running window grants.
     #[serde(rename = "automation-writes", default)]
     pub automation_writes: bool,
     /// WELCOME-001: show the crab banner when rustty starts.

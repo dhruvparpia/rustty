@@ -3544,7 +3544,10 @@ fn rail_tick(hwnd: HWND) {
         u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
     );
     let pulsing = s.rail_animate && rows.iter().any(|r| r.status == rail::Status::Working);
+    let heading = automation::rail_heading(s);
     let Some(r) = &mut s.renderer else { return };
+    // Fixed for the window's life, and the first tick's rows repaint it.
+    r.set_rail_heading(heading);
     let changed = r.rail_rows() != rows.as_slice();
     if changed {
         r.set_rail_rows(rows);

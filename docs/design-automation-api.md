@@ -142,3 +142,7 @@ JSON-RPC 2.0 (same base as MCP, so the adapter is a thin encoder):
     for about 35 ms when measured, more than a tick, against the bounded per-tick work
     §2 requires. A read now stops after 4 ms and says `more`, and the pane-output scan
     shares 4 ms per tick, with busy panes taking turns. 1 MiB stays the cap on a page.
+11. **Writes can't be turned on by editing a file** (§4). `automation-writes` is read
+    once, when the window starts, and a hot reload never changes it: otherwise an
+    agent that can write a file could grant itself writes with nothing for the person
+    to notice. While it is on, the sidebar heading says "rustty · automation on".

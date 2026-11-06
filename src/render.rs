@@ -608,6 +608,8 @@ pub struct Renderer {
     rail_width: f32,
     /// Sidebar rows, grouped.
     rail_rows: Vec<rail::Row>,
+    /// The sidebar's heading.
+    rail_heading: &'static str,
     /// The open roadmap board.
     board: Option<crate::board::View>,
     /// Where each sidebar item goes, reused between frames.
@@ -921,6 +923,7 @@ impl Renderer {
             caption_height: 0.0,
             rail_width: 0.0,
             rail_rows: Vec::new(),
+            rail_heading: rail::heading(false),
             board: None,
             rail_placed: Vec::new(),
             rail_hover: rail::Hit::None,
@@ -1005,6 +1008,11 @@ impl Renderer {
     #[must_use]
     pub fn rail_rows(&self) -> &[rail::Row] {
         &self.rail_rows
+    }
+
+    /// Set the sidebar's heading.
+    pub const fn set_rail_heading(&mut self, heading: &'static str) {
+        self.rail_heading = heading;
     }
 
     /// Replace the sidebar's rows.
@@ -1250,7 +1258,7 @@ impl Renderer {
             bottom,
         };
         self.draw_rail_text(
-            "rustty",
+            self.rail_heading,
             &title_format,
             text_rect(16.0, 0.0, w - 12.0, top),
             ui.muted,

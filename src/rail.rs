@@ -300,6 +300,17 @@ pub fn project_of(cwd: Option<&str>) -> String {
     }
 }
 
+/// The sidebar's heading. While a config key has opened this window to every
+/// local client, it says so where the person can see it (AUTO-007).
+#[must_use]
+pub const fn heading(writes: bool) -> &'static str {
+    if writes {
+        "rustty \u{b7} automation on"
+    } else {
+        "rustty"
+    }
+}
+
 /// A notification's text, made safe to draw: no control characters, bounded.
 #[must_use]
 pub fn clean_message(text: &str) -> String {
@@ -763,6 +774,14 @@ mod tests {
             clean_message(&"x".repeat(500)).chars().count(),
             MESSAGE_MAX_CHARS
         );
+    }
+
+    #[test]
+    fn the_heading_says_when_a_config_key_opened_this_window() {
+        // Break caught: a window every local client can write to, looking like any
+        // other window.
+        assert_eq!(heading(false), "rustty");
+        assert!(heading(true).contains("automation on"));
     }
 
     #[test]

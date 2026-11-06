@@ -78,7 +78,9 @@ session-rail = true
 # Let scripts and agents running as you open tabs, close them and type into
 # sessions through `rustty ctl` and `rustty mcp` (AUTO-007). Reading is always
 # allowed. Off, a write needs this window's token, which only a session the window
-# starts for a boss is given. Takes effect on the next request, no restart needed.
+# starts for a boss is given. Each window reads this once, when it starts, so editing
+# the file never grants anything to a running window. While it is on, the sidebar
+# heading says "rustty · automation on".
 automation-writes = false
 
 # Show the crab banner when rustty starts with no other rustty window open

@@ -51,7 +51,8 @@ pub trait WindowOps {
     fn app_mut(&mut self) -> Option<&mut App>;
     /// This window's automation id.
     fn window_id(&self) -> u64;
-    /// The `automation-writes` config key, read fresh for each request.
+    /// The `automation-writes` config key, as it was when the window started. It
+    /// never changes while the window runs (AUTO-007).
     fn writes_allowed(&self) -> bool;
     /// This window's write token, when one could be generated.
     fn token(&self) -> Option<&Token>;

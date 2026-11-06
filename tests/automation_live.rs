@@ -204,21 +204,6 @@ fn wait_screen(window: &TestWindow, pane: u64, text: &str) -> String {
     })
 }
 
-/// Grant writes through the config key, and wait for the window to pick it up.
-fn allow_writes(window: &TestWindow) {
-    write_config(
-        &window.scratch,
-        &format!("{BASE_CONFIG}automation-writes = true\n"),
-    );
-    wait_for("the config reload", || {
-        let init = open(&window.entry()).ok()?.call(
-            "initialize",
-            json!({"protocolVersion": 1, "clientName": "probe"}),
-        );
-        (init.ok()?["grants"]["writes"] == true).then_some(())
-    });
-}
-
 fn open_cmd(window: &TestWindow) -> (u64, u64) {
     let dir = window.scratch.to_string_lossy().into_owned();
     let opened = json_of(&window.ctl(&[
@@ -257,11 +242,6 @@ fn boss_flow(tag: &str, config: &str) {
     assert_eq!(listed["window"], entry.id);
     let first_tab = listed["tabs"][0]["id"].as_u64().expect("tab");
 
-    // Reads need no grant. Writes do, and are refused with their exit code.
-    let refused = window.ctl(&["open"]);
-    assert_eq!(refused.status.code(), Some(4), "{refused:?}");
-
-    allow_writes(&window);
     let (tab, pane) = open_cmd(&window);
 
     // It opened in the background: the selection stayed put.
@@ -441,7 +421,10 @@ fn boss_flow(tag: &str, config: &str) {
 #[test]
 #[ignore = "opens a window; run by hand"]
 fn a_boss_can_run_a_session_with_the_sidebar_on() {
-    boss_flow("rail-on", &format!("{BASE_CONFIG}session-rail = true\n"));
+    boss_flow(
+        "rail-on",
+        &format!("{BASE_CONFIG}automation-writes = true\nsession-rail = true\n"),
+    );
 }
 
 #[test]
@@ -449,7 +432,60 @@ fn a_boss_can_run_a_session_with_the_sidebar_on() {
 fn a_boss_can_run_a_session_with_the_sidebar_off() {
     // Break caught: statuses only ever being stepped by the sidebar's tick, so
     // turning it off would leave every session reporting idle forever.
-    boss_flow("rail-off", &format!("{BASE_CONFIG}session-rail = false\n"));
+    boss_flow(
+        "rail-off",
+        &format!("{BASE_CONFIG}automation-writes = true\nsession-rail = false\n"),
+    );
+}
+
+#[test]
+#[ignore = "opens a window; run by hand"]
+fn editing_the_config_never_turns_writes_on() {
+    // Break caught: an agent that can write a file granting itself writes, with
+    // no restart and nothing for the person to notice (AUTO-007).
+    let window = TestWindow::start("hot-reload", BASE_CONFIG);
+    window.entry();
+    let refused = window.ctl(&["open"]);
+    assert_eq!(refused.status.code(), Some(4), "{refused:?}");
+
+    let listed = json_of(&window.ctl(&["--json", "list"]));
+    let pane = listed["tabs"][0]["panes"][0]["id"].as_u64().expect("pane");
+    let cols = |window: &TestWindow| {
+        window
+            .connect()
+            .call("pane.read", json!({"pane": pane}))
+            .expect("read")["cols"]
+            .as_u64()
+            .expect("cols")
+    };
+    let before = cols(&window);
+
+    // The bigger font fits fewer columns, which is how this knows the window
+    // really did reload the file with the grant in it.
+    write_config(
+        &window.scratch,
+        &format!(
+            "{BASE_CONFIG}automation-writes = true
+font-size = 30
+"
+        ),
+    );
+    wait_for("the config reload", || {
+        (cols(&window) < before).then_some(())
+    });
+
+    let init = open(&window.entry())
+        .expect("connected")
+        .call(
+            "initialize",
+            json!({"protocolVersion": 1, "clientName": "probe"}),
+        )
+        .expect("initialized");
+    assert_eq!(init["grants"]["writes"], false, "{}", init["grants"]);
+    let refused = window.ctl(&["open"]);
+    assert_eq!(refused.status.code(), Some(4), "{refused:?}");
+    let listed = json_of(&window.ctl(&["--json", "list"]));
+    assert_eq!(listed["tabs"].as_array().map(Vec::len), Some(1));
 }
 
 #[test]

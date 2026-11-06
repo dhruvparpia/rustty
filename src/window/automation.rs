@@ -40,6 +40,9 @@ pub(super) struct Binding {
     token: Option<Arc<Token>>,
     id: u64,
     epoch: Instant,
+    /// `automation-writes` as it was when the window started. A file edit can't
+    /// grant anything to a running window (AUTO-007).
+    writes: bool,
 }
 
 /// Start this window's server. A failure only costs this window its automation:
@@ -47,6 +50,7 @@ pub(super) struct Binding {
 pub(super) fn start(hwnd: HWND) {
     let Some(s) = state_mut(hwnd) else { return };
     let id = next_id();
+    let writes = s.cfg.automation_writes;
     match Server::start(id, s.quick, discovery_dir_from_env()) {
         Ok(server) => {
             s.app.set_window_id(Some(id));
@@ -56,10 +60,16 @@ pub(super) fn start(hwnd: HWND) {
                 token: new_token().map(Arc::new),
                 id,
                 epoch: Instant::now(),
+                writes,
             });
         }
         Err(e) => eprintln!("rustty: automation is off for this window: {e}"),
     }
+}
+
+/// What the sidebar's heading says about this window's automation grants.
+pub(super) fn rail_heading(s: &WindowState) -> &'static str {
+    crate::rail::heading(s.automation.as_ref().is_some_and(|b| b.writes))
 }
 
 /// The dispatcher's view of this window. It holds no borrow of the window state:
@@ -68,6 +78,7 @@ struct WindowHost {
     hwnd: HWND,
     id: u64,
     token: Option<Arc<Token>>,
+    writes: bool,
 }
 
 fn window_closed(id: u64) -> RpcError {
@@ -88,7 +99,7 @@ impl WindowOps for WindowHost {
     }
 
     fn writes_allowed(&self) -> bool {
-        state_ref(self.hwnd).is_some_and(|s| s.cfg.automation_writes)
+        self.writes
     }
 
     fn token(&self) -> Option<&Token> {
@@ -369,6 +380,7 @@ pub(super) fn tick(hwnd: HWND) {
         hwnd,
         id: binding.id,
         token: binding.token.clone(),
+        writes: binding.writes,
     };
     let epoch = binding.epoch;
     server.reap();

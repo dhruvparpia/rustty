@@ -152,7 +152,7 @@ pub fn settings(cfg: &Config) -> Vec<Setting> {
         "automation-writes",
         format!("{}", cfg.automation_writes),
         "global",
-        false,
+        true,
     );
     add(
         &mut out,
