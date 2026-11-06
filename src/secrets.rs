@@ -9,7 +9,9 @@
 //!
 //! This limits damage, it does not prevent it (SECRET-012): code running as
 //! the same Windows user can still reach these secrets, and a command given a
-//! secret can print it.
+//! secret can print it. Project separation limits mistakes and casual misuse.
+//! Such code can name any project, so `run` has no `--dir` or working-folder
+//! check that would only look like a boundary.
 //!
 //! No message in this module quotes a value, a token or a stray argument.
 //! Messages name secrets and references only.
@@ -36,6 +38,8 @@ pub const EXIT_STORE: u8 = 10;
 pub const EXIT_MEMORY: u8 = 11;
 /// Exit code: the command given to `secrets run` could not be started.
 pub const EXIT_LAUNCH: u8 = 12;
+/// Exit code: the person answered No when asked to approve `secrets add`.
+pub const EXIT_DECLINED: u8 = 13;
 
 /// Longest secret name accepted.
 const MAX_NAME_LEN: usize = 255;
@@ -66,6 +70,8 @@ pub enum SecretsError {
     Memory(String),
     /// The command could not be started (exit [`EXIT_LAUNCH`]).
     Launch(String),
+    /// The person declined to approve a copy (exit [`EXIT_DECLINED`]).
+    Declined(String),
 }
 
 impl SecretsError {
@@ -80,6 +86,7 @@ impl SecretsError {
             Self::Store(_) => EXIT_STORE,
             Self::Memory(_) => EXIT_MEMORY,
             Self::Launch(_) => EXIT_LAUNCH,
+            Self::Declined(_) => EXIT_DECLINED,
         })
     }
 }
@@ -92,7 +99,8 @@ impl fmt::Display for SecretsError {
         | Self::Op(message)
         | Self::Store(message)
         | Self::Memory(message)
-        | Self::Launch(message)) = self;
+        | Self::Launch(message)
+        | Self::Declined(message)) = self;
         f.write_str(message)
     }
 }
@@ -370,13 +378,30 @@ pub fn vault_name(canonical: &Path) -> String {
     format!("rustty-{}-{short:08x}", slug_of(&normalized))
 }
 
+/// Whether Git's record of a worktree points back at this one. `<gitdir>/gitdir`
+/// holds the path of the worktree's `.git` file, relative to its own folder when
+/// Git was told to use relative paths.
+fn points_back_at(git_entry: &Path, worktree: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(git_entry.join("gitdir")) else {
+        return false;
+    };
+    let pointed = std::fs::canonicalize(git_entry.join(text.trim()));
+    let own = std::fs::canonicalize(worktree.join(".git"));
+    matches!((pointed, own), (Ok(pointed), Ok(own)) if pointed == own)
+}
+
 /// For a linked Git worktree, the main checkout it belongs to: its `.git` file
-/// reads `gitdir: <main>/.git/worktrees/<name>`. Anything else (a submodule,
-/// a bare repository) stays its own project.
+/// reads `gitdir: <main>/.git/worktrees/<name>`, and that folder's `gitdir` file
+/// points back at it. A `.git` file alone proves nothing, because anyone can write
+/// one line in their own folder, so a forged one stays its own project. Anything
+/// else (a submodule, a bare repository) does too.
 fn main_checkout_of(worktree: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(worktree.join(".git")).ok()?;
     let target = text.strip_prefix("gitdir:")?.trim();
     let git_entry = worktree.join(target);
+    if !points_back_at(&git_entry, worktree) {
+        return None;
+    }
     let worktrees = git_entry.parent()?;
     let dot_git = worktrees.parent()?;
     if worktrees.file_name()? != "worktrees" || dot_git.file_name()? != ".git" {
@@ -516,6 +541,28 @@ pub trait OpRunner {
     /// # Errors
     /// `op` could not be found or started, or its output could not be held.
     fn run(&self, call: &OpCall<'_>) -> Result<OpOutput, SecretsError>;
+}
+
+/// Asks the person whether a secret may be copied into a project's vault. Tests
+/// inject a fake; production shows a native dialog. No flag or standard input
+/// reaches this: an agent can write to both (SECRET-009).
+pub trait CopyApproval {
+    /// Whether to copy the value at `from` into `vault` as `name`. Anything but a
+    /// clear yes is a no.
+    fn approve(&self, from: &str, vault: &str, name: &str) -> bool;
+}
+
+/// What the approval dialog says. The reference and the vault name have been
+/// validated, so neither can hold anything but plain text.
+#[must_use]
+pub fn copy_prompt(from: &str, vault: &str, name: &str) -> String {
+    format!(
+        "A program asked to copy a secret out of 1Password.\n\n\
+         From: {from}\n\
+         Into vault: {vault}\n\
+         As: {name}\n\n\
+         Copy it? Choose No unless you asked for this."
+    )
 }
 
 /// Where a project's service-account token is kept.
@@ -854,13 +901,15 @@ pub struct AddOutcome {
 ///
 /// # Errors
 /// See [`SecretsError`]; nothing is created unless every check passed and the
-/// value was read.
+/// value was read. Nothing is read until the person has said yes to this source
+/// and this vault.
 pub fn add(
     project: &Project,
     name: &str,
     from: &str,
     op: &dyn OpRunner,
     store: &dyn TokenStore,
+    approval: &dyn CopyApproval,
 ) -> Result<AddOutcome, SecretsError> {
     validate_name(name)?;
     let source = validate_reference(from)?;
@@ -881,6 +930,11 @@ pub fn add(
     {
         return Err(SecretsError::Usage(format!(
             "{name} is already in this project's manifest"
+        )));
+    }
+    if !approval.approve(from, vault, name) {
+        return Err(SecretsError::Declined(format!(
+            "copying {name} into vault {vault} was declined; nothing was read"
         )));
     }
 
@@ -1087,7 +1141,7 @@ pub const fn usage() -> &'static str {
      \x20      rustty secrets list [--dir <dir>] [--json]\n\
      \x20      rustty secrets run --only <NAME,NAME> [--dir <dir>] -- <command> [args...]\n\
      exit codes: 2 usage, 3 not found, 8 manifest, 9 op, 10 token store, 11 secure memory, \
-     12 command did not start. `run` otherwise returns the command's own exit code."
+     12 command did not start, 13 declined. `run` otherwise returns the command's own exit code."
 }
 
 /// The flags shared by `setup`, `add` and `list`.
@@ -1214,6 +1268,8 @@ pub struct Deps<'a> {
     pub store: &'a dyn TokenStore,
     /// Starts the command for `run`.
     pub launcher: &'a dyn Launcher,
+    /// Asks the person to approve `add`.
+    pub approval: &'a dyn CopyApproval,
 }
 
 /// The `secrets list` output.
@@ -1315,7 +1371,7 @@ fn execute_inner(
             json,
         } => {
             let project = Project::resolve(dir.as_deref())?;
-            let outcome = add(&project, name, from, deps.op, deps.store)?;
+            let outcome = add(&project, name, from, deps.op, deps.store, deps.approval)?;
             if *json {
                 let value = serde_json::json!({
                     "schema": "secrets-add/v1",
@@ -1343,7 +1399,7 @@ fn execute_inner(
 /// Run one verb with the production collaborators.
 #[cfg(windows)]
 fn run_production(verb: &SecretsVerb, out: &mut dyn Write, err: &mut dyn Write) -> u32 {
-    use crate::secret_exec::{SystemLauncher, SystemOp, token_store_dir};
+    use crate::secret_exec::{NativeApproval, SystemLauncher, SystemOp, token_store_dir};
 
     let dir = match token_store_dir() {
         Ok(dir) => dir,
@@ -1357,6 +1413,7 @@ fn run_production(verb: &SecretsVerb, out: &mut dyn Write, err: &mut dyn Write) 
         op: &SystemOp,
         store: &store,
         launcher: &SystemLauncher,
+        approval: &NativeApproval,
     };
     execute(verb, &deps, out, err)
 }

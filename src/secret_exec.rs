@@ -35,9 +35,14 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Shell::{
     FOLDERID_LocalAppData, FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO, MessageBoxW,
+};
 use windows::core::{BOOL, GUID, PCWSTR, PWSTR};
 
-use crate::secrets::{Launcher, OpCall, OpOutput, OpRunner, SecretsError};
+use crate::secrets::{
+    CopyApproval, Launcher, OpCall, OpOutput, OpRunner, SecretsError, copy_prompt,
+};
 use crate::secure_mem::{LockedPages, LockedSecret, MAX_SECRET_LEN};
 
 /// How much of `op`'s stderr is kept. The rest is read and dropped so the
@@ -761,6 +766,32 @@ pub struct SystemOp;
 impl OpRunner for SystemOp {
     fn run(&self, call: &OpCall<'_>) -> Result<OpOutput, SecretsError> {
         ProgramOp::with_program(resolve_op()?).run(call)
+    }
+}
+
+/// The caption of the `secrets add` approval dialog.
+pub const APPROVAL_CAPTION: &str = "rustty secrets";
+
+/// The production [`CopyApproval`]: a native Yes/No box with No as the default.
+/// With no desktop to show it on, it fails, and that counts as no.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NativeApproval;
+
+impl CopyApproval for NativeApproval {
+    fn approve(&self, from: &str, vault: &str, name: &str) -> bool {
+        let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() };
+        let text = wide(&copy_prompt(from, vault, name));
+        let caption = wide(APPROVAL_CAPTION);
+        // Safety: both strings are NUL-terminated and outlive the call.
+        let answer = unsafe {
+            MessageBoxW(
+                None,
+                PCWSTR::from_raw(text.as_ptr()),
+                PCWSTR::from_raw(caption.as_ptr()),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
+            )
+        };
+        answer == IDYES
     }
 }
 

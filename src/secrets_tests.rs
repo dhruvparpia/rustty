@@ -262,6 +262,104 @@ fn project_root_finds_a_manifest_outside_git() {
     );
 }
 
+/// What Git writes in a worktree's folder under `.git/worktrees`: the path of that
+/// worktree's `.git` file.
+fn write_back_pointer(git_entry: &Path, worktree: &Path) {
+    let dot_git = worktree.join(".git").display().to_string();
+    std::fs::write(
+        git_entry.join("gitdir"),
+        format!("{}\n", dot_git.replace('\\', "/")),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_forged_git_file_cant_borrow_another_projects_vault() {
+    // Break caught: an agent writing one line in its own folder to get the victim
+    // project's vault and token.
+    let dir = TempDir::new();
+    let victim = dir.path().join("victim");
+    let git_entry = victim.join(".git").join("worktrees").join("real");
+    std::fs::create_dir_all(&git_entry).unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    write_back_pointer(&git_entry, &real);
+    std::fs::write(
+        real.join(".git"),
+        format!("gitdir: {}\n", git_entry.display()),
+    )
+    .unwrap();
+    // The genuine worktree still resolves.
+    assert_eq!(
+        project_root(&real).unwrap(),
+        std::fs::canonicalize(&victim).unwrap()
+    );
+
+    // Forged: names a real worktree's folder, whose back-pointer names someone else.
+    let attacker = dir.path().join("attacker");
+    std::fs::create_dir_all(&attacker).unwrap();
+    std::fs::write(
+        attacker.join(".git"),
+        format!("gitdir: {}\n", git_entry.display()),
+    )
+    .unwrap();
+    assert_eq!(
+        project_root(&attacker).unwrap(),
+        std::fs::canonicalize(&attacker).unwrap()
+    );
+    assert_ne!(
+        Project::resolve(Some(&attacker)).unwrap().vault,
+        Project::resolve(Some(&victim)).unwrap().vault
+    );
+
+    // Forged: names a folder with no back-pointer at all.
+    let empty_entry = victim.join(".git").join("worktrees").join("none");
+    std::fs::create_dir_all(&empty_entry).unwrap();
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(
+        other.join(".git"),
+        format!("gitdir: {}\n", empty_entry.display()),
+    )
+    .unwrap();
+    assert_eq!(
+        project_root(&other).unwrap(),
+        std::fs::canonicalize(&other).unwrap()
+    );
+}
+
+#[test]
+fn a_worktree_made_by_real_git_still_resolves_to_its_main_checkout() {
+    // Break caught: the back-pointer check refusing what Git itself writes.
+    let dir = TempDir::new();
+    let main = dir.path().join("main");
+    std::fs::create_dir_all(&main).unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&main)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .output()
+    };
+    // No Git on this machine: nothing to compare against.
+    if git(&["init", "-q"]).is_err() {
+        return;
+    }
+    let committed = git(&["commit", "-q", "--allow-empty", "--no-gpg-sign", "-m", "x"]).unwrap();
+    assert!(committed.status.success(), "{committed:?}");
+    let linked = dir.path().join("linked");
+    let linked_text = linked.display().to_string();
+    let added = git(&["worktree", "add", "-q", &linked_text]).unwrap();
+    assert!(added.status.success(), "{added:?}");
+    assert_eq!(
+        project_root(&linked).unwrap(),
+        std::fs::canonicalize(&main).unwrap()
+    );
+}
+
 #[test]
 fn a_linked_worktree_shares_the_main_checkouts_project() {
     let dir = TempDir::new();
@@ -270,6 +368,7 @@ fn a_linked_worktree_shares_the_main_checkouts_project() {
     std::fs::create_dir_all(&git_entry).unwrap();
     let worktree = dir.path().join("elsewhere").join("wt");
     std::fs::create_dir_all(&worktree).unwrap();
+    write_back_pointer(&git_entry, &worktree);
     std::fs::write(
         worktree.join(".git"),
         format!("gitdir: {}\n", git_entry.display()),
@@ -292,6 +391,7 @@ fn a_worktree_git_file_written_with_forward_slashes_also_resolves() {
     std::fs::create_dir_all(&git_entry).unwrap();
     let worktree = dir.path().join("wt");
     std::fs::create_dir_all(&worktree).unwrap();
+    write_back_pointer(&git_entry, &worktree);
     let target = git_entry.display().to_string().replace('\\', "/");
     std::fs::write(worktree.join(".git"), format!("gitdir: {target}\n")).unwrap();
     assert_eq!(
@@ -499,6 +599,15 @@ mod with_locked_memory {
         }
     }
 
+    /// An approval dialog that always answers the same.
+    struct Approves(bool);
+
+    impl CopyApproval for Approves {
+        fn approve(&self, _from: &str, _vault: &str, _name: &str) -> bool {
+            self.0
+        }
+    }
+
     type Script = Box<dyn Fn(&[String]) -> Reply>;
 
     /// Scripted `op`: records every call, answers from a closure.
@@ -693,6 +802,7 @@ mod with_locked_memory {
             op: &op,
             store: &store,
             launcher: &launcher,
+            approval: &Approves(true),
         };
         for json in [false, true] {
             let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -830,7 +940,15 @@ mod with_locked_memory {
                 ok(b"{\"id\":\"x\"}")
             }
         });
-        let outcome = add(&project, "API_KEY", "op://Private/Item/field", &op, &store).unwrap();
+        let outcome = add(
+            &project,
+            "API_KEY",
+            "op://Private/Item/field",
+            &op,
+            &store,
+            &Approves(true),
+        )
+        .unwrap();
         let expected = stored_reference(&project.vault, "API_KEY");
         assert_eq!(outcome.reference, expected);
 
@@ -883,6 +1001,7 @@ mod with_locked_memory {
             op: &op,
             store: &store,
             launcher: &launcher,
+            approval: &Approves(true),
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = execute(
@@ -916,7 +1035,9 @@ mod with_locked_memory {
             ("TAKEN", "op://Private/I/f"),
             ("taken", "op://Private/I/f"),
         ] {
-            let err = add(&project, name, from, &op, &store).err().unwrap();
+            let err = add(&project, name, from, &op, &store, &Approves(true))
+                .err()
+                .unwrap();
             assert_eq!(
                 err.exit_code(),
                 u32::from(crate::host::EXIT_USAGE),
@@ -933,9 +1054,113 @@ mod with_locked_memory {
         let store = MemStore::with_token(&project.vault);
         let op = FakeOp::healthy();
         let from = format!("op://{}/Other/password", project.vault);
-        let err = add(&project, "A", &from, &op, &store).err().unwrap();
+        let err = add(&project, "A", &from, &op, &store, &Approves(true))
+            .err()
+            .unwrap();
         assert_eq!(err.exit_code(), u32::from(crate::host::EXIT_USAGE));
         assert!(op.calls().is_empty());
+    }
+
+    #[test]
+    fn declining_the_dialog_reads_nothing_and_has_a_stable_code() {
+        // Break caught: an agent copying any secret the person's own session can
+        // read, with nobody asked.
+        let (_dir, project) = project_with(&[]);
+        let store = MemStore::with_token(&project.vault);
+        let op = FakeOp::healthy();
+        let err = add(
+            &project,
+            "A",
+            "op://Private/Item/field",
+            &op,
+            &store,
+            &Approves(false),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err.exit_code(), u32::from(EXIT_DECLINED));
+        assert_eq!(
+            err.exit_code(),
+            13,
+            "a public contract: scripts branch on it"
+        );
+        assert!(op.calls().is_empty(), "{:?}", op.calls().len());
+        assert!(
+            Manifest::load(&project.root)
+                .unwrap()
+                .unwrap()
+                .secrets
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_dialog_names_the_source_and_the_destination_before_anything_is_read() {
+        struct Asked<'a> {
+            op: &'a FakeOp,
+            seen: RefCell<Vec<(String, String, String, usize)>>,
+        }
+        impl CopyApproval for Asked<'_> {
+            fn approve(&self, from: &str, vault: &str, name: &str) -> bool {
+                self.seen.borrow_mut().push((
+                    from.to_owned(),
+                    vault.to_owned(),
+                    name.to_owned(),
+                    self.op.calls().len(),
+                ));
+                true
+            }
+        }
+        let (_dir, project) = project_with(&[]);
+        let store = MemStore::with_token(&project.vault);
+        let op = FakeOp::new(|args| {
+            if args[0] == "read" {
+                ok(b"value")
+            } else {
+                ok(b"{\"id\":\"x\"}")
+            }
+        });
+        let asked = Asked {
+            op: &op,
+            seen: RefCell::new(Vec::new()),
+        };
+        let from = "op://Private/Item/field";
+        add(&project, "A", from, &op, &store, &asked).unwrap();
+        let seen = asked.seen.borrow();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, from);
+        assert_eq!(seen[0].1, project.vault);
+        assert_eq!(seen[0].2, "A");
+        assert_eq!(seen[0].3, 0, "op ran before the person was asked");
+        let text = copy_prompt(from, &project.vault, "A");
+        assert!(
+            text.contains(from) && text.contains(&project.vault),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_refused_add_never_gets_as_far_as_asking() {
+        struct Never;
+        impl CopyApproval for Never {
+            fn approve(&self, _from: &str, _vault: &str, _name: &str) -> bool {
+                panic!("nothing valid to ask about");
+            }
+        }
+        let dir = TempDir::new();
+        let project = Project::resolve(Some(dir.path())).unwrap();
+        let op = FakeOp::healthy();
+        let err = add(
+            &project,
+            "A",
+            "op://P/I/f",
+            &op,
+            &MemStore::default(),
+            &Never,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err.exit_code(), u32::from(crate::host::EXIT_NOT_FOUND));
     }
 
     #[test]
@@ -943,9 +1168,16 @@ mod with_locked_memory {
         let dir = TempDir::new();
         let project = Project::resolve(Some(dir.path())).unwrap();
         let op = FakeOp::healthy();
-        let err = add(&project, "A", "op://P/I/f", &op, &MemStore::default())
-            .err()
-            .unwrap();
+        let err = add(
+            &project,
+            "A",
+            "op://P/I/f",
+            &op,
+            &MemStore::default(),
+            &Approves(true),
+        )
+        .err()
+        .unwrap();
         assert_eq!(err.exit_code(), u32::from(crate::host::EXIT_NOT_FOUND));
         assert!(op.calls().is_empty());
     }
@@ -956,7 +1188,9 @@ mod with_locked_memory {
             let (_dir, project) = project_with(&[]);
             let store = MemStore::with_token(&project.vault);
             let op = FakeOp::new(move |_| reply.clone());
-            let err = add(&project, "A", "op://P/I/f", &op, &store).err().unwrap();
+            let err = add(&project, "A", "op://P/I/f", &op, &store, &Approves(true))
+                .err()
+                .unwrap();
             assert_eq!(err.exit_code(), u32::from(EXIT_OP));
             assert_eq!(op.calls().len(), 1, "nothing is created");
             let manifest = Manifest::load(&project.root).unwrap().unwrap();
@@ -969,7 +1203,9 @@ mod with_locked_memory {
         let (_dir, project) = project_with(&[]);
         let store = MemStore::with_token(&project.vault);
         let op = FakeOp::new(|_| ok(&[0xff, 0xfe, 0x41]));
-        let err = add(&project, "A", "op://P/I/f", &op, &store).err().unwrap();
+        let err = add(&project, "A", "op://P/I/f", &op, &store, &Approves(true))
+            .err()
+            .unwrap();
         assert_eq!(err.exit_code(), u32::from(EXIT_OP));
         assert_eq!(op.calls().len(), 1);
     }
@@ -985,7 +1221,9 @@ mod with_locked_memory {
                 fail("rejected value-for-tests")
             }
         });
-        let err = add(&project, "A", "op://P/I/f", &op, &store).err().unwrap();
+        let err = add(&project, "A", "op://P/I/f", &op, &store, &Approves(true))
+            .err()
+            .unwrap();
         assert_eq!(err.exit_code(), u32::from(EXIT_OP));
         assert!(!err.to_string().contains("value-for-tests"), "{err}");
         let manifest = Manifest::load(&project.root).unwrap().unwrap();
@@ -1004,6 +1242,7 @@ mod with_locked_memory {
             op: &op,
             store: &store,
             launcher: &launcher,
+            approval: &Approves(true),
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = execute(
@@ -1052,6 +1291,7 @@ mod with_locked_memory {
             op: &op,
             store: &store,
             launcher: &launcher,
+            approval: &Approves(true),
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = execute(
@@ -1347,6 +1587,7 @@ mod with_locked_memory {
             op: &op,
             store: &store,
             launcher: &launcher,
+            approval: &Approves(true),
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = execute(
@@ -1373,6 +1614,7 @@ mod with_locked_memory {
             op: &op,
             store: &store,
             launcher: &launcher,
+            approval: &Approves(true),
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = execute(&SecretsVerb::Help, &deps, &mut out, &mut err);

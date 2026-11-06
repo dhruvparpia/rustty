@@ -28,6 +28,10 @@ individually with `cargo test --release -- --ignored --nocapture --exact <name>`
 Automated rows use a fake `op` or stand-in children (`cmd.exe`, `findstr.exe`); none
 touches a 1Password account. `op` is on 2.39.0 on this machine.
 
+**What these results do not show (SECRET-012).** Project separation limits mistakes
+and casual misuse. It does not stop code running as the same Windows user, which can
+name any project. A separate Windows user is the real boundary, and it is not built.
+
 | Area | Coverage | Result |
 | --- | --- | --- |
 | Manifest, names, references | Literal values refused and never quoted, including through `toml`'s own error text; reserved names; case-only duplicates (`secrets::tests`) | pass |
@@ -37,6 +41,8 @@ touches a 1Password account. `op` is on 2.39.0 on this machine.
 | `setup`, `add`, `list`, `run` logic | Exact `op` arguments, call order, token never in output, files or arguments, value only on stdin, nothing starts on any failed or empty fetch, only the requested names (`secrets::tests::with_locked_memory`) | pass |
 | Runner and launcher | Real children: stdin, stdout and stderr pipes, floods without deadlock, oversized output refused, token only in the child, 32-bit exit code, batch files with injection attempt, bare names never from the current directory, only the standard handles inherited (`secret_exec::tests`) | pass |
 | Binary | Exit codes and refusals through `rustty.exe` for paths that stop before `op` (`tests/secrets_cli.rs`) | pass |
+| Forged `.git` file | One naming a real worktree's folder or one with no back-pointer stays its own project; a worktree made by real Git still resolves (`a_forged_git_file_cant_borrow_another_projects_vault`, `a_worktree_made_by_real_git_still_resolves_to_its_main_checkout`) | pass |
+| `add` approval | No means nothing read and exit 13; asked before the first `op` call, naming source and vault; never reached by a refused add (`secrets::tests`, fake dialog). The real box: text read back and No answered (`the_approval_dialog_names_both_ends_and_no_is_no`, ignored, desktop) | pass |
 | Real `op` | `op --version` through the production resolver and spawn path (`real_op_version_runs_through_the_production_path`, ignored by default, run by hand) | pass |
 
 Not verified, because no test may touch the owner's real account. To be run by the

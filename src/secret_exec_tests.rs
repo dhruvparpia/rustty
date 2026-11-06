@@ -14,6 +14,39 @@ use crate::secure_mem::LockedSecret;
 
 const TOKEN: &str = "ops_THROWAWAY_TEST_TOKEN_0123456789";
 
+#[test]
+#[ignore = "opens a message box; run by hand"]
+fn the_approval_dialog_names_both_ends_and_no_is_no() {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetDlgItemTextW, IDNO, PostMessageW, WM_COMMAND,
+    };
+    let answer = std::thread::spawn(|| {
+        NativeApproval.approve("op://Private/Item/field", "rustty-demo-12345678", "API_KEY")
+    });
+    let caption: Vec<u16> = APPROVAL_CAPTION.encode_utf16().chain(Some(0)).collect();
+    let mut found = None;
+    for _ in 0..200 {
+        // Safety: the caption is NUL-terminated.
+        if let Ok(hwnd) = unsafe { FindWindowW(None, PCWSTR::from_raw(caption.as_ptr())) } {
+            found = Some(hwnd);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let hwnd = found.expect("the dialog appeared");
+    let mut text = [0u16; 1024];
+    // Safety: the buffer is valid for its length; 0xFFFF is a message box's text.
+    let len = unsafe { GetDlgItemTextW(hwnd, 0xFFFF, &mut text) };
+    let text = String::from_utf16_lossy(&text[..len as usize]);
+    // Answer the box this test opened, and nothing else.
+    // Safety: posting a message to a window handle that was just found.
+    unsafe { PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(IDNO.0 as usize), LPARAM(0)) }.unwrap();
+    assert!(!answer.join().unwrap(), "No is no");
+    assert!(text.contains("op://Private/Item/field"), "{text}");
+    assert!(text.contains("rustty-demo-12345678"), "{text}");
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -676,6 +709,8 @@ fn secrets_run_gives_the_real_child_the_value_and_never_the_token() {
         op: &ReadOnlyOp,
         store: &store,
         launcher: &SystemLauncher,
+        // `run` never asks.
+        approval: &NativeApproval,
     };
     let (mut printed, mut errors) = (Vec::new(), Vec::new());
     let code = execute(&verb, &deps, &mut printed, &mut errors);
