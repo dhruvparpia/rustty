@@ -77,6 +77,9 @@ Driven through the real window, with screenshots read by hand.
 | 150% and 200% DPI, mixed DPI | Not run: one 100% display |
 | Windows animation effects off | Not run live, to leave system settings alone. Covered by a unit test |
 | Windows 10 | Not run: no machine |
+| Caption buttons through MSAA (`OBJID_TITLEBAR`) | Minimize, maximize and close report the rectangles they are drawn and clicked at; context help is invisible. Before the fix they reported a 1-pixel-tall strip |
+| Caption buttons through UI Automation | Not exposed: rustty's provider shows tabs and panes only. v0.5.1 with native buttons behaved the same, so this is not new |
+| Double-click on maximize | Maximizes, then restores |
 | Narrator on the drawn caption | Not run |
 
 ## Known gaps

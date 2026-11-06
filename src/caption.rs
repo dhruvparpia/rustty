@@ -67,6 +67,19 @@ pub fn hit_test(x: f32, y: f32, width: f32, ctx: Ctx) -> Hit {
     Hit::Caption
 }
 
+/// The x range of a caption button in a window `width` DIPs wide.
+#[must_use]
+pub fn button_span(button: Hit, width: f32) -> Option<(f32, f32)> {
+    let slot = match button {
+        Hit::Close => 0.0,
+        Hit::Max => 1.0,
+        Hit::Min => 2.0,
+        _ => return None,
+    };
+    let right = width - slot * BUTTON_WIDTH;
+    Some((right - BUTTON_WIDTH, right))
+}
+
 /// Width available for tabs and the `+` button.
 #[must_use]
 pub fn tab_area_width(width: f32) -> f32 {
@@ -193,5 +206,20 @@ mod tests {
         assert_eq!(top_chrome(true, 36.0, 0.0), 36.0);
         assert_eq!(top_chrome(true, 0.0, 0.0), 0.0);
         assert_eq!(total_chrome(false, 36.0, 0.0), 36.0);
+    }
+
+    #[test]
+    fn button_spans_match_the_hit_test() {
+        // Break caught: telling screen readers one place and answering
+        // clicks at another.
+        assert_eq!(button_span(Hit::Close, W), Some((954.0, 1000.0)));
+        assert_eq!(button_span(Hit::Max, W), Some((908.0, 954.0)));
+        assert_eq!(button_span(Hit::Min, W), Some((862.0, 908.0)));
+        assert_eq!(button_span(Hit::Caption, W), None);
+        for button in [Hit::Min, Hit::Max, Hit::Close] {
+            let (lo, hi) = button_span(button, W).expect("span");
+            assert_eq!(hit_test(lo, 20.0, W, ctx()), button);
+            assert_eq!(hit_test(hi - 0.5, 20.0, W, ctx()), button);
+        }
     }
 }

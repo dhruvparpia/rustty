@@ -127,7 +127,9 @@ impl Banner<'_> {
         self.text_column() + "rustty ".len() + self.version.len()
     }
 
-    const fn has_crab(&self) -> bool {
+    /// Whether the window is wide enough for the crab.
+    #[must_use]
+    pub const fn has_crab(&self) -> bool {
         self.cols >= FULL_MIN_COLS
     }
 
@@ -301,6 +303,7 @@ pub struct Clack {
     anchor_abs: usize,
     c_color: Color,
     animate: bool,
+    has_crab: bool,
     shown: Frame,
     next: usize,
     status: Option<Receiver<Option<usize>>>,
@@ -325,6 +328,7 @@ impl Clack {
             anchor_abs,
             c_color,
             animate,
+            has_crab: true,
             shown: if animate { Frame::Open } else { Frame::Closed },
             next: 0,
             status,
@@ -333,16 +337,24 @@ impl Clack {
         }
     }
 
+    /// For a banner too narrow for the crab: no claw cells to check or draw,
+    /// but the status text still arrives.
+    #[must_use]
+    pub const fn without_crab(mut self) -> Self {
+        self.has_crab = false;
+        self
+    }
+
     /// Advance one step. Returns how long until the next step, or `None` when
     /// the animation is over.
     pub fn step(&mut self, pane: &mut Pane) -> Option<Duration> {
-        if pane.in_alt() || pane.input_seen() || !self.crab_intact(pane) {
+        if pane.in_alt() || pane.input_seen() || (self.has_crab && !self.crab_intact(pane)) {
             return None;
         }
         self.poll_status(pane);
         let &(frame, hold) = CLACK_SEQUENCE.get(self.next)?;
         self.next += 1;
-        if self.animate && frame != self.shown {
+        if self.has_crab && self.animate && frame != self.shown {
             self.write_frame(pane, frame);
         }
         hold.map(Duration::from_millis)
@@ -1100,5 +1112,36 @@ mod tests {
         let line = pane.grid().line_text_abs(0).expect("line");
         assert!(line.contains('Z'), "{line}");
         assert!(!line.contains("session host"), "{line}");
+    }
+
+    #[test]
+    fn status_arrives_without_a_crab() {
+        // Break caught: the narrow banner's text failing the claw check, which
+        // ended the animation before the session count could land.
+        let b = banner(60, 24);
+        let mut pane = fed(&b);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut clack = Clack::new(
+            0,
+            colors().foreground,
+            true,
+            Some(rx),
+            (0, b.status_column()),
+            colors(),
+        )
+        .without_crab();
+        assert_eq!(clack.step(&mut pane), ms(420));
+        tx.send(Some(2)).expect("send");
+        assert_eq!(clack.step(&mut pane), ms(130));
+        let line = pane.grid().line_text(0).expect("line");
+        assert_eq!(
+            line,
+            "rustty 0.6.0 \u{b7} session host running \u{b7} 2 sessions"
+        );
+        // No claw cells were drawn over the text.
+        assert_eq!(
+            pane.grid().line_text(2).as_deref().map(|l| &l[..12]),
+            Some("Ctrl+Shift+P")
+        );
     }
 }

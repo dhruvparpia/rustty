@@ -104,6 +104,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
     WM_SYSKEYUP,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    TITLEBARINFOEX, WM_GETTITLEBARINFOEX, WM_NCLBUTTONDBLCLK,
+};
 use windows::core::{ComObject, PCWSTR, Result};
 
 use crate::app::{App, PaneClose};
@@ -1879,6 +1882,12 @@ unsafe extern "system" fn wnd_proc(
             let result = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             LRESULT(nc_hit_test(hwnd, result.0 as u32, lparam) as isize)
         }
+        // Screen readers learn where the caption buttons are from this message.
+        WM_GETTITLEBARINFOEX if has_drawn_caption(hwnd) => {
+            let result = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            fill_title_bar_info(hwnd, lparam.0 as *mut TITLEBARINFOEX);
+            result
+        }
         WM_NCMOUSEMOVE if has_drawn_caption(hwnd) => {
             set_caption_hover(hwnd, caption_button(wparam.0 as u32));
             track_nc_leave(hwnd);
@@ -1891,7 +1900,9 @@ unsafe extern "system" fn wnd_proc(
             set_caption_hover(hwnd, None);
             LRESULT(0)
         }
-        WM_NCLBUTTONDOWN
+        // The second click of a double-click is one more press: Windows would
+        // otherwise run its own button handling for a button it does not draw.
+        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK
             if caption_button(wparam.0 as u32).is_some() && has_drawn_caption(hwnd) =>
         {
             if let Some(s) = state_mut(hwnd) {
@@ -2773,6 +2784,11 @@ fn greet_focused_pane(s: &mut WindowState, program: &str) {
         status_at,
         colors,
     );
+    let clack = if banner.has_crab() {
+        clack
+    } else {
+        clack.without_crab()
+    };
     s.clack = Some((clack, weak));
 }
 
@@ -2877,6 +2893,47 @@ fn nc_hit_test(hwnd: HWND, default: u32, lparam: LPARAM) -> u32 {
         caption::Hit::Close => HTCLOSE,
         caption::Hit::TopEdge => HTTOP,
     }
+}
+
+/// Report the drawn title strip and buttons, in screen pixels, in place of the
+/// standard caption that no longer exists.
+fn fill_title_bar_info(hwnd: HWND, info: *mut TITLEBARINFOEX) {
+    /// `STATE_SYSTEM_INVISIBLE`.
+    const INVISIBLE: u32 = 0x8000;
+    if info.is_null() {
+        return;
+    }
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    let mut client = RECT::default();
+    let mut origin = POINT::default();
+    let located = unsafe { GetClientRect(hwnd, &mut client) }.is_ok()
+        && unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool();
+    if !located {
+        return;
+    }
+    let width = client.right as f32 / scale;
+    let strip = (caption::STRIP_HEIGHT * scale) as i32;
+    let rect = |lo: i32, hi: i32| RECT {
+        left: origin.x + lo,
+        top: origin.y,
+        right: origin.x + hi,
+        bottom: origin.y + strip,
+    };
+    // The indices come from TITLEBARINFOEX: 2 minimize, 3 maximize, 4 help, 5 close.
+    let info = unsafe { &mut *info };
+    info.rcTitleBar = rect(0, client.right);
+    for (index, button) in [
+        (2, caption::Hit::Min),
+        (3, caption::Hit::Max),
+        (5, caption::Hit::Close),
+    ] {
+        if let Some((lo, hi)) = caption::button_span(button, width) {
+            info.rgrect[index] = rect((lo * scale) as i32, (hi * scale) as i32);
+            info.rgstate[index] &= !INVISIBLE;
+        }
+    }
+    info.rgrect[4] = RECT::default();
+    info.rgstate[4] |= INVISIBLE;
 }
 
 /// The caption button a non-client hit code names.
