@@ -47,7 +47,9 @@ const EVENT_LOG_RANK: usize = 1;
 const INSTRUCTIONS: &str = "Controls the rustty terminal this server runs under. `list` shows every \
 session with a status: needs-you means it is waiting for a person. `tab_open` starts a session in \
 the background; `pane_read` reads its screen or history; `pane_send-text` types into it, with \\r \
-for Enter. Writes need the window's grant and answer denied-grant without it.";
+for Enter. Writes need the window's grant and answer denied-grant without it. A token reaches only \
+the sessions opened with it, and can't answer a permission, trust or sign-in wait: when refused, tell \
+the person.";
 
 /// The tool name for an operation. MCP allows dots, but clients that hand tools
 /// to a model API often don't, and one bad name can sink the whole list.

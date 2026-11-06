@@ -160,3 +160,9 @@ JSON-RPC 2.0 (same base as MCP, so the adapter is a thin encoder):
     local `\\.\pipe\rustty.` name with no separators. Two entries with one id fail
     closed. A true pid with a false pipe was already stopped by the server identity
     check, and still is.
+14. **A token reaches what it opened** (amendment 1). The window keeps a set of tabs
+    and panes opened through a token-holding connection, including from `pane.split`,
+    and a token alone writes only to those. `automation-writes` keeps its window-wide
+    meaning. A token alone can't `pane.send-text` while the pane shows a permission,
+    trust or auth wait; a program reporting one falsely only blocks a write, which is
+    the safe direction, and `kind=question` stays answerable.

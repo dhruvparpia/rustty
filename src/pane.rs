@@ -1058,10 +1058,18 @@ impl Pane {
             .or_else(|| self.agent.filter(|_| self.saved_cwd().is_some()))
     }
 
-    /// Read the agent's question off the screen, when new output arrived.
-    fn read_screen(&mut self) {
+    /// The bottom of the screen, where an agent's prompt can be.
+    fn prompt_lines(&self) -> Vec<String> {
         /// Rows from the bottom a prompt can occupy.
         const ROWS: usize = 24;
+        let rows = self.grid.rows;
+        (rows.saturating_sub(ROWS)..rows)
+            .filter_map(|row| self.grid.line_text(row))
+            .collect()
+    }
+
+    /// Read the agent's question off the screen, when new output arrived.
+    fn read_screen(&mut self) {
         let Some(agent) = self.agent else {
             self.screen_question = None;
             return;
@@ -1070,11 +1078,18 @@ impl Pane {
             return;
         }
         self.screen_read_at = self.last_output;
-        let rows = self.grid.rows;
-        let lines: Vec<String> = (rows.saturating_sub(ROWS)..rows)
-            .filter_map(|row| self.grid.line_text(row))
-            .collect();
-        self.screen_question = crate::agents::waiting_on_screen(agent, &lines);
+        self.screen_question = crate::agents::waiting_on_screen(agent, &self.prompt_lines());
+    }
+
+    /// Whether this pane is waiting on a person's permission, trust or sign-in: a
+    /// program's report says so, or its screen asks. Read off the screen now, not
+    /// from the last sidebar step, since the answer decides whether text goes in.
+    #[must_use]
+    pub fn awaits_approval(&self) -> bool {
+        self.program_status.awaits_approval()
+            || self.agent.is_some_and(|agent| {
+                crate::agents::waiting_on_screen(agent, &self.prompt_lines()).is_some()
+            })
     }
 
     /// The status a program reported, when it reported one.

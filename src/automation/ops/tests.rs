@@ -77,6 +77,329 @@ fn a_version_mismatch_is_a_hard_error_and_leaves_the_connection_uninitialized() 
     assert_eq!(err(&frame).code, ErrorCode::BadParams);
 }
 
+const SECRET: [u8; 32] = [7; 32];
+
+/// A window with a token and no `automation-writes`, and a connection showing it.
+fn token_only() -> (Dispatcher, FakeWindow) {
+    let mut d = Dispatcher::new();
+    let mut w = FakeWindow::new();
+    let token = Token::from_random_bytes(&SECRET);
+    let shown = token.as_str().to_string();
+    w.token = Some(token);
+    let frame = call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "initialize",
+        json!({"protocolVersion": 1, "token": shown}),
+    );
+    ok(&frame);
+    (d, w)
+}
+
+fn open_with_token(d: &mut Dispatcher, w: &mut FakeWindow) -> (u64, u64) {
+    let opened = ok(&call(d, w, CLIENT, "tab.open", json!({})));
+    (
+        opened["tab"].as_u64().expect("tab"),
+        opened["pane"].as_u64().expect("pane"),
+    )
+}
+
+#[test]
+fn a_token_only_reaches_what_it_opened() {
+    // Break caught: a boss typing into the person's own shell, or closing a tab it
+    // has nothing to do with.
+    let (mut d, mut w) = token_only();
+    let (tab, pane) = (first_tab(&w), first_pane(&w));
+    for (method, params) in [
+        ("pane.send-text", json!({"pane": pane, "text": "x"})),
+        ("pane.focus", json!({"pane": pane})),
+        ("pane.split", json!({"pane": pane})),
+        ("tab.focus", json!({"tab": tab})),
+        ("tab.close", json!({"tab": tab})),
+    ] {
+        let error = err(&call(&mut d, &mut w, CLIENT, method, params));
+        assert_eq!(error.code, ErrorCode::DeniedGrant, "{method}");
+    }
+    assert!(w.sent.is_empty() && w.splits.is_empty());
+    assert_eq!(w.app.tab_count(), 1);
+}
+
+#[test]
+fn a_token_can_write_to_a_tab_it_opened_and_a_pane_it_split() {
+    let (mut d, mut w) = token_only();
+    let (tab, pane) = open_with_token(&mut d, &mut w);
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "pane.send-text",
+        json!({"pane": pane, "text": "hello"}),
+    ));
+    let split = ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "pane.split",
+        json!({"pane": pane}),
+    ));
+    let fresh = split["pane"].as_u64().expect("pane");
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "pane.send-text",
+        json!({"pane": fresh, "text": "there"}),
+    ));
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "pane.focus",
+        json!({"pane": fresh}),
+    ));
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "tab.focus",
+        json!({"tab": tab}),
+    ));
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "tab.close",
+        json!({"tab": tab}),
+    ));
+    assert_eq!(w.sent.len(), 2);
+}
+
+#[test]
+fn a_pane_someone_else_split_in_an_opened_tab_is_not_the_tokens() {
+    let (mut d, mut w) = token_only();
+    let (tab, _pane) = open_with_token(&mut d, &mut w);
+    let index = w.app.locate_tab(tab).expect("tab");
+    let theirs = w
+        .app
+        .split_tab_pane(index, 0, crate::split::Dir::Vertical)
+        .expect("split");
+    let error = err(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "pane.send-text",
+        json!({"pane": theirs, "text": "x"}),
+    ));
+    assert_eq!(error.code, ErrorCode::DeniedGrant);
+}
+
+#[test]
+fn what_a_token_opened_belongs_to_the_window_not_the_connection() {
+    // A boss's tool server restarting doesn't lose its workers.
+    let (mut d, mut w) = token_only();
+    let (_tab, pane) = open_with_token(&mut d, &mut w);
+    d.client_gone(CLIENT);
+    let shown = Token::from_random_bytes(&SECRET).as_str().to_string();
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT + 1,
+        "initialize",
+        json!({"protocolVersion": 1, "token": shown}),
+    ));
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT + 1,
+        "pane.send-text",
+        json!({"pane": pane, "text": "x"}),
+    ));
+    // Showing no token still gets nothing.
+    connect(&mut d, &mut w, CLIENT + 2);
+    let error = err(&call(
+        &mut d,
+        &mut w,
+        CLIENT + 2,
+        "pane.send-text",
+        json!({"pane": pane, "text": "x"}),
+    ));
+    assert_eq!(error.code, ErrorCode::DeniedGrant);
+}
+
+#[test]
+fn a_closed_pane_a_token_opened_is_stale_and_an_unknown_id_says_nothing() {
+    let (mut d, mut w) = token_only();
+    let (tab, pane) = open_with_token(&mut d, &mut w);
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "tab.close",
+        json!({"tab": tab}),
+    ));
+    let error = err(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "pane.send-text",
+        json!({"pane": pane, "text": "x"}),
+    ));
+    assert_eq!(error.code, ErrorCode::TargetStale);
+    // An id that never was gets the same answer as one that isn't the token's: a
+    // refused client learns nothing about targets.
+    let error = err(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "pane.send-text",
+        json!({"pane": 999_999_999, "text": "x"}),
+    ));
+    assert_eq!(error.code, ErrorCode::DeniedGrant);
+}
+
+#[test]
+fn the_config_key_keeps_its_window_wide_meaning() {
+    let (mut d, mut w) = setup();
+    w.allow_writes = true;
+    let pane = first_pane(&w);
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "pane.send-text",
+        json!({"pane": pane, "text": "x"}),
+    ));
+    // Nor does a token narrow it.
+    let (mut d, mut w) = token_only();
+    w.allow_writes = true;
+    let pane = first_pane(&w);
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "pane.send-text",
+        json!({"pane": pane, "text": "x"}),
+    ));
+}
+
+/// An OSC 7501 report as a program sends it.
+fn report(state_and_kind: &str) -> Vec<u8> {
+    format!("\x1b]7501;{state_and_kind}\x1b\\").into_bytes()
+}
+
+fn send_to(d: &mut Dispatcher, w: &mut FakeWindow, pane: u64) -> Value {
+    call(
+        d,
+        w,
+        CLIENT,
+        "pane.send-text",
+        json!({"pane": pane, "text": "1\r"}),
+    )
+}
+
+fn feed_pane(w: &mut FakeWindow, pane: u64, bytes: &[u8]) {
+    let (tab, slot) = w.app.locate_pane(pane).expect("pane");
+    let tab = w.app.tab_at_mut(tab).expect("tab");
+    tab.pane_at_mut(slot).expect("pane").feed(bytes);
+}
+
+#[test]
+fn a_token_cant_answer_a_reported_permission_or_sign_in_wait() {
+    // Break caught: a boss approving its own worker's tool call.
+    for kind in ["permission", "auth"] {
+        let (mut d, mut w) = token_only();
+        let (_tab, pane) = open_with_token(&mut d, &mut w);
+        feed_pane(&mut w, pane, &report(&format!("state=blocked:kind={kind}")));
+        let error = err(&send_to(&mut d, &mut w, pane));
+        assert_eq!(error.code, ErrorCode::DeniedGrant, "{kind}");
+        assert_eq!(error.target, Some(pane));
+        assert!(error.message.contains("person"), "{}", error.message);
+        assert!(w.sent.is_empty(), "{kind}");
+        // Once it moves on, the pane can be written to again.
+        feed_pane(&mut w, pane, &report("state=working"));
+        ok(&send_to(&mut d, &mut w, pane));
+    }
+}
+
+#[test]
+fn a_token_can_answer_a_question() {
+    let (mut d, mut w) = token_only();
+    let (_tab, pane) = open_with_token(&mut d, &mut w);
+    feed_pane(&mut w, pane, &report("state=blocked:kind=question"));
+    ok(&send_to(&mut d, &mut w, pane));
+    // Blocked with no kind says nothing about permission.
+    feed_pane(&mut w, pane, &report("state=blocked"));
+    ok(&send_to(&mut d, &mut w, pane));
+}
+
+#[test]
+fn a_wait_under_any_record_counts() {
+    // Break caught: a second record, newer or more urgent, hiding the wait from a
+    // check that only looked at the summary.
+    let (mut d, mut w) = token_only();
+    let (_tab, pane) = open_with_token(&mut d, &mut w);
+    feed_pane(
+        &mut w,
+        pane,
+        &report("id=sub:state=blocked:kind=permission"),
+    );
+    feed_pane(
+        &mut w,
+        pane,
+        &report("id=other:state=blocked:kind=question"),
+    );
+    let error = err(&send_to(&mut d, &mut w, pane));
+    assert_eq!(error.code, ErrorCode::DeniedGrant);
+}
+
+#[test]
+fn a_token_cant_answer_a_prompt_on_the_screen() {
+    let screen: &[&[u8]] = &[
+        b"Do you want to run this command?\r\n 1. Yes\r\n 2. No\r\n Esc to cancel\r\n",
+        b" 1. Yes, I trust this folder\r\n 2. No, exit\r\n Enter to confirm\r\n",
+    ];
+    for shown in screen {
+        let (mut d, mut w) = token_only();
+        let (_tab, pane) = open_with_token(&mut d, &mut w);
+        {
+            let (tab, slot) = w.app.locate_pane(pane).expect("pane");
+            let tab = w.app.tab_at_mut(tab).expect("tab");
+            tab.pane_at_mut(slot)
+                .expect("pane")
+                .set_agent(Some("claude"));
+        }
+        feed_pane(&mut w, pane, shown);
+        let error = err(&send_to(&mut d, &mut w, pane));
+        assert_eq!(error.code, ErrorCode::DeniedGrant);
+        // The refusal never repeats text a program controls.
+        assert!(!error.message.contains("Do you want"), "{}", error.message);
+        assert!(w.sent.is_empty());
+    }
+}
+
+#[test]
+fn the_same_words_mean_nothing_when_no_agent_is_running() {
+    let (mut d, mut w) = token_only();
+    let (_tab, pane) = open_with_token(&mut d, &mut w);
+    feed_pane(
+        &mut w,
+        pane,
+        b"Do you want to run this command?\r\n 1. Yes\r\n Esc to cancel\r\n",
+    );
+    ok(&send_to(&mut d, &mut w, pane));
+}
+
+#[test]
+fn the_config_key_can_answer_a_wait() {
+    // The person opened this window to every client: that is theirs to decide.
+    let (mut d, mut w) = setup();
+    w.allow_writes = true;
+    let pane = first_pane(&w);
+    feed_pane(&mut w, pane, &report("state=blocked:kind=permission"));
+    ok(&send_to(&mut d, &mut w, pane));
+}
+
 #[test]
 fn a_session_cant_be_handed_the_token_through_env() {
     // Break caught: a boss passing its grant to every worker it starts, in any

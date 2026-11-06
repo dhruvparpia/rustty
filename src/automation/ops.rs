@@ -6,7 +6,7 @@
 //! [`WindowOps`]. The window implements that for real; tests use a fake with a
 //! real [`App`] and no HWND, which is why almost all of this is tested headless.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -139,6 +139,10 @@ pub struct Dispatcher {
     subscriptions: BTreeMap<ClientId, Subscriptions>,
     buckets: HashMap<u64, TokenBucket>,
     tracker: Tracker,
+    /// Tabs and panes a token-holding connection opened: all a token alone can
+    /// write to (AUTO-007). The window's, not the connection's, so a boss's tool
+    /// server can restart without losing its workers.
+    token_opened: HashSet<u64>,
 }
 
 impl Dispatcher {
@@ -229,6 +233,12 @@ impl Dispatcher {
             ));
         }
         check_params(op, params)?;
+        let token_ok = state.token_ok;
+        // Only the config key reaches everything; a token reaches what it opened.
+        let token_only = op.write && !win.writes_allowed();
+        if token_only {
+            self.check_token_scope(op, params)?;
+        }
         match op.name {
             "capabilities" => Ok(capabilities()),
             "list" => list(&*win),
@@ -238,6 +248,9 @@ impl Dispatcher {
             "tab.open" => {
                 let request = spawn_request(params)?;
                 let (tab, pane) = win.open_tab(&request)?;
+                if token_ok {
+                    self.note_token_opened(&*win, &[tab, pane]);
+                }
                 Ok(json!({"tab": tab, "pane": pane}))
             }
             "tab.close" => {
@@ -262,6 +275,9 @@ impl Dispatcher {
                 let request = spawn_request(params)?;
                 let (tab, pane) = locate_pane(&*win, id)?;
                 let (tab, pane) = win.split_pane(tab, pane, dir, &request)?;
+                if token_ok {
+                    self.note_token_opened(&*win, &[pane]);
+                }
                 Ok(json!({"tab": tab, "pane": pane}))
             }
             "pane.focus" => {
@@ -271,13 +287,47 @@ impl Dispatcher {
                 win.focus_pane(tab, pane);
                 Ok(json!({"tab": tab_id, "pane": id}))
             }
-            "pane.send-text" => self.send_text(win, params, now_ms),
+            "pane.send-text" => self.send_text(win, params, now_ms, token_only),
             // The table and this match are in the same crate and a test walks
             // the whole table; this only answers if they ever drift.
             other => Err(RpcError::new(
                 ErrorCode::Internal,
                 format!("{other} has no handler"),
             )),
+        }
+    }
+
+    /// A token-only grant reaches only what a token opened. Checked before the
+    /// target is looked up, so a refused client can't tell a closed id from one that
+    /// never was.
+    fn check_token_scope(&self, op: &OpSpec, params: &Value) -> Result<(), RpcError> {
+        let id = match op.name {
+            "tab.close" | "tab.focus" => id_param(params, "tab")?,
+            "pane.split" | "pane.focus" | "pane.send-text" => id_param(params, "pane")?,
+            _ => return Ok(()),
+        };
+        if self.token_opened.contains(&id) {
+            return Ok(());
+        }
+        Err(RpcError {
+            target: Some(id),
+            ..RpcError::new(
+                ErrorCode::DeniedGrant,
+                format!(
+                    "{} with this window's token reaches only sessions opened with it",
+                    op.name
+                ),
+            )
+        })
+    }
+
+    fn note_token_opened(&mut self, win: &dyn WindowOps, ids: &[u64]) {
+        self.token_opened.extend(ids);
+        if self.token_opened.len() > 1024
+            && let Some(app) = win.app()
+        {
+            self.token_opened
+                .retain(|id| app.locate_tab(*id).is_some() || app.locate_pane(*id).is_some());
         }
     }
 
@@ -354,6 +404,7 @@ impl Dispatcher {
         win: &mut dyn WindowOps,
         params: &Value,
         now_ms: u64,
+        token_only: bool,
     ) -> Result<Value, RpcError> {
         let id = id_param(params, "pane")?;
         let text = params
@@ -367,6 +418,24 @@ impl Dispatcher {
             )));
         }
         let (tab, pane) = locate_pane(&*win, id)?;
+        // The person decides these (AUTO-007). The message never repeats the
+        // program's words: a boss reads this, and they are the program's to choose.
+        if token_only
+            && window_app(&*win)?
+                .tabs()
+                .get(tab)
+                .and_then(|tab| tab.pane_at(pane))
+                .is_some_and(|pane| pane.awaits_approval())
+        {
+            return Err(RpcError {
+                target: Some(id),
+                ..RpcError::new(
+                    ErrorCode::DeniedGrant,
+                    "this session is waiting on a person's permission, trust or sign-in, which \
+                     a token can't answer: tell the person",
+                )
+            });
+        }
         // Per pane, not per connection: a client opening a connection per call
         // must not get a fresh burst each time (ADR amendment 2).
         let bucket = self

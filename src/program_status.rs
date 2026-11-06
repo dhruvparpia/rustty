@@ -283,6 +283,16 @@ impl Records {
             .retain(|r| !matches!(r.state, State::Done | State::Error));
     }
 
+    /// Whether any record is waiting on a person's permission or sign-in. A program
+    /// saying this falsely can only stop a token writing to it (AUTO-007).
+    #[must_use]
+    pub fn awaits_approval(&self) -> bool {
+        self.records.iter().any(|record| {
+            record.state == State::Blocked
+                && matches!(record.kind.as_deref(), Some("permission" | "auth"))
+        })
+    }
+
     /// The record that matters most, if any.
     #[must_use]
     pub fn summary(&self) -> Option<&Record> {

@@ -352,7 +352,7 @@ pub const OPERATIONS: &[OpSpec] = &[
             json!({"type": "object", "additionalProperties": false, "required": ["protocolVersion"], "properties": {
                 "protocolVersion": {"type": "integer"},
                 "clientName": {"type": "string"},
-                "token": {"type": "string", "description": "This window's write token: grants writes to this connection."},
+                "token": {"type": "string", "description": "This window's write token: lets this connection open sessions and write to the ones opened with it."},
             }})
         },
     },
@@ -463,7 +463,7 @@ pub const OPERATIONS: &[OpSpec] = &[
     OpSpec {
         name: "pane.send-text",
         write: true,
-        description: "Type text into a pane's session, as if typed. Use \\r for Enter. At most 8 KiB a call, 64 KiB/s per pane; over the rate gives rate-limited with retryAfterMs.",
+        description: "Type text into a pane's session, as if typed. Use \\r for Enter. At most 8 KiB a call, 64 KiB/s per pane; over the rate gives rate-limited with retryAfterMs. With only a token, refused with denied-grant while the session waits on a person's permission, trust or sign-in: tell the person.",
         params: || {
             json!({"type": "object", "additionalProperties": false, "required": ["pane", "text"], "properties": {
                 "pane": {"type": "integer", "description": "Pane id."},
