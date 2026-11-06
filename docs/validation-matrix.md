@@ -23,6 +23,34 @@ individually with `cargo test --release -- --ignored --nocapture --exact <name>`
 | Integration suite | 8 + 4 tests (`tests/`) | pass |
 | Damage row masks | damage repaint covers only dirty rows (`damage_frames_cover_only_the_dirty_rows`, desktop) | pass |
 
+## Project secrets (SECRET-001..012)
+
+Automated rows use a fake `op` or stand-in children (`cmd.exe`, `findstr.exe`); none
+touches a 1Password account. `op` is on 2.39.0 on this machine.
+
+| Area | Coverage | Result |
+| --- | --- | --- |
+| Manifest, names, references | Literal values refused and never quoted, including through `toml`'s own error text; reserved names; case-only duplicates (`secrets::tests`) | pass |
+| Vault naming, project identity | FNV vector, verbatim prefix and case ignored, awkward folder names, subfolder, linked worktree to main checkout, submodule stays separate | pass |
+| `LockedSecret` | Page alignment, lock proved with `VirtualUnlock`, ciphertext at rest and after each use, re-encrypted after a panic, nested access refused, redacted `Debug`, working-set quota raised, WER exclusion on this build (`secure_mem::tests`) | pass |
+| Token store | Real DPAPI round trip, no plaintext on disk, blob bound to its vault, names cannot leave the folder | pass |
+| `setup`, `add`, `list`, `run` logic | Exact `op` arguments, call order, token never in output, files or arguments, value only on stdin, nothing starts on any failed or empty fetch, only the requested names (`secrets::tests::with_locked_memory`) | pass |
+| Runner and launcher | Real children: stdin, stdout and stderr pipes, floods without deadlock, oversized output refused, token only in the child, 32-bit exit code, batch files with injection attempt, bare names never from the current directory, only the standard handles inherited (`secret_exec::tests`) | pass |
+| Binary | Exit codes and refusals through `rustty.exe` for paths that stop before `op` (`tests/secrets_cli.rs`) | pass |
+| Real `op` | `op --version` through the production resolver and spawn path (`real_op_version_runs_through_the_production_path`, ignored by default, run by hand) | pass |
+
+Not verified, because no test may touch the owner's real account. To be run by the
+owner:
+
+| Step | What it proves | Result |
+| --- | --- | --- |
+| `rustty secrets setup` | `op vault get/create` and `op service-account create --raw` accept these arguments; `--raw` prints only the token; re-running after a partial failure works (a second account with the same name is untested) | open |
+| `rustty secrets add NAME --from op://...` | `op item create -` accepts the JSON template (`LOGIN` with a concealed `password` field, the shape in 1Password's docs; `op item template get` was off limits); the recorded reference resolves | open |
+| `rustty secrets run --only NAME -- cmd` | The service-account token reads the value with no approval prompt, and the value reaches the command | open |
+| `.cmd` shims through `run` (for example `npm`) | Real shims behave with the quoting; covered only with a test script so far | open |
+| Ctrl+C during `run` | The command receives it and its exit code is still returned | open |
+| Crash dump inspection | A WER dump leaves out the secret pages; only the registration call is checked | open |
+
 ## Desktop benches (this machine, run individually)
 
 Suite runs AV at process teardown on this machine (pre-existing, present at

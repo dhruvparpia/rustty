@@ -10,6 +10,13 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Added
 
+- Per-project 1Password secrets (SECRET-001..012): `rustty secrets setup`, `add`, `list` and
+  `run --only A,B -- cmd` give each project its own small vault and read-only service account, so
+  agents stop prompting for approval in every sub-shell. Values are held in locked, encrypted memory
+  and the started command's environment block is wiped straight after it starts. This limits damage
+  and cannot prevent it: code running as the same Windows user can still reach these secrets, and a
+  command given a secret can print it. A separate Windows user for agents is the real boundary, and
+  it is not built.
 - Copper native dark/light skins, independent UI color overrides, native caption
   Fix: caption uses the window background instead of the tab-bar strip, title icon slots are reserved only when an icon is drawn, and the active-tab marker is 3 DIPs.
   colors and positional active-tab/palette/bookmark indicators. See

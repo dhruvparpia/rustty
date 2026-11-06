@@ -1280,6 +1280,41 @@ owns managed PTYs independently of any client. Console attach
 
 ---
 
+## 9.33 Project secrets requirements
+
+`rustty secrets` gives each project one small 1Password vault with its own
+read-only service account, so agents can fetch the secrets they need without a
+1Password approval prompt for every sub-shell. A service account cannot reach a
+Private vault, and its vault access cannot change after creation, so each
+project needs its own.
+
+**What this does not protect against (SECRET-012).** The threat considered is a
+compromised agent running as the same Windows user. This design limits the
+damage: a project's token reads one vault, and `run` hands a command only the
+names it asks for. It cannot prevent the damage. Code running as the same
+Windows user can still reach these secrets: it can decrypt the token file with
+DPAPI, because DPAPI protects against other users and not against this one; it
+can read a running process's memory and environment; and it can replace a
+per-user `op.exe`. A command given a secret can print it. A separate Windows
+user for agents is the real boundary, and it is not built.
+
+| ID | Requirement | Priority |
+|---|---|---|
+| SECRET-001 | The project manifest `.rustty/secrets.toml` maps a NAME to an `op://` reference under a `[secrets]` table and holds no values. It may be committed. Unknown keys are refused. | P2 |
+| SECRET-002 | Names shall be safe as Windows environment variables (`[A-Za-z_][A-Za-z0-9_]*`, at most 255 characters, unique ignoring case) and shall not be `PATH`, `PATHEXT`, `SYSTEMROOT`, `WINDIR`, `COMSPEC` or start with `OP_`. References shall match the documented `op://vault/item/[section/]field[?query]` syntax with only letters, digits, `-`, `_`, `.` and spaces in a segment. Anything else is refused, so a literal secret cannot be stored in the manifest. No error message quotes a rejected value, a manifest line or a stray argument. | P2 |
+| SECRET-003 | A project's vault is named `rustty-<slug>-<hash>`: the folder name as `[a-z0-9-]`, at most 32 characters, and 8 hex digits of FNV-1a over the canonical project path (no verbatim prefix, lower case). The project is the nearest ancestor of the working directory or `--dir` holding a manifest or `.git`. A linked Git worktree resolves to its main checkout, so all worktrees of a repository share one project. Moving a project folder changes its vault name: run `setup` and `add` again. | P2 |
+| SECRET-004 | Secret memory shall be page-aligned `VirtualAlloc` pages held with `VirtualLock`, and zeroed by a volatile write when dropped. Locking fails closed: the working-set quota is raised once, and memory that still cannot be locked is never used. | P2 |
+| SECRET-005 | Secret pages should be excluded from Windows Error Reporting dumps with `WerRegisterExcludedMemoryBlock`, looked up at run time because it needs Windows 10 2004 (FR-109). This is best effort and does not affect other dump tools. | P2 |
+| SECRET-006 | `LockedSecret` shall be encrypted with `CryptProtectMemory` (same-process) at rest, reachable only through a `with_plaintext` closure, and re-encrypted when that closure ends, including by a panic. It has no `Display`, and its `Debug` shows neither contents nor length. Off Windows every operation fails: there is no insecure fallback. | P2 |
+| SECRET-007 | Each project's service-account token is stored encrypted with DPAPI `CryptProtectData`, with the vault name as entropy, in `<vault>.token` under `%LOCALAPPDATA%\rustty\secrets`, taken from the known folder and not the environment variable. It is never in the project folder or the config. | P2 |
+| SECRET-008 | `rustty secrets setup [--dir D] [--json]` runs `op vault get <vault>`, `op vault create <vault>` if that failed, and `op service-account create <vault> --vault <vault>:read_items --raw`, and stores the token from stdout. The token is never printed or logged. The store and manifest are checked before anything is created, because `op` shows the token only once. A project already holding a token is left alone. `secrets` is a verb only as the first argument (`.\secrets` opens a folder) and a malformed verb never opens a window. Stable exit codes across the verbs: 2 usage, 3 not found, 8 manifest, 9 `op`, 10 token store, 11 secure memory, 12 command did not start. | P2 |
+| SECRET-009 | `rustty secrets add NAME --from op://... [--dir D] [--json]` runs `op read --no-newline <from>` and `op item create --vault <vault> --format json -`, under the owner's own 1Password session because the service account is read-only, and records `op://<vault>/<NAME>/password`. The value travels only through `op`'s stdout and stdin and locked memory in between, never a command line. A name already in the manifest is refused. `rustty secrets list [--dir D] [--json]` shows names and references, never values, and does not call `op`. | P2 |
+| SECRET-010 | `rustty secrets run --only A,B [--dir D] -- cmd args...` fetches only the named secrets with `op read --no-newline <reference>`, with the token only in that child's `OP_SERVICE_ACCOUNT_TOKEN`, and returns the command's full 32-bit exit code. Names are required: there is no default of all. A name not in the manifest, a reference outside the project's vault, a failed read or an empty, non-text or oversized value stops it before the command starts. `op` is located only in `Program Files\1Password CLI`, `Program Files\WinGet\Links` and the per-user WinGet folders. There shall be no environment or config override for its path, and neither `PATH` nor the current directory is searched for it. It runs from its own folder with inherited `OP_*` settings removed. | P2 |
+| SECRET-011 | The command starts through `CreateProcessW` with an environment block built in locked memory and wiped straight after the call, along with each secret, before the wait. It inherits stdio and no other handle, and its working directory is unchanged by `--dir`. A bare command name is searched on the absolute `PATH` entries only, never the current directory. A `.cmd` or `.bat` runs through `cmd.exe` from the system directory with every argument quoted, and an argument holding a quote, a percent sign or a line break is refused. | P2 |
+| SECRET-012 | The documentation shall state the limit above plainly. This feature shall not be described as protecting secrets from code running as the same Windows user. | P2 |
+
+---
+
 # 10. Non-Functional Requirements
 
 ## NFR-1: Performance
@@ -2891,6 +2926,9 @@ No clipboard access without user action.
 No config auto-download.
 No update auto-check.
 ```
+
+`rustty secrets` (§9.33) limits what a compromised agent can reach. It is not a
+boundary against code running as the same Windows user (SECRET-012).
 
 ---
 
