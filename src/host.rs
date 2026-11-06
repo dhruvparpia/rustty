@@ -2028,6 +2028,17 @@ pub mod client {
         pub lock: Arc<Mutex<u8>>,
     }
 
+    /// The live sessions in a `session.list` response frame.
+    pub(super) fn live_count_in(frame: &Value) -> Option<usize> {
+        let sessions = frame.get("result")?.get("sessions")?.as_array()?;
+        Some(
+            sessions
+                .iter()
+                .filter(|s| s.get("state").and_then(Value::as_str) == Some("live"))
+                .count(),
+        )
+    }
+
     /// Locate `rustty-host.exe` beside this executable.
     #[must_use]
     pub fn host_exe_path() -> Option<std::path::PathBuf> {
@@ -2134,14 +2145,7 @@ pub mod client {
         #[must_use]
         pub fn live_session_count() -> Option<usize> {
             let mut client = Self::connect_existing().ok()?;
-            let result = client.call("session.list", json!({})).ok()?;
-            let sessions = result.get("sessions")?.as_array()?;
-            Some(
-                sessions
-                    .iter()
-                    .filter(|s| s.get("state").and_then(Value::as_str) == Some("live"))
-                    .count(),
-            )
+            live_count_in(&client.call("session.list", json!({})).ok()?)
         }
 
         /// Connect to the live host, spawning one when none answers;
@@ -2746,5 +2750,25 @@ mod tests {
         assert_eq!(SNAPSHOT_SCHEMA, "host-snapshot/v1".to_string());
         assert_eq!(crate::tasks::VERSION, 1);
         assert_eq!(crate::workspace::VERSION, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn counts_live_sessions_in_a_response_frame() {
+        // Break caught: reading sessions from the frame instead of its
+        // result, which made the banner's status never appear.
+        let frame = json!({"jsonrpc": "2.0", "id": 2, "result": {"sessions": [
+            {"alias": 1, "state": "live"},
+            {"alias": 2, "state": "exited"},
+            {"alias": 3, "state": "live"},
+        ]}});
+        assert_eq!(client::live_count_in(&frame), Some(2));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_error_frame_has_no_count() {
+        let frame = json!({"jsonrpc": "2.0", "id": 2, "error": {"code": "x"}});
+        assert_eq!(client::live_count_in(&frame), None);
     }
 }
