@@ -421,7 +421,7 @@ mod tests {
             parse(&format!("state=done:id={}", "a".repeat(33))),
             Report::Ignored
         );
-        let deep = vec!["a"; 9].join("/");
+        let deep = ["a"; 9].join("/");
         assert_eq!(parse(&format!("state=done:id={deep}")), Report::Ignored);
         assert_eq!(parse("state=done:app=has space"), Report::Ignored);
     }
