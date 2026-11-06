@@ -25,6 +25,7 @@
 
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
@@ -1329,6 +1330,10 @@ struct WindowState {
     rail_enabled: bool,
     /// The left button went down in the grid and has not come back up.
     grid_pressed: bool,
+    /// The open roadmap board (BOARD-001).
+    board: Option<BoardOpen>,
+    /// A worktree being created off the UI thread, and the tab title for it.
+    worktree_rx: Option<Receiver<(std::result::Result<PathBuf, String>, String)>>,
     /// When to look for agent CLIs next (RESTORE-002).
     agent_next_poll: Option<Instant>,
     /// The process list being read off the UI thread.
@@ -2010,6 +2015,7 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             rail_tick(hwnd);
             agent_tick(hwnd);
+            worktree_tick(hwnd);
             if wparam.0 == CLACK_TIMER {
                 clack_tick(hwnd);
             } else if wparam.0 == BLINK_TIMER {
@@ -2452,6 +2458,8 @@ fn create_quick_window() {
         clack: None,
         rail_enabled: false,
         grid_pressed: false,
+        board: None,
+        worktree_rx: None,
         agent_next_poll: None,
         agent_rx: None,
         session_next_save: None,
@@ -3049,6 +3057,242 @@ fn resume_interrupted(hwnd: HWND) {
     });
 }
 
+/// The roadmap board while it is open.
+struct BoardOpen {
+    state: crate::board::State,
+    /// The project it belongs to.
+    root: PathBuf,
+    /// Its name, for the heading.
+    project: String,
+    /// The card a press started on.
+    drag: Option<(usize, usize)>,
+}
+
+/// The project the active session is in.
+fn active_project_root(s: &WindowState) -> PathBuf {
+    let cwd = s
+        .app
+        .active_tab()
+        .and_then(|tab| tab.pane().saved_cwd().map(PathBuf::from))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    crate::project_brain::project_root(&cwd)
+}
+
+/// Read the board's file again: people and agents edit it too.
+fn board_reload(open: &mut BoardOpen) {
+    let path = crate::project_brain::roadmap_path(&open.root);
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    open.state.board = crate::board::Board::parse(&text);
+    open.state.clamp();
+}
+
+/// Draw the board as it is now.
+fn board_show(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let view = s.board.as_ref().map(|open| open.state.view(&open.project));
+    if let Some(r) = &mut s.renderer {
+        r.set_board(view);
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Open the board for the active session's project, or close it.
+fn toggle_board(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.board.take().is_none() {
+        s.palette = None;
+        s.search = None;
+        s.hint = None;
+        s.bookmarks_open = false;
+        s.settings_open = false;
+        let root = active_project_root(s);
+        let project = rail::project_of(Some(&root.to_string_lossy()));
+        let mut open = BoardOpen {
+            state: crate::board::State::default(),
+            root,
+            project,
+            drag: None,
+        };
+        board_reload(&mut open);
+        s.board = Some(open);
+    }
+    s.suppress_char = true;
+    board_show(hwnd);
+}
+
+/// Write the board's file; a failure is said out loud and loses nothing typed.
+fn board_save(hwnd: HWND) {
+    let Some(open) = state_ref(hwnd).and_then(|s| s.board.as_ref()) else {
+        return;
+    };
+    let path = crate::project_brain::roadmap_path(&open.root);
+    if let Err(e) = crate::board::write_file(&path, &open.state.board.render()) {
+        show_message(hwnd, &format!("Could not save the roadmap: {e}"));
+    }
+}
+
+/// Handle a key on the open board.
+fn board_key(hwnd: HWND, key: crate::board::Key) {
+    use crate::board::Action;
+    let Some(open) = state_mut(hwnd).and_then(|s| s.board.as_mut()) else {
+        return;
+    };
+    board_reload(open);
+    let root = open.root.clone();
+    match open.state.key(key) {
+        Action::None => {}
+        Action::Close => {
+            if let Some(s) = state_mut(hwnd) {
+                s.board = None;
+            }
+        }
+        Action::Save => board_save(hwnd),
+        Action::OpenSession(title) => {
+            board_save(hwnd);
+            if let Some(s) = state_mut(hwnd) {
+                s.board = None;
+            }
+            board_show(hwnd);
+            open_session_in(hwnd, &root, Some(&title));
+            return;
+        }
+        Action::OpenWorktree(title) => {
+            board_save(hwnd);
+            if let Some(s) = state_mut(hwnd) {
+                s.board = None;
+            }
+            board_show(hwnd);
+            start_worktree_session(hwnd, root, &title, title.clone());
+            return;
+        }
+    }
+    board_show(hwnd);
+}
+
+/// A press on the open board: select what is under it, ready to drag.
+fn board_press(hwnd: HWND, x: f32, y: f32) {
+    let hit = state_ref(hwnd)
+        .and_then(|s| s.renderer.as_ref())
+        .and_then(|r| r.board_hit(x, y));
+    let Some(open) = state_mut(hwnd).and_then(|s| s.board.as_mut()) else {
+        return;
+    };
+    open.drag = None;
+    if let Some((column, row)) = hit {
+        open.state.column = column;
+        open.state.row = row.unwrap_or(0);
+        open.state.clamp();
+        open.drag = row.map(|row| (column, row));
+    }
+    board_show(hwnd);
+}
+
+/// A release on the open board: a card dropped on another column moves there.
+fn board_release(hwnd: HWND, x: f32, y: f32) {
+    let hit = state_ref(hwnd)
+        .and_then(|s| s.renderer.as_ref())
+        .and_then(|r| r.board_hit(x, y));
+    let Some(open) = state_mut(hwnd).and_then(|s| s.board.as_mut()) else {
+        return;
+    };
+    let Some((from, row)) = open.drag.take() else {
+        return;
+    };
+    let Some((to, _)) = hit.filter(|&(to, _)| to != from) else {
+        return;
+    };
+    board_reload(open);
+    if let Some(new_row) = open.state.board.move_card(from, row, to) {
+        open.state.column = to;
+        open.state.row = new_row;
+        board_save(hwnd);
+    }
+    board_show(hwnd);
+}
+
+/// Open a session in `dir`, with `title` when it has a name of its own.
+fn open_session_in(hwnd: HWND, dir: &std::path::Path, title: Option<&str>) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let mut spec = active_profile(s);
+    spec.cwd = Some(dir.to_string_lossy().into_owned());
+    new_tab_with_profile(hwnd, spec);
+    if let Some(title) = title
+        && let Some(tab) = state_mut(hwnd).and_then(|s| s.app.active_tab_mut())
+    {
+        tab.set_title(title);
+    }
+}
+
+/// Create a worktree off the UI thread, then open a session in it (WORKTREE-010).
+fn start_worktree_session(hwnd: HWND, dir: PathBuf, name: &str, title: String) {
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.worktree_rx.is_some() {
+        show_message(hwnd, "A worktree is already being created.");
+        return;
+    }
+    let name = name.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("rustty-worktree".to_string())
+        .spawn(move || {
+            let _ = tx.send((crate::worktree::create(&dir, &name), title));
+        });
+    match spawned {
+        Ok(_) => s.worktree_rx = Some(rx),
+        Err(e) => show_message(hwnd, &format!("Could not create the worktree: {e}")),
+    }
+}
+
+/// A new session in its own worktree of the active session's project.
+fn new_worktree_session(hwnd: HWND) {
+    let Some(s) = state_ref(hwnd) else { return };
+    let root = active_project_root(s);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let name = format!("session-{}", stamp % 1_000_000);
+    start_worktree_session(hwnd, root, &name, name.clone());
+}
+
+/// Open the session for a finished worktree.
+fn worktree_tick(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(rx) = &s.worktree_rx else { return };
+    match rx.try_recv() {
+        Ok((result, title)) => {
+            s.worktree_rx = None;
+            match result {
+                Ok(path) => open_session_in(hwnd, &path, Some(&title)),
+                Err(e) => show_message(hwnd, &format!("Could not create the worktree: {e}")),
+            }
+        }
+        Err(TryRecvError::Disconnected) => s.worktree_rx = None,
+        Err(TryRecvError::Empty) => {}
+    }
+}
+
+/// Create any missing brain files for the active session's project.
+fn init_project_brain(hwnd: HWND) {
+    let Some(s) = state_ref(hwnd) else { return };
+    let root = active_project_root(s);
+    let text = match crate::project_brain::init(&root) {
+        Ok(made) if made.is_empty() => {
+            format!(
+                "This project already has a brain in {}.",
+                crate::project_brain::brain_dir(&root).display()
+            )
+        }
+        Ok(made) => format!(
+            "Created {} files in {}.",
+            made.len(),
+            crate::project_brain::brain_dir(&root).display()
+        ),
+        Err(e) => format!("Could not create the project brain: {e}"),
+    };
+    show_message(hwnd, &text);
+}
+
 /// Show or hide the sessions sidebar.
 fn toggle_session_rail(hwnd: HWND) {
     if let Some(s) = state_mut(hwnd) {
@@ -3592,6 +3836,31 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
         toggle_bookmarks_overlay(hwnd);
         return;
     }
+    // BOARD-001: the roadmap board.
+    if mods.ctrl && mods.shift && !mods.alt && vk == 0x52 {
+        toggle_board(hwnd);
+        return;
+    }
+    if state_ref(hwnd).is_some_and(|s| s.board.is_some()) {
+        use crate::board::Key;
+        // Printable keys arrive as WM_CHAR.
+        let key = match vk {
+            0x25 if mods.shift => Some(Key::MoveLeft),
+            0x27 if mods.shift => Some(Key::MoveRight),
+            0x25 => Some(Key::Left),
+            0x27 => Some(Key::Right),
+            0x26 => Some(Key::Up),
+            0x28 => Some(Key::Down),
+            0x0D => Some(Key::Enter),
+            0x1B => Some(Key::Esc),
+            0x08 => Some(Key::Backspace),
+            _ => None,
+        };
+        if let Some(key) = key {
+            board_key(hwnd, key);
+        }
+        return;
+    }
     // While the bookmark list is open every keydown is swallowed:
     // Up/Down/Enter/d/Esc drive it, and WM_CHAR is suppressed (issue #53).
     if state_ref(hwnd).is_some_and(|s| s.bookmarks_open) {
@@ -3819,6 +4088,12 @@ fn handle_char(hwnd: HWND, code: u32, sys: bool) {
         palette.push_char(ch);
         palette.refresh();
         let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+        return;
+    }
+    if s.board.is_some() {
+        if !ch.is_control() {
+            board_key(hwnd, crate::board::Key::Char(ch));
+        }
         return;
     }
     // #91 settings overlay: typed text builds the TOML value.
@@ -5008,6 +5283,19 @@ fn standard_rows(ctx: &RowCtx, shortcut: impl Fn(KeyAction) -> Option<String>) -
         KeyAction::ToggleSessionRail,
         None,
     );
+    push("Roadmap Board", "Project", KeyAction::ToggleBoard, None);
+    push(
+        "New Session in Worktree",
+        "Project",
+        KeyAction::NewWorktreeSession,
+        None,
+    );
+    push(
+        "Create Project Brain",
+        "Project",
+        KeyAction::InitProjectBrain,
+        None,
+    );
     push(
         "Hide Quick Terminal",
         "Window",
@@ -5569,7 +5857,7 @@ fn cell_at(s: &WindowState, x: f32, y: f32, height: f32) -> Option<(usize, usize
         return None;
     }
     let tab = s.app.active_tab()?;
-    if x < s.rail_w {
+    if x < s.rail_w || s.board.is_some() {
         return None;
     }
     let col = ((x - s.rail_w - s.pad_x()) / s.metrics.cell_width)
@@ -5973,6 +6261,10 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
         rail_click(hwnd, x, y);
         return;
     }
+    if state_ref(hwnd).is_some_and(|s| s.board.is_some()) {
+        board_press(hwnd, x, y);
+        return;
+    }
     if let Some(s) = state_mut(hwnd) {
         s.grid_pressed = true;
     }
@@ -6251,6 +6543,11 @@ fn invalidate_tab_bar(hwnd: HWND) {
 /// WM_LBUTTONUP: end the selection drag (the selection stays visible
 /// and copyable until the next click).
 fn handle_lbutton_up(hwnd: HWND, lparam: LPARAM) {
+    if state_ref(hwnd).is_some_and(|s| s.board.is_some()) {
+        let (x, y) = cursor_dips(hwnd, lparam);
+        board_release(hwnd, x, y);
+        return;
+    }
     if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
         && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
     {
@@ -7351,6 +7648,9 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
         KeyAction::HintMode => toggle_hint(hwnd),
         KeyAction::ToggleBookmark => toggle_bookmark(hwnd),
         KeyAction::ToggleSessionRail => toggle_session_rail(hwnd),
+        KeyAction::ToggleBoard => toggle_board(hwnd),
+        KeyAction::NewWorktreeSession => new_worktree_session(hwnd),
+        KeyAction::InitProjectBrain => init_project_brain(hwnd),
         KeyAction::ShowBookmarks => toggle_bookmarks_overlay(hwnd),
         KeyAction::ExportSelection => export_selection(hwnd),
         KeyAction::ExportLastCommand => export_last_command(hwnd),
@@ -8018,6 +8318,8 @@ pub fn run(
         clack: None,
         rail_enabled: cfg.session_rail,
         grid_pressed: false,
+        board: None,
+        worktree_rx: None,
         agent_next_poll: None,
         agent_rx: None,
         session_next_save: None,

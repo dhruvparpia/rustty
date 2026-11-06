@@ -249,8 +249,13 @@ pub fn project_of(cwd: Option<&str>) -> String {
     let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty()) else {
         return "Other".to_string();
     };
-    let trimmed = cwd.trim_end_matches(['/', '\\']);
-    let last = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+    // A worktree of ours belongs to its main checkout.
+    let normal = cwd.replace('\\', "/");
+    let main = normal
+        .find(&format!("/{}/", crate::worktree::WORKTREE_DIR))
+        .map_or(normal.as_str(), |at| &normal[..at]);
+    let trimmed = main.trim_end_matches('/');
+    let last = trimmed.rsplit('/').next().unwrap_or(trimmed);
     // A drive or filesystem root has no folder name of its own.
     if last.is_empty() || last.ends_with(':') {
         clean_message(cwd)
@@ -987,5 +992,16 @@ mod tests {
             most_urgent([Status::Interrupted, Status::NeedsYou]),
             Status::NeedsYou
         );
+    }
+
+    #[test]
+    fn a_worktree_session_groups_with_its_project() {
+        // Break caught: every worker listed as its own project.
+        assert_eq!(project_of(Some("C:/src/api/.worktrees/fix-login")), "api");
+        assert_eq!(
+            project_of(Some("C:\\src\\api\\.worktrees\\fix-login\\src")),
+            "api"
+        );
+        assert_eq!(project_of(Some("C:/src/api")), "api");
     }
 }

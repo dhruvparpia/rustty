@@ -608,6 +608,8 @@ pub struct Renderer {
     rail_width: f32,
     /// Sidebar rows, grouped.
     rail_rows: Vec<rail::Row>,
+    /// The open roadmap board.
+    board: Option<crate::board::View>,
     /// Where each sidebar item goes, reused between frames.
     rail_placed: Vec<rail::Placed>,
     /// What the pointer is over in the sidebar.
@@ -919,6 +921,7 @@ impl Renderer {
             caption_height: 0.0,
             rail_width: 0.0,
             rail_rows: Vec::new(),
+            board: None,
             rail_placed: Vec::new(),
             rail_hover: rail::Hit::None,
             rail_scroll: 0.0,
@@ -1023,6 +1026,122 @@ impl Renderer {
         let changed = (self.rail_pulse - pulse).abs() > f32::EPSILON;
         self.rail_pulse = pulse;
         changed
+    }
+
+    /// Show the roadmap board, or take it away.
+    pub fn set_board(&mut self, view: Option<crate::board::View>) {
+        self.board = view;
+    }
+
+    /// What the point (`x`, `y`) is over on the board: column, then card.
+    #[must_use]
+    pub fn board_hit(&self, x: f32, y: f32) -> Option<(usize, Option<usize>)> {
+        let view = self.board.as_ref()?;
+        let px = unsafe { self.target.GetPixelSize() };
+        let width = px_to_dips(px.width, self.dpi) - self.rail_width;
+        let height = px_to_dips(px.height, self.dpi) - self.caption_height;
+        crate::board::hit(
+            view,
+            x - self.rail_width,
+            y - self.caption_height,
+            width,
+            height,
+        )
+    }
+
+    /// The roadmap board, over the terminal area.
+    fn paint_board(&mut self, view: &crate::board::View, theme: &Theme, width: f32, height: f32) {
+        use crate::board::{
+            CARD_HEIGHT, COLUMN_HEADER_HEIGHT, COLUMNS, GUTTER, HEADER_HEIGHT, column_width,
+            first_visible,
+        };
+        let ui = theme.ui_colors();
+        let top = self.caption_height;
+        let area = (height - top).max(0.0);
+        self.fill_rect(0.0, top, width, height, theme.background);
+        let title = self.tab_format.clone();
+        let small = self.rail_small_format.clone();
+        let rect = |left: f32, top: f32, right: f32, bottom: f32| D2D_RECT_F {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let heading = format!("Roadmap \u{b7} {}", view.project);
+        self.draw_rail_text(
+            &heading,
+            &title,
+            rect(GUTTER + 2.0, top + 12.0, width * 0.4, top + 36.0),
+            ui.foreground,
+        );
+        self.draw_rail_text(
+            "Arrows select \u{b7} Shift+arrows move \u{b7} Enter session \u{b7} W worktree \u{b7} N new \u{b7} Esc close",
+            &small,
+            rect(width * 0.4, top + 16.0, width - GUTTER, top + 36.0),
+            ui.muted,
+        );
+        let w = column_width(width);
+        for (at, name) in COLUMNS.iter().enumerate() {
+            let left = GUTTER + w * at as f32;
+            let right = left + w - GUTTER;
+            let cards = &view.columns[at];
+            let label = format!("{name}  {}", cards.len());
+            let color = if at == view.column {
+                ui.accent
+            } else {
+                ui.muted
+            };
+            self.draw_rail_text(
+                &label,
+                &small,
+                rect(
+                    left + 2.0,
+                    top + HEADER_HEIGHT + 8.0,
+                    right,
+                    top + HEADER_HEIGHT + 28.0,
+                ),
+                color,
+            );
+            let first_top = top + HEADER_HEIGHT + COLUMN_HEADER_HEIGHT;
+            let first = first_visible(view, at, area);
+            for (slot, card) in cards.iter().skip(first).enumerate() {
+                let y = first_top + CARD_HEIGHT * slot as f32;
+                if y + CARD_HEIGHT > height {
+                    break;
+                }
+                let selected = at == view.column && first + slot == view.row;
+                let fill = if selected {
+                    theme.tab_active
+                } else {
+                    theme.tab_bar
+                };
+                self.fill_rect(left, y, right, y + CARD_HEIGHT - 6.0, fill);
+                if selected {
+                    self.fill_rect(left, y, left + 2.0, y + CARD_HEIGHT - 6.0, ui.accent);
+                }
+                self.draw_rail_text(
+                    card,
+                    &title,
+                    rect(left + 10.0, y + 9.0, right - 6.0, y + CARD_HEIGHT - 8.0),
+                    ui.foreground,
+                );
+            }
+            if at == view.column
+                && let Some(text) = &view.editing
+            {
+                let shown = cards.len().saturating_sub(first);
+                let y = (first_top + CARD_HEIGHT * shown as f32).min(height - CARD_HEIGHT);
+                self.fill_rect(left, y, right, y + CARD_HEIGHT - 6.0, theme.tab_active);
+                self.fill_rect(left, y, left + 2.0, y + CARD_HEIGHT - 6.0, ui.accent);
+                let typing = format!("{text}\u{2502}");
+                self.draw_rail_text(
+                    &typing,
+                    &title,
+                    rect(left + 10.0, y + 9.0, right - 6.0, y + CARD_HEIGHT - 8.0),
+                    ui.foreground,
+                );
+            }
+        }
     }
 
     /// Scroll the sidebar's list by `delta` DIPs.
@@ -2127,6 +2246,10 @@ impl Renderer {
             self.paint_bookmarks(rows, sel, theme, width, height);
         } else if let Some(search) = search {
             self.paint_search_bar(search, search_ctx, theme, width, height);
+        }
+        if let Some(view) = self.board.take() {
+            self.paint_board(&view, theme, width, height);
+            self.board = Some(view);
         }
         if rail_shift > 0.0 {
             unsafe { self.target.SetTransform(&Matrix3x2::identity()) };

@@ -789,6 +789,9 @@ The product must support common terminal/TUI applications.
 
 | ID | Requirement | Priority |
 |---|---|---|
+| WORKTREE-010 | "New Session in Worktree" shall create a Git worktree on a new branch under the main checkout's `.worktrees` folder, keep that folder out of `git status`, and open a session in it. A taken name gets a number. Sessions in these worktrees group with their project in the sidebar. | P1 |
+| BRAIN-001 | "Create Project Brain" shall create `BRAIN.md`, `roadmap.md` and `decisions.md` in `.rustty/brain`, and never overwrite a file that exists. | P2 |
+| BOARD-001 | Ctrl+Shift+R shall show the project's `roadmap.md` as a board with the columns Idea bank, Backlog, In progress and Done. The file stays hand-editable, is read again before every change, and keeps every line that is not a card. Cards can be added, and moved by keyboard or drag. Enter opens a session for a card, W opens one in its own worktree, and both move the card to In progress. | P2 |
 | RESTORE-001 | The session shall be saved when Windows asks to end the session and every 30 seconds when it changed, not only when the window closes. rustty shall register to come back after a Windows Update restart, when the person's restart-apps setting allows it. | P1 |
 | RESTORE-002 | rustty shall notice known agent CLIs running under a pane's shell, and read the working folder of the agent or shell from its process. | P1 |
 | RESTORE-003 | After a restart, a pane that was running an agent shall show as Interrupted. Clicking its row shall run that agent's resume command, from a fixed table and never from the session file. Typing in the pane dismisses the offer. | P1 |

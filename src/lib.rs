@@ -89,6 +89,7 @@ pub mod parser;
 // default because Direct2D needs a desktop session.
 /// The sessions sidebar: session status and row layout.
 pub mod agents;
+pub mod board;
 #[cfg(all(test, windows))]
 #[allow(
     unsafe_code,
@@ -96,6 +97,7 @@ pub mod agents;
 )]
 mod perf_bench;
 pub mod portable;
+pub mod project_brain;
 pub mod rail;
 /// Terminal search over screen + scrollback (SPEC SEARCH-001..015).
 pub mod search;

@@ -79,6 +79,21 @@ Driven through the real window, with screenshots read by hand.
 | Windows animation effects off | Not run live, to leave system settings alone. Covered by a unit test |
 | Windows 10 | Not run: no machine |
 
+## Roadmap board, project brain, worktree sessions, 2026-11-06
+
+Driven through the real window against a scratch Git repository.
+
+| Check | Result |
+|---|---|
+| Create Project Brain | Three files created, message shown. Unit test: existing files are kept |
+| Add cards, long title | Cards saved to `roadmap.md`, long title ends in an ellipsis |
+| Drag a card to another column | Moves, file updated |
+| Enter on a card | Session opens titled with the card, which moves to In progress |
+| W on a card | Worktree on a new branch, session opens in it and groups under the project; `git status` does not list `.worktrees` |
+| Shift+arrows | Not run live: needs real modifier state. Unit test covers the move |
+| Editing `roadmap.md` while the board is open | Not run live. The file is read again before every key |
+| A real keyboard | Not run: keys were sent as window messages |
+
 ## Restart safety (RESTORE-001..003), 2026-11-06
 
 Driven through the real window, with a copy of `ping.exe` named `claude.exe` as the agent. No real restart was run: the shutdown messages were sent by script and the processes then killed.

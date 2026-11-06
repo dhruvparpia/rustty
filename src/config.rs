@@ -583,6 +583,12 @@ pub enum KeyAction {
     ShowBookmarks,
     /// Show or hide the sessions sidebar (RAIL-001).
     ToggleSessionRail,
+    /// Show or hide the project's roadmap board (BOARD-001).
+    ToggleBoard,
+    /// Open a new session in its own Git worktree (WORKTREE-010).
+    NewWorktreeSession,
+    /// Create any missing project brain files (BRAIN-001).
+    InitProjectBrain,
     /// Export the current selection to a file (issue #53, EXPORT-001).
     ExportSelection,
     /// Export the last finished command's output to a file
@@ -634,6 +640,9 @@ impl KeyAction {
             "hint-mode" | "hints" => Self::HintMode,
             "toggle-bookmark" | "bookmark" => Self::ToggleBookmark,
             "toggle-session-rail" | "session-rail" => Self::ToggleSessionRail,
+            "toggle-board" | "board" => Self::ToggleBoard,
+            "new-worktree-session" => Self::NewWorktreeSession,
+            "init-project-brain" => Self::InitProjectBrain,
             "show-bookmarks" | "bookmarks" => Self::ShowBookmarks,
             "export-selection" => Self::ExportSelection,
             "export-last-command" | "export-command-output" => Self::ExportLastCommand,

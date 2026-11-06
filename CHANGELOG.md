@@ -40,6 +40,9 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Added
 
+- Worktree sessions, a project brain and a roadmap board: "New Session in Worktree" gives a session
+  its own branch and folder; "Create Project Brain" adds plain files agents can read in
+  `.rustty/brain`; Ctrl+Shift+R shows `roadmap.md` as a board where each card can open a session.
 - Restart safety: the session is saved when Windows shuts down and every 30 seconds, and panes that
   were running Claude Code or Codex come back as Interrupted, with a click to resume. Sidebar
   projects now follow an agent's real folder, even when the shell reports none.
