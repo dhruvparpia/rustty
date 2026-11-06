@@ -54,6 +54,10 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Added
 
+- A Boss Agent: "Start Boss Agent" in the command palette opens a Claude Code session that can
+  split work across sessions in their own worktrees, watch them, and report back. It stops before
+  merging, never pushes, and leaves permission prompts to you. `rustty worktree add NAME` creates a
+  worktree and prints its path.
 - The sidebar now shows when Claude Code is waiting on you, with its actual question, read from its
   screen. Programs can also report their status directly through OSC 7501.
 - Fixed: a window started without activation, such as from a "Run minimized" shortcut, had no

@@ -589,6 +589,8 @@ pub enum KeyAction {
     NewWorktreeSession,
     /// Create any missing project brain files (BRAIN-001).
     InitProjectBrain,
+    /// Start a Boss Agent session for this project (BOSS-001).
+    StartBoss,
     /// Export the current selection to a file (issue #53, EXPORT-001).
     ExportSelection,
     /// Export the last finished command's output to a file
@@ -643,6 +645,7 @@ impl KeyAction {
             "toggle-board" | "board" => Self::ToggleBoard,
             "new-worktree-session" => Self::NewWorktreeSession,
             "init-project-brain" => Self::InitProjectBrain,
+            "start-boss" => Self::StartBoss,
             "show-bookmarks" | "bookmarks" => Self::ShowBookmarks,
             "export-selection" => Self::ExportSelection,
             "export-last-command" | "export-command-output" => Self::ExportLastCommand,

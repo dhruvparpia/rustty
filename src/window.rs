@@ -3356,6 +3356,45 @@ fn worktree_tick(hwnd: HWND) {
     }
 }
 
+/// Start a Boss Agent session for the active session's project (BOSS-001).
+fn start_boss(hwnd: HWND) {
+    let Some(s) = state_ref(hwnd) else { return };
+    let root = active_project_root(s);
+    let exe = std::env::current_exe().unwrap_or_default();
+    let dir = std::env::temp_dir().join(format!("rustty-boss-{}", std::process::id()));
+    let root_text = root.to_string_lossy().into_owned();
+    let files = crate::boss::write_files(&dir, &exe.to_string_lossy(), &root_text);
+    let (mcp, brief) = match files {
+        Ok(files) => files,
+        Err(e) => {
+            show_message(hwnd, &format!("Could not start the Boss Agent: {e}"));
+            return;
+        }
+    };
+    let request = crate::automation::ops::SpawnRequest {
+        dir: Some(root_text),
+        profile: None,
+        name: Some("Boss".to_string()),
+        command: Some(crate::boss::command(&mcp, &brief)),
+        env: std::collections::BTreeMap::new(),
+    };
+    match open_boss_tab(hwnd, &request) {
+        Ok(_) => {
+            // A tab opened through the API stays in the background; the person
+            // asked for this one.
+            let last = state_ref(hwnd).map_or(0, |s| s.app.tab_count().saturating_sub(1));
+            activate_tab(hwnd, last);
+        }
+        Err(e) => show_message(
+            hwnd,
+            &format!(
+                "Could not start the Boss Agent. Is Claude Code installed? {}",
+                e.message
+            ),
+        ),
+    }
+}
+
 /// Create any missing brain files for the active session's project.
 fn init_project_brain(hwnd: HWND) {
     let Some(s) = state_ref(hwnd) else { return };
@@ -5372,6 +5411,7 @@ fn standard_rows(ctx: &RowCtx, shortcut: impl Fn(KeyAction) -> Option<String>) -
         KeyAction::NewWorktreeSession,
         None,
     );
+    push("Start Boss Agent", "Project", KeyAction::StartBoss, None);
     push(
         "Create Project Brain",
         "Project",
@@ -7734,6 +7774,7 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
         KeyAction::ToggleBoard => toggle_board(hwnd),
         KeyAction::NewWorktreeSession => new_worktree_session(hwnd),
         KeyAction::InitProjectBrain => init_project_brain(hwnd),
+        KeyAction::StartBoss => start_boss(hwnd),
         KeyAction::ShowBookmarks => toggle_bookmarks_overlay(hwnd),
         KeyAction::ExportSelection => export_selection(hwnd),
         KeyAction::ExportLastCommand => export_last_command(hwnd),

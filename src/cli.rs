@@ -55,6 +55,8 @@ pub struct Cli {
     pub take_control: bool,
     /// Arguments this version does not know.
     pub unknown: Vec<String>,
+    /// `rustty worktree ...`: create a worktree and print its path (BOSS-001).
+    pub worktree: Option<Vec<OsString>>,
     /// `secrets ...` as the first argument (SECRET-008). `Err` holds the usage
     /// text for a malformed verb, which must not open a GUI window.
     pub secrets: Option<Result<crate::secrets::SecretsVerb, String>>,
@@ -78,6 +80,10 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Cli {
     // AUTO-012: same rule. These never open a window; `.\ctl` still opens a folder.
     if args.next_if(|first| *first == "ctl").is_some() {
         cli.ctl = Some(args.collect());
+        return cli;
+    }
+    if args.next_if(|first| *first == "worktree").is_some() {
+        cli.worktree = Some(args.collect());
         return cli;
     }
     if args.next_if(|first| *first == "mcp").is_some() {

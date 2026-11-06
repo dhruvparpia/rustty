@@ -18,7 +18,9 @@ no web UI, no bundled interpreted runtime.
 > shape/blink, session restore, notifications, the quick terminal and persistent
 > sessions are built. A sessions sidebar shows every session and what it is doing:
 > needs you, working, finished. Ctrl+Shift+S hides it, and tabs then sit in the title
-> bar. Tapping Alt opens the window menu. See [`ROADMAP.md`](ROADMAP.md) for what ships in each version.
+> bar. "Start Boss Agent" runs a Claude Code session that hands work to other sessions in their own
+> worktrees, and `rustty ctl` and `rustty mcp` give any program the same control. Tapping Alt opens
+> the window menu. See [`ROADMAP.md`](ROADMAP.md) for what ships in each version.
 
 ## Vision
 

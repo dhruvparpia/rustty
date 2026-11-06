@@ -107,6 +107,22 @@ Driven through the real window, with screenshots read by hand.
 | Windows animation effects off | Not run live, to leave system settings alone. Covered by a unit test |
 | Windows 10 | Not run: no machine |
 
+## Boss Agent (BOSS-001), 2026-11-06
+
+One real run: Claude Code 2.1.319 as boss in a scratch Git repository, launched from the palette in a test window, told to use one worker for a one-file task. It ran in auto mode, which the test window inherited.
+
+| Check | Result |
+|---|---|
+| Boss tab opens with the MCP tools | Works. A stock MCP client, Claude Code, listed and called the tools |
+| Worker started through `rustty worktree add` and `tab_open` | Worktree `.worktrees/hello` on its own branch, row in the sidebar |
+| Worker's trust prompt | Did not appear: the new folder is inside the trusted project |
+| Boss watches the worker and reviews its diff | Reported the commit and diff correctly |
+| Stops before merging | Asked the person. `master` unchanged, nothing pushed |
+| Write token on disk | `mcp.json` holds only `${RUSTTY_AUTOMATION_TOKEN}` |
+| Permission prompts in the default mode | Not run. Write tools were approved by auto mode in this run |
+| A worker asking a permission question, several workers at once, a real merge | Not run |
+| Boss after a restart | Not supported: a resumed `claude --continue` has neither the tools nor a token. Start a new boss |
+
 ## Real Claude Code in the sidebar (STATUS-001, STATUS-002), 2026-11-06
 
 Claude Code 2.1.319 in a scratch folder, in a test window that was not in the foreground.

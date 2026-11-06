@@ -166,6 +166,48 @@ pub fn create(dir: &std::path::Path, name: &str) -> Result<std::path::PathBuf, S
     Err(format!("too many worktrees named {base}"))
 }
 
+/// `rustty worktree add NAME [--dir D]`: create a worktree and print its path.
+/// Returns the exit code.
+pub fn run_cli(args: &[std::ffi::OsString], out: &mut dyn std::io::Write) -> u8 {
+    const USAGE: &str = "usage: rustty worktree add NAME [--dir DIR]";
+    let mut args = args.iter();
+    let mut name = None;
+    let mut dir = None;
+    if args.next().is_none_or(|verb| verb != "add") {
+        eprintln!("rustty: {USAGE}");
+        return 2;
+    }
+    while let Some(arg) = args.next() {
+        if arg == "--dir" {
+            dir = args.next().map(std::path::PathBuf::from);
+        } else if name.is_none() {
+            name = Some(arg.to_string_lossy().into_owned());
+        } else {
+            eprintln!("rustty: {USAGE}");
+            return 2;
+        }
+    }
+    let Some(name) = name else {
+        eprintln!("rustty: {USAGE}");
+        return 2;
+    };
+    let dir = dir
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    match create(&dir, &name) {
+        Ok(path) => {
+            if writeln!(out, "{}", path.display()).is_err() {
+                return 1;
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("rustty: could not create the worktree: {e}");
+            1
+        }
+    }
+}
+
 /// Parse `git worktree list --porcelain` text.
 fn parse_porcelain(text: &str) -> Vec<Worktree> {
     let mut out = Vec::new();
@@ -357,5 +399,38 @@ branch refs/heads/web
         std::fs::write(dir.join(".git"), "not a repository").expect("fake .git");
         assert!(create(&dir, "x").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_cli_prints_the_new_path() {
+        // A boss starts workers with this, so its output must be just the path.
+        let dir = repo("cli");
+        let mut out = Vec::new();
+        let code = run_cli(
+            &[
+                "add".into(),
+                "My Task".into(),
+                "--dir".into(),
+                dir.clone().into(),
+            ],
+            &mut out,
+        );
+        assert_eq!(code, 0);
+        let printed = String::from_utf8_lossy(&out).trim().to_string();
+        assert!(
+            std::path::Path::new(&printed).ends_with(".worktrees/my-task"),
+            "{printed}"
+        );
+        let _ = git(&dir, &["worktree", "remove", "--force", &printed]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_cli_refuses_what_it_cannot_do() {
+        let mut out = Vec::new();
+        assert_eq!(run_cli(&[], &mut out), 2);
+        assert_eq!(run_cli(&["add".into()], &mut out), 2);
+        assert_eq!(run_cli(&["remove".into(), "x".into()], &mut out), 2);
+        assert!(out.is_empty(), "failures print nothing to stdout");
     }
 }

@@ -407,6 +407,7 @@ fn action_name(action: KeyAction) -> &'static str {
         KeyAction::ToggleBoard => "toggle-board",
         KeyAction::NewWorktreeSession => "new-worktree-session",
         KeyAction::InitProjectBrain => "init-project-brain",
+        KeyAction::StartBoss => "start-boss",
         KeyAction::ShowBookmarks => "show-bookmarks",
         KeyAction::ExportSelection => "export-selection",
         KeyAction::ExportLastCommand => "export-last-command",

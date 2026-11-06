@@ -93,6 +93,8 @@ pub mod parser;
 /// The sessions sidebar: session status and row layout.
 pub mod agents;
 pub mod board;
+/// The Boss Agent's command and brief (BOSS-001).
+pub mod boss;
 #[cfg(all(test, windows))]
 #[allow(
     unsafe_code,

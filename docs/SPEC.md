@@ -789,6 +789,7 @@ The product must support common terminal/TUI applications.
 
 | ID | Requirement | Priority |
 |---|---|---|
+| BOSS-001 | "Start Boss Agent" shall open a Claude Code session with rustty's automation tools and a brief for splitting work across sessions in their own worktrees. Only that session gets the write token. Tools that read are approved in advance; tools that start sessions or type stay behind Claude Code's own permission prompt. The token is never written to a file. `rustty worktree add NAME` creates a worktree and prints its path. | P1 |
 | STATUS-001 | rustty shall implement the Program Status Protocol (OSC 7501, revision 0.4): answer its support query and show what programs report on their row, ahead of any status it would guess. On Windows the answer is sent as console key events, because the console's input layer drops an OSC reply. | P1 |
 | STATUS-002 | For a known agent that does not report through OSC 7501, rustty shall read a question off the agent's screen and show it as Needs you with the question's text. A control sequence with a private marker shall never run as the plain command. | P1 |
 | WORKTREE-010 | "New Session in Worktree" shall create a Git worktree on a new branch under the main checkout's `.worktrees` folder, keep that folder out of `git status`, and open a session in it. A taken name gets a number. Sessions in these worktrees group with their project in the sidebar. | P1 |

@@ -29,6 +29,10 @@ fn main() -> ExitCode {
     if cli.mcp {
         return ExitCode::from(rustty::automation::mcp::main());
     }
+    if let Some(args) = &cli.worktree {
+        rustty::cli::attach_parent_console();
+        return ExitCode::from(rustty::worktree::run_cli(args, &mut std::io::stdout()));
+    }
     let is_session_verb = cli.list_sessions
         || cli.new_session
         || cli.session_info.is_some()
@@ -353,6 +357,9 @@ fn main() -> ExitCode {
     }
     if cli.mcp {
         return ExitCode::from(rustty::automation::mcp::main());
+    }
+    if let Some(args) = &cli.worktree {
+        return ExitCode::from(rustty::worktree::run_cli(args, &mut std::io::stdout()));
     }
     for unknown in &cli.unknown {
         eprintln!("rustty: ignoring unknown argument {unknown:?}");
