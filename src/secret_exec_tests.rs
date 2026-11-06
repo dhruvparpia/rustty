@@ -620,6 +620,75 @@ fn a_child_inherits_only_its_standard_handles() {
     assert!(waited.as_secs() < 3, "read waited {waited:?} for the child");
 }
 
+// ---- the whole of `secrets run`, with only op faked ---------------------
+
+/// A stand-in `op` that answers every `read` with one value, and checks it was
+/// given the token.
+struct ReadOnlyOp;
+
+impl OpRunner for ReadOnlyOp {
+    fn run(&self, call: &OpCall<'_>) -> Result<OpOutput, crate::secrets::SecretsError> {
+        assert_eq!(call.args[0], "read");
+        assert_eq!(call.token.map(plaintext).as_deref(), Some(TOKEN));
+        Ok(OpOutput {
+            exit_code: 0,
+            stdout: LockedSecret::from_slice(b"end-to-end-value").unwrap(),
+            stderr: String::new(),
+        })
+    }
+}
+
+#[test]
+fn secrets_run_gives_the_real_child_the_value_and_never_the_token() {
+    use crate::secrets::{Deps, FileTokenStore, Manifest, Project, SecretsVerb, TokenStore};
+    use crate::secrets::{execute, stored_reference};
+
+    let dir = TempDir::new();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let project = Project::resolve(Some(&root)).unwrap();
+    let mut manifest = Manifest::default();
+    for name in ["WANTED", "NOT_WANTED"] {
+        manifest
+            .secrets
+            .insert(name.to_owned(), stored_reference(&project.vault, name));
+    }
+    manifest.save(&project.root).unwrap();
+    let store = FileTokenStore::new(dir.path().join("tokens"));
+    let token = LockedSecret::from_slice(TOKEN.as_bytes()).unwrap();
+    store.save(&project.vault, &token).unwrap();
+
+    let out = dir.path().join("env.txt");
+    let script = format!(
+        "(echo [%WANTED%] & echo [%NOT_WANTED%] & echo [%OP_SERVICE_ACCOUNT_TOKEN%])>{} & exit /b 9",
+        out.display()
+    );
+    let verb = SecretsVerb::Run {
+        only: vec!["WANTED".to_owned()],
+        dir: Some(root),
+        argv: vec![
+            system("cmd.exe").into_os_string(),
+            OsString::from("/c"),
+            OsString::from(script),
+        ],
+    };
+    let deps = Deps {
+        op: &ReadOnlyOp,
+        store: &store,
+        launcher: &SystemLauncher,
+    };
+    let (mut printed, mut errors) = (Vec::new(), Vec::new());
+    let code = execute(&verb, &deps, &mut printed, &mut errors);
+    assert_eq!(code, 9, "{}", String::from_utf8_lossy(&errors));
+
+    let seen = std::fs::read_to_string(&out).unwrap();
+    assert!(seen.contains("[end-to-end-value]"), "{seen}");
+    assert!(seen.contains("[%NOT_WANTED%]"), "not requested: {seen}");
+    assert!(seen.contains("[%OP_SERVICE_ACCOUNT_TOKEN%]"), "{seen}");
+    assert!(!seen.contains(TOKEN), "{seen}");
+    assert!(printed.is_empty());
+}
+
 // ---- the real op, version only -----------------------------------------
 
 /// Proves the production resolver and spawn path against the installed `op`

@@ -14,6 +14,12 @@ use rustty::theme;
 #[cfg(windows)]
 fn main() -> ExitCode {
     let cli = rustty::cli::parse(std::env::args_os().skip(1));
+    // SECRET-008: `process::exit` because `secrets run` returns the command's
+    // full 32-bit exit code, which `ExitCode` cannot carry.
+    if let Some(parsed) = &cli.secrets {
+        rustty::cli::attach_parent_console();
+        std::process::exit(rustty::secrets::run_cli(parsed));
+    }
     let is_session_verb = cli.list_sessions
         || cli.new_session
         || cli.session_info.is_some()
@@ -330,6 +336,9 @@ fn session_verb(cli: &rustty::cli::Cli) -> ExitCode {
 #[cfg(not(windows))]
 fn main() -> ExitCode {
     let cli = rustty::cli::parse(std::env::args_os().skip(1));
+    if let Some(parsed) = &cli.secrets {
+        std::process::exit(rustty::secrets::run_cli(parsed));
+    }
     for unknown in &cli.unknown {
         eprintln!("rustty: ignoring unknown argument {unknown:?}");
     }

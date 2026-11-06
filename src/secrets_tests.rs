@@ -284,6 +284,23 @@ fn a_linked_worktree_shares_the_main_checkouts_project() {
 }
 
 #[test]
+fn a_worktree_git_file_written_with_forward_slashes_also_resolves() {
+    // This is how Git itself writes the file on Windows.
+    let dir = TempDir::new();
+    let main = dir.path().join("main");
+    let git_entry = main.join(".git").join("worktrees").join("wt");
+    std::fs::create_dir_all(&git_entry).unwrap();
+    let worktree = dir.path().join("wt");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let target = git_entry.display().to_string().replace('\\', "/");
+    std::fs::write(worktree.join(".git"), format!("gitdir: {target}\n")).unwrap();
+    assert_eq!(
+        project_root(&worktree).unwrap(),
+        std::fs::canonicalize(&main).unwrap()
+    );
+}
+
+#[test]
 fn a_submodule_git_file_stays_its_own_project() {
     let dir = TempDir::new();
     let sub = dir.path().join("sub");

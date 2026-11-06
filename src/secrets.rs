@@ -316,18 +316,22 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
     })
 }
 
-/// A path in the one form that gets hashed: no verbatim prefix, backslashes,
-/// no trailing separator, lower case (Windows paths ignore case).
-fn normalized_path(path: &Path) -> String {
+/// A path as people read it, without the verbatim prefix `canonicalize` adds.
+fn readable_path(path: &Path) -> String {
     let text = path.to_string_lossy();
-    let plain = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{rest}")
     } else if let Some(rest) = text.strip_prefix(r"\\?\") {
         rest.to_owned()
     } else {
         text.into_owned()
-    };
-    plain
+    }
+}
+
+/// A path in the one form that gets hashed: no verbatim prefix, backslashes,
+/// no trailing separator, lower case (Windows paths ignore case).
+fn normalized_path(path: &Path) -> String {
+    readable_path(path)
         .replace('/', "\\")
         .trim_end_matches('\\')
         .to_lowercase()
@@ -480,8 +484,8 @@ pub fn stored_reference(vault: &str, name: &str) -> String {
     format!("op://{vault}/{name}/password")
 }
 
-/// One `op` invocation.
-#[derive(Debug)]
+/// One `op` invocation. Deliberately not `Debug`: `stdin` can hold a value in
+/// the clear.
 pub struct OpCall<'a> {
     /// Arguments after `op`. Never holds a value or a token.
     pub args: Vec<String>,
@@ -1229,7 +1233,7 @@ fn print_list(
             .collect();
         let value = serde_json::json!({
             "schema": "secrets-list/v1",
-            "project": project.root.to_string_lossy(),
+            "project": readable_path(&project.root),
             "vault": project.vault,
             "setUp": set_up,
             "secrets": secrets,
@@ -1286,7 +1290,7 @@ fn execute_inner(
             if *json {
                 let value = serde_json::json!({
                     "schema": "secrets-setup/v1",
-                    "project": project.root.to_string_lossy(),
+                    "project": readable_path(&project.root),
                     "vault": project.vault,
                     "serviceAccount": project.vault,
                     "alreadySetUp": outcome.already_set_up,
@@ -1334,6 +1338,54 @@ fn execute_inner(
             run(&project, only, argv, deps.op, deps.store, deps.launcher)
         }
     }
+}
+
+/// Run one verb with the production collaborators.
+#[cfg(windows)]
+fn run_production(verb: &SecretsVerb, out: &mut dyn Write, err: &mut dyn Write) -> u32 {
+    use crate::secret_exec::{SystemLauncher, SystemOp, token_store_dir};
+
+    let dir = match token_store_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            let _ = writeln!(err, "rustty: the token store folder was not found: {e}");
+            return u32::from(EXIT_STORE);
+        }
+    };
+    let store = FileTokenStore::new(dir);
+    let deps = Deps {
+        op: &SystemOp,
+        store: &store,
+        launcher: &SystemLauncher,
+    };
+    execute(verb, &deps, out, err)
+}
+
+/// Off Windows only the help works: there is no secure memory to use.
+#[cfg(not(windows))]
+fn run_production(verb: &SecretsVerb, out: &mut dyn Write, err: &mut dyn Write) -> u32 {
+    if *verb == SecretsVerb::Help {
+        let _ = writeln!(out, "{}", usage());
+        return 0;
+    }
+    let _ = writeln!(err, "rustty: secrets are only implemented on Windows");
+    u32::from(EXIT_MEMORY)
+}
+
+/// The `rustty secrets` entry point: a parsed command line in, the process
+/// exit code out. Windows exit codes are 32 bits, so `run` can return any
+/// code its command returned.
+#[must_use]
+pub fn run_cli(parsed: &Result<SecretsVerb, String>) -> i32 {
+    let (mut out, mut err) = (io::stdout(), io::stderr());
+    let code = match parsed {
+        Ok(verb) => run_production(verb, &mut out, &mut err),
+        Err(usage_text) => {
+            let _ = writeln!(err, "{usage_text}");
+            u32::from(EXIT_USAGE)
+        }
+    };
+    i32::from_ne_bytes(code.to_ne_bytes())
 }
 
 #[cfg(test)]

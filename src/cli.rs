@@ -55,6 +55,9 @@ pub struct Cli {
     pub take_control: bool,
     /// Arguments this version does not know.
     pub unknown: Vec<String>,
+    /// `secrets ...` as the first argument (SECRET-008). `Err` holds the usage
+    /// text for a malformed verb, which must not open a GUI window.
+    pub secrets: Option<Result<crate::secrets::SecretsVerb, String>>,
 }
 
 /// Parse `args` (argv without the program name). A flag without its value
@@ -62,7 +65,12 @@ pub struct Cli {
 #[must_use]
 pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Cli {
     let mut cli = Cli::default();
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
+    // SECRET-008: only as the first argument; `.\secrets` still opens a folder.
+    if args.next_if(|first| *first == "secrets").is_some() {
+        cli.secrets = Some(crate::secrets::parse_verb(args));
+        return cli;
+    }
     while let Some(arg) = args.next() {
         let arg = arg.to_string_lossy().into_owned();
         match arg.as_str() {
@@ -125,7 +133,8 @@ fn alias<I: Iterator<Item = OsString>>(args: &mut I) -> Option<u32> {
 #[must_use]
 pub const fn usage() -> &'static str {
     "usage: rustty [directory] [--profile <name>] [--theme <name>] [--workspace <name> | --workspaces] [--version] [-h|--help]\n\
-       session host: rustty --list-sessions [--json] | --new-session [--profile <name>] [--name <label>] [--cwd <dir>] [--cols <n>] [--rows <n>] [--detach] [--ephemeral] | --session-info <n> [--json] | --terminate-session <n> [--force] | --attach <n> [--read-only | --take-control]"
+       session host: rustty --list-sessions [--json] | --new-session [--profile <name>] [--name <label>] [--cwd <dir>] [--cols <n>] [--rows <n>] [--detach] [--ephemeral] | --session-info <n> [--json] | --terminate-session <n> [--force] | --attach <n> [--read-only | --take-control]\n\
+       1Password secrets: rustty secrets setup | add <NAME> --from op://... | list | run --only <NAME,NAME> -- <command> (see rustty secrets --help)"
 }
 
 /// Attach to the calling console so a GUI-subsystem exe can print to
@@ -263,5 +272,49 @@ mod tests {
         assert_eq!(parse(os(&["--session-info"])).session_info, Some(0));
         assert_eq!(parse(os(&["--attach", "4"])).attach, Some(4));
         assert_eq!(parse(os(&["--attach"])).attach, Some(0));
+    }
+
+    /// SECRET-008: `secrets` as the first argument is a verb. It can never
+    /// fall through to opening a GUI window, not even when malformed.
+    #[test]
+    fn secrets_verb_is_parsed_and_never_reads_as_a_directory() {
+        use crate::secrets::SecretsVerb;
+
+        let cli = parse(os(&["secrets", "list", "--json"]));
+        assert_eq!(
+            cli.secrets,
+            Some(Ok(SecretsVerb::List {
+                dir: None,
+                json: true
+            }))
+        );
+        assert_eq!(cli.directory, None);
+        assert!(cli.unknown.is_empty());
+
+        let cli = parse(os(&["secrets"]));
+        assert!(matches!(cli.secrets, Some(Err(_))));
+        assert_eq!(cli.directory, None);
+
+        let cli = parse(os(&["secrets", "--profile", "x"]));
+        assert!(matches!(cli.secrets, Some(Err(_))));
+        assert_eq!(cli.profile, None);
+    }
+
+    /// A folder called `secrets` can still be opened with a path that says so,
+    /// and the word has no meaning anywhere but first.
+    #[test]
+    fn secrets_only_counts_as_the_first_argument() {
+        let cli = parse(os(&[r".\secrets"]));
+        assert_eq!(cli.secrets, None);
+        assert_eq!(cli.directory.as_deref(), Some(r".\secrets"));
+
+        let cli = parse(os(&["--profile", "pwsh", "secrets"]));
+        assert_eq!(cli.secrets, None);
+        assert_eq!(cli.directory.as_deref(), Some("secrets"));
+    }
+
+    #[test]
+    fn usage_mentions_the_secrets_verbs() {
+        assert!(usage().contains("rustty secrets"));
     }
 }
