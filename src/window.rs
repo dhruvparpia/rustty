@@ -2205,26 +2205,7 @@ fn init_window(hwnd: HWND) {
         if let (Some(menu), Some(s)) = (menu.and_then(|r| r.ok()), state_mut(hwnd)) {
             s.menu = Some(menu);
         }
-        // A shortcut set to "Run minimized" turns this first show into a
-        // minimize, and Windows then remembers its parking spot as the normal
-        // size. Keep the size the window was created with.
-        let mut created = RECT::default();
-        let measured = unsafe { GetWindowRect(hwnd, &mut created) }.is_ok();
         let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
-        if measured && unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(hwnd) }.as_bool()
-        {
-            use windows::Win32::UI::WindowsAndMessaging::{
-                GetWindowPlacement, SetWindowPlacement, WINDOWPLACEMENT,
-            };
-            let mut placement = WINDOWPLACEMENT {
-                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
-                ..Default::default()
-            };
-            if unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_ok() {
-                placement.rcNormalPosition = created;
-                let _ = unsafe { SetWindowPlacement(hwnd, &placement) };
-            }
-        }
     }
     let dpi = unsafe {
         let d = GetDpiForWindow(hwnd);
@@ -2800,6 +2781,43 @@ fn snapshot_session(s: &WindowState, hwnd: HWND) -> crate::session::Session {
         focused_tab: s.app.active_tab_index(),
         window,
     }
+}
+
+/// Set the size a window started minimized comes back at. `CW_USEDEFAULT` has no
+/// position to give, so that case takes a corner of the work area.
+fn keep_normal_size(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowPlacement, IsIconic, SetWindowPlacement, WINDOWPLACEMENT,
+    };
+    /// Where a window with no saved position comes back.
+    const DEFAULT_CORNER: i32 = 64;
+    if !unsafe { IsIconic(hwnd) }.as_bool() {
+        return;
+    }
+    let mut placement = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_err() {
+        return;
+    }
+    let left = if x == CW_USEDEFAULT {
+        DEFAULT_CORNER
+    } else {
+        x
+    };
+    let top = if y == CW_USEDEFAULT {
+        DEFAULT_CORNER
+    } else {
+        y
+    };
+    placement.rcNormalPosition = RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    };
+    let _ = unsafe { SetWindowPlacement(hwnd, &placement) };
 }
 
 /// The window's rectangle when it is not minimized. A minimized window's own
@@ -8469,6 +8487,11 @@ pub fn run(
             Some(state_param),
         )
     };
+    // A shortcut set to "Run minimized" starts the window minimized, and Windows
+    // then remembers its parking spot as the normal size. Give it the real one.
+    if let Ok(hwnd) = &created {
+        keep_normal_size(*hwnd, x, y, width, height);
+    }
     if let Err(e) = created {
         // The window never existed to reclaim the box; free it here.
         unsafe { drop(Box::from_raw(state_param as *mut WindowState)) };
