@@ -780,7 +780,7 @@ The product must support common terminal/TUI applications.
 | SKIN-003 | Tabs, palette, search, bookmark and pane-title chrome shall use shared semantic UI colors. Active tabs and selected palette/bookmark rows shall have a visible positional indicator as well as a changed background. The `+` button follows the last tab, and tab titles use the Windows UI font. | P1 |
 | SKIN-004 | Copper presets shall meet 4.5:1 normal/secondary text contrast against their chrome surfaces and 3:1 focus-indicator contrast. Selection/search text shall remain readable. Custom colors remain user-controlled and are validated for syntax. | P1 |
 | SKIN-005 | Skin changes shall use the existing theme resolution and reload paths, preserve terminal content/actions and reuse render buffers. Validation shall include dark/light, top/bottom tabs, mixed DPI, narrow windows, keyboard focus and Unicode fallback on Windows. | P1 |
-| SKIN-006 | The native caption shall follow the effective skin using supported DWM attributes, retain native window controls/drag/resize, and fall back to system rendering when an attribute is unsupported. Tab titles, profile icons and close controls shall be drawn separately. | P1 |
+| SKIN-006 | Tabs shall sit in the title bar on one surface, with minimize, maximize and close drawn by the terminal in theme colors. The window shall keep native drag, double-click maximize, the system menu, resize edges, Snap Layouts and screen-reader access. The frame shall follow the effective skin using supported DWM attributes and fall back to system rendering when an attribute is unsupported. Tab titles and close controls shall be drawn separately. | P1 |
 
 ---
 

@@ -26,6 +26,8 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Changed
 
+- Tabs now sit in the title bar on one seamless surface, with rustty drawing the minimize,
+  maximize and close buttons in theme colors. Dragging, resizing and Snap Layouts stay native.
 - The tab strip is quieter: taller, with no divider line, Windows UI font titles, the `+`
   button after the last tab, and no default shell icon. The window has 12 by 10 DIPs of
   padding by default.

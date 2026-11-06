@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::Data::Xml::Dom::XmlDocument;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, ClientToScreen, EndPaint, GetMonitorInfoW, InvalidateRect,
     MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
@@ -42,6 +43,8 @@ use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::Accessibility::{
     IRawElementProviderSimple, UiaReturnRawElementProvider, UiaRootObjectId,
 };
+use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
     SetProcessDpiAwarenessContext,
@@ -54,6 +57,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, GetKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
     ReleaseCapture, SetCapture, SetFocus, UnregisterHotKey, VK_CONTROL, VK_LCONTROL, VK_LMENU,
     VK_RMENU, VK_SHIFT,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP,
@@ -84,9 +90,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    HTCAPTION, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
+    NCCALCSIZE_PARAMS, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SM_CXPADDEDBORDER,
+    SM_CYSIZEFRAME, SWP_NOMOVE, SWP_NOSIZE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND,
+};
 use windows::core::{ComObject, PCWSTR, Result};
 
 use crate::app::{App, PaneClose};
+use crate::caption;
 use crate::clipboard;
 use crate::color::Color;
 use crate::config::{
@@ -109,8 +122,8 @@ use crate::split::{Dir, Rect, Side};
 use crate::tabbar::TAB_BAR_HEIGHT;
 use crate::theme::{self, Theme};
 
-/// SKIN-006: retain native caption controls and let DWM color their surfaces.
-/// Unsupported attributes (Windows 10) fail harmlessly to the system caption.
+/// SKIN-006: let DWM color the frame and border around the drawn title strip.
+/// Unsupported attributes (Windows 10) fail harmlessly to the system frame.
 fn apply_caption_skin(hwnd: HWND, theme: &Theme) {
     use windows::Win32::Graphics::Dwm::{
         DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -1274,6 +1287,10 @@ struct WindowState {
     /// Saved window rect + styles while fullscreen (F11), `None` in
     /// windowed mode.
     fullscreen: Option<(RECT, isize, isize)>,
+    /// Caption button under the pointer.
+    caption_hover: Option<caption::Hit>,
+    /// Caption button held down.
+    caption_pressed: Option<caption::Hit>,
     /// Issue #25: high half of a UTF-16 surrogate pair from `WM_CHAR`
     /// (VK_PACKET/IME deliver non-BMP characters as two messages).
     pending_surrogate: Option<u16>,
@@ -1345,6 +1362,32 @@ impl WindowState {
         }
     }
 
+    /// Title strip height: none on quick and fullscreen windows.
+    fn caption_height(&self) -> f32 {
+        if self.quick || self.fullscreen.is_some() {
+            0.0
+        } else {
+            caption::STRIP_HEIGHT
+        }
+    }
+
+    fn tabs_on_top(&self) -> bool {
+        self.cfg.tab_bar.placement != TabBarPlacement::Bottom
+    }
+
+    /// Chrome above and below the grid together.
+    fn total_chrome(&self) -> f32 {
+        caption::total_chrome(self.tabs_on_top(), self.bar_height(), self.caption_height())
+    }
+
+    /// End of the `+` button when the title strip holds tabs, otherwise 0.
+    fn tabs_end(&self) -> f32 {
+        match &self.renderer {
+            Some(r) if self.tabs_on_top() && self.bar_height() > 0.0 => r.tabs_end(),
+            _ => 0.0,
+        }
+    }
+
     /// Y of the tab-bar strip (TAB-022: top or bottom of the window).
     fn bar_top(&self, height: f32) -> f32 {
         if self.cfg.tab_bar.placement == TabBarPlacement::Bottom {
@@ -1357,12 +1400,8 @@ impl WindowState {
     /// Y where the grid starts, i.e. below (or above) the tab bar, plus the
     /// window padding (WINDOW-011).
     fn grid_top(&self) -> f32 {
-        let bar = if self.cfg.tab_bar.placement == TabBarPlacement::Bottom {
-            0.0
-        } else {
-            self.bar_height()
-        };
-        bar + self.pad_y()
+        caption::top_chrome(self.tabs_on_top(), self.bar_height(), self.caption_height())
+            + self.pad_y()
     }
 
     /// `[window.padding]` in DIPs, matched to what the renderer insets by.
@@ -1569,7 +1608,7 @@ unsafe extern "system" fn wnd_proc(
         WM_GETMINMAXINFO => {
             let mm = lparam.0 as *mut MINMAXINFO;
             if let (true, Some(s)) = (!mm.is_null(), state_ref(hwnd)) {
-                let (w, h) = px_size(s.metrics, MIN_COLS, MIN_ROWS, s.bar_height());
+                let (w, h) = px_size(s.metrics, MIN_COLS, MIN_ROWS, s.total_chrome());
                 unsafe { (*mm).ptMinTrackSize = POINT { x: w, y: h } };
             }
             LRESULT(0)
@@ -1601,6 +1640,7 @@ unsafe extern "system" fn wnd_proc(
                 let width = ((lparam.0 & 0xFFFF) as u16) as u32;
                 let height = (((lparam.0 >> 16) & 0xFFFF) as u16) as u32;
                 resize_window(hwnd, width, height);
+                sync_caption_state(hwnd);
             }
             LRESULT(0)
         }
@@ -1755,6 +1795,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            set_caption_hover(hwnd, None);
             handle_mouse_move(hwnd, wparam, lparam);
             LRESULT(0)
         }
@@ -1775,6 +1816,55 @@ unsafe extern "system" fn wnd_proc(
                 paste_clipboard(hwnd);
                 LRESULT(0)
             }
+        }
+        WM_NCCALCSIZE if wparam.0 != 0 && has_drawn_caption(hwnd) => {
+            // Keep the standard side and bottom frame and take over the top,
+            // so the client area runs up to the top edge of the window.
+            let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
+            let top = unsafe { (*params).rgrc[0].top };
+            let result = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            // A maximized window overhangs the monitor by its frame.
+            let inset = if unsafe { IsZoomed(hwnd).as_bool() } {
+                frame_thickness_px(hwnd)
+            } else {
+                0
+            };
+            unsafe { (*params).rgrc[0].top = top + inset };
+            result
+        }
+        WM_NCHITTEST if has_drawn_caption(hwnd) => {
+            let result = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            LRESULT(nc_hit_test(hwnd, result.0 as u32, lparam) as isize)
+        }
+        WM_NCMOUSEMOVE if has_drawn_caption(hwnd) => {
+            set_caption_hover(hwnd, caption_button(wparam.0 as u32));
+            track_nc_leave(hwnd);
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_NCMOUSELEAVE if has_drawn_caption(hwnd) => {
+            if let Some(s) = state_mut(hwnd) {
+                s.caption_pressed = None;
+            }
+            set_caption_hover(hwnd, None);
+            LRESULT(0)
+        }
+        WM_NCLBUTTONDOWN
+            if caption_button(wparam.0 as u32).is_some() && has_drawn_caption(hwnd) =>
+        {
+            if let Some(s) = state_mut(hwnd) {
+                s.caption_pressed = caption_button(wparam.0 as u32);
+            }
+            sync_caption_state(hwnd);
+            LRESULT(0)
+        }
+        WM_NCLBUTTONUP if caption_button(wparam.0 as u32).is_some() && has_drawn_caption(hwnd) => {
+            let button = caption_button(wparam.0 as u32);
+            let pressed = state_mut(hwnd).and_then(|s| s.caption_pressed.take());
+            sync_caption_state(hwnd);
+            if button == pressed {
+                run_caption_button(hwnd, button);
+            }
+            LRESULT(0)
         }
         WM_CONTEXTMENU => {
             handle_context_menu(hwnd, lparam);
@@ -1927,6 +2017,28 @@ fn reclaim_state(hwnd: HWND) -> Option<*mut WindowState> {
 /// grid, spawn the first shell, start the output-poll timer.
 fn init_window(hwnd: HWND) {
     let quick = state_ref(hwnd).is_some_and(|s| s.quick);
+    if !quick {
+        // The window draws its own title bar: keep DWM's shadow and border, and
+        // make Windows recompute the frame now that the state is in place.
+        let margins = MARGINS {
+            cxLeftWidth: 0,
+            cxRightWidth: 0,
+            cyTopHeight: 1,
+            cyBottomHeight: 0,
+        };
+        unsafe {
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+    }
     // Native menu bar (MENU-001..005). A menu failure leaves the terminal
     // usable, matching the no-fatal-UI-failure rule. The frameless quick
     // window has no menu, and it is not shown until the hotkey summons it.
@@ -2172,6 +2284,8 @@ fn create_quick_window() {
         suppress_char: false,
         pending_surrogate: None,
         fullscreen: None,
+        caption_hover: None,
+        caption_pressed: None,
         search: None,
         palette: None,
         hint: None,
@@ -2495,17 +2609,141 @@ fn sync_active_tab_geometry(hwnd: HWND) {
     resize_window(hwnd, width, height);
 }
 
+/// True for a window that draws its own title bar: not the quick terminal,
+/// and not fullscreen (a bare popup has no caption).
+fn has_drawn_caption(hwnd: HWND) -> bool {
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+    style & WS_CAPTION.0 == WS_CAPTION.0 && state_ref(hwnd).is_some_and(|s| !s.quick)
+}
+
+/// Thickness of the sizing frame in physical pixels.
+fn frame_thickness_px(hwnd: HWND) -> i32 {
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    unsafe {
+        GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
+    }
+}
+
+/// `WM_NCHITTEST` for a drawn caption. `default` is what Windows answered for
+/// the standard frame; only its client area is ours to classify.
+fn nc_hit_test(hwnd: HWND, default: u32, lparam: LPARAM) -> u32 {
+    let mut point = POINT {
+        x: i32::from((lparam.0 & 0xFFFF) as i16),
+        y: i32::from(((lparam.0 >> 16) & 0xFFFF) as i16),
+    };
+    if !unsafe { ScreenToClient(hwnd, &mut point) }.as_bool() {
+        return default;
+    }
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    let border = frame_thickness_px(hwnd) as f32 / scale;
+    let (x, y) = (point.x as f32 / scale, point.y as f32 / scale);
+    let maximized = unsafe { IsZoomed(hwnd).as_bool() };
+    // The side frame is Windows' to answer, but its top corners are ours.
+    if !maximized && y < border {
+        match default {
+            HTLEFT => return HTTOPLEFT,
+            HTRIGHT => return HTTOPRIGHT,
+            _ => {}
+        }
+    }
+    if default != HTCLIENT {
+        return default;
+    }
+    let mut rect = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut rect) };
+    let ctx = caption::Ctx {
+        maximized,
+        resize_border: border,
+        tabs_end: state_ref(hwnd).map_or(0.0, WindowState::tabs_end),
+    };
+    match caption::hit_test(x, y, rect.right as f32 / scale, ctx) {
+        caption::Hit::Client => HTCLIENT,
+        caption::Hit::Caption => HTCAPTION,
+        caption::Hit::Min => HTMINBUTTON,
+        // HTMAXBUTTON is what gives Windows 11 its Snap Layouts flyout.
+        caption::Hit::Max => HTMAXBUTTON,
+        caption::Hit::Close => HTCLOSE,
+        caption::Hit::TopEdge => HTTOP,
+    }
+}
+
+/// The caption button a non-client hit code names.
+const fn caption_button(hit: u32) -> Option<caption::Hit> {
+    match hit {
+        HTMINBUTTON => Some(caption::Hit::Min),
+        HTMAXBUTTON => Some(caption::Hit::Max),
+        HTCLOSE => Some(caption::Hit::Close),
+        _ => None,
+    }
+}
+
+/// Ask for `WM_NCMOUSELEAVE`, so a hovered button clears when the pointer goes.
+fn track_nc_leave(hwnd: HWND) {
+    let mut track = TRACKMOUSEEVENT {
+        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE | TME_NONCLIENT,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    let _ = unsafe { TrackMouseEvent(&mut track) };
+}
+
+/// Update the hovered caption button, repainting only when it changed.
+fn set_caption_hover(hwnd: HWND, hover: Option<caption::Hit>) {
+    let changed = state_mut(hwnd).is_some_and(|s| {
+        let changed = s.caption_hover != hover;
+        s.caption_hover = hover;
+        changed
+    });
+    if changed {
+        sync_caption_state(hwnd);
+    }
+}
+
+/// Push hover, press and maximized state to the renderer and repaint the strip.
+fn sync_caption_state(hwnd: HWND) {
+    let maximized = unsafe { IsZoomed(hwnd).as_bool() };
+    if let Some(s) = state_mut(hwnd) {
+        let (hover, pressed) = (s.caption_hover, s.caption_pressed);
+        if let Some(r) = &mut s.renderer {
+            r.set_caption_state(hover, pressed, maximized);
+        }
+    }
+    invalidate_tab_bar(hwnd);
+}
+
+/// Do what a released caption button asks.
+fn run_caption_button(hwnd: HWND, button: Option<caption::Hit>) {
+    let command = match button {
+        Some(caption::Hit::Min) => SC_MINIMIZE,
+        Some(caption::Hit::Max) if unsafe { IsZoomed(hwnd).as_bool() } => SC_RESTORE,
+        Some(caption::Hit::Max) => SC_MAXIMIZE,
+        Some(caption::Hit::Close) => SC_CLOSE,
+        _ => return,
+    };
+    let _ = unsafe {
+        PostMessageW(
+            Some(hwnd),
+            WM_SYSCOMMAND,
+            WPARAM(command as usize),
+            LPARAM(0),
+        )
+    };
+}
+
 /// Tab-count change follow-up: re-apply the tab-bar visibility rule. The
 /// strip height carves grid area off the top, so when it changes the grid
 /// and the ConPTY must follow (TAB-010, `tab-bar = "auto"/"hidden"`).
 fn sync_tab_bar(hwnd: HWND) {
     let Some(s) = state_mut(hwnd) else { return };
     let bar = s.bar_height();
+    let strip = s.caption_height();
     let Some(r) = &mut s.renderer else { return };
-    if r.tab_bar_height() == bar {
+    if r.tab_bar_height() == bar && r.caption_height() == strip {
         return;
     }
     r.set_tab_bar_height(bar);
+    r.set_caption_height(strip);
     let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
     if s.app.resize_active(cols, rows).is_err() {
         eprintln!("rustty: ConPTY resize failed");
@@ -4403,7 +4641,7 @@ fn handle_drop(hwnd: HWND, hdrop: HDROP) {
 /// edges extend the selection (WIN-004, SPLIT-004 hit-testing).
 fn cell_at(s: &WindowState, x: f32, y: f32, height: f32) -> Option<(usize, usize, usize)> {
     let top = s.grid_top();
-    let bottom = top + (height - s.bar_height() - 2.0 * s.pad_y()).max(0.0);
+    let bottom = top + (height - s.total_chrome() - 2.0 * s.pad_y()).max(0.0);
     if y < top || y >= bottom {
         return None;
     }
@@ -4995,7 +5233,7 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     // Dragging over the tab bar clamps the selection to the grid edge.
     let height = client_height_dips(hwnd);
     let top = s.grid_top();
-    let bottom = top + (height - s.bar_height()).max(0.0);
+    let bottom = top + (height - s.total_chrome()).max(0.0);
     let y = y.clamp(top, (bottom - 0.001).max(top));
     let Some((_, row, col)) = cell_at(s, x, y, height) else {
         return;
@@ -5189,6 +5427,8 @@ fn toggle_fullscreen(hwnd: HWND) {
             s.fullscreen = Some((rect, style, exstyle));
         }
     }
+    // Fullscreen has no title strip; the grid takes that room and gives it back.
+    sync_tab_bar(hwnd);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
@@ -5774,9 +6014,11 @@ fn tab_profile(s: &WindowState) -> ProfileSpec {
 /// TAB-023, CONFIG-010), cursor (CONFIG-009), split border and padding, window
 /// padding. Startup and CONFIG-018 hot reload share this.
 fn sync_chrome(s: &mut WindowState) {
+    let strip = s.caption_height();
     let Some(r) = &mut s.renderer else {
         return;
     };
+    r.set_caption_height(strip);
     r.set_tab_bar_options(
         s.cfg.tab_bar.placement,
         s.cfg.tab_bar.show_profiles,
@@ -6640,7 +6882,9 @@ pub fn run(
         TabBar::Always => TAB_BAR_HEIGHT,
         TabBar::Auto | TabBar::Hidden => 0.0,
     };
-    let (cell_w, cell_h) = px_size(metrics, cols, rows, bar);
+    let tabs_on_top = cfg.tab_bar.placement != TabBarPlacement::Bottom;
+    let chrome = caption::total_chrome(tabs_on_top, bar, caption::STRIP_HEIGHT);
+    let (cell_w, cell_h) = px_size(metrics, cols, rows, chrome);
     let mut rect = RECT {
         left: 0,
         top: 0,
@@ -6739,6 +6983,8 @@ pub fn run(
         suppress_char: false,
         pending_surrogate: None,
         fullscreen: None,
+        caption_hover: None,
+        caption_pressed: None,
         search: None,
         palette: None,
         hint: None,

@@ -19,6 +19,8 @@ pub mod attach;
 /// Bookmarks over a pane's history (issue #53, SPEC BKMK-001..003). Pure
 /// anchor math.
 pub mod bookmark;
+/// Title-bar strip geometry and hit testing.
+pub mod caption;
 /// Characters drawn as geometry (block elements, Powerline separators).
 pub mod cellart;
 pub mod cli;

@@ -9,9 +9,10 @@ theme = "copper-dark"
 
 Dark uses graphite surfaces and warm copper focus accents; light uses warm
 paper, dark ink and deep copper. Both use readable secondary labels and a
-positional active-tab/selected-row indicator. Native caption buttons, window
-dragging and resizing remain Windows-owned. The caption follows the skin background, with
-custom text and frame colors where supported; unsupported DWM attributes fall back to system styling.
+positional active-tab/selected-row indicator. Tabs sit in the title bar on one surface,
+and rustty draws the minimize, maximize and close buttons in the skin's colors. Dragging,
+resizing and Snap Layouts stay native. The frame follows the skin with custom colors where
+supported; unsupported DWM attributes fall back to system styling.
 
 To customize chrome independently, replace the plain theme key with a table:
 
@@ -41,10 +42,11 @@ Windows desktop acceptance (owner-run):
 - Switch both skins through menu, palette, profile and config reload; caption
   and client colors must agree. Check Windows 10 fallback and Windows 11.
 - Check top/bottom/hidden tabs, many tabs, narrow windows, Unicode titles and
-  marquee hover; icon/title/close targets must stay separate and clickable.
+  marquee hover; title and close targets must stay separate and clickable.
 - Check palette/bookmarks/search, keyboard focus and pane titles in both skins.
 - Move between 100%, 150% and 200% DPI displays; maximize, restore, drag, resize
-  and enter/exit fullscreen. Native caption controls must remain functional.
+  and enter/exit fullscreen. Caption buttons, the Snap Layouts flyout, dragging and
+  resize edges must keep working.
 - Verify ANSI-colored tools, selection, search matches and custom profiles.
 
 Source checks do not substitute for these desktop checks.

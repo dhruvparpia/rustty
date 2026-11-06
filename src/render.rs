@@ -50,6 +50,7 @@ use windows::core::{Interface, PCWSTR};
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::app::App;
+use crate::caption;
 use crate::cellart;
 use crate::color::Color;
 use crate::config::{CursorShape, FontConfig, TabBarPlacement};
@@ -452,6 +453,26 @@ fn build_symbol_fallback(dwrite: &IDWriteFactory) -> Option<IDWriteFontFallback>
     }
 }
 
+/// Caption button glyph size in DIPs.
+const CAPTION_GLYPH_SIZE: f32 = 10.0;
+/// Caption button glyphs in the system icon fonts.
+const CAPTION_GLYPH_MINIMIZE: char = '\u{E921}';
+const CAPTION_GLYPH_MAXIMIZE: char = '\u{E922}';
+const CAPTION_GLYPH_RESTORE: char = '\u{E923}';
+const CAPTION_GLYPH_CLOSE: char = '\u{E8BB}';
+/// The close button's fill, as Windows draws it.
+const CLOSE_HOVER: Color = Color::rgb(0xC4, 0x2B, 0x1C);
+const CLOSE_PRESSED: Color = Color::rgb(0xA3, 0x26, 0x1A);
+
+/// A plain symbol for a caption glyph, for systems without the icon fonts.
+const fn plain_caption_glyph(glyph: char) -> char {
+    match glyph {
+        CAPTION_GLYPH_CLOSE => '\u{2715}',
+        CAPTION_GLYPH_MINIMIZE => '\u{2013}',
+        _ => '\u{25A1}',
+    }
+}
+
 /// Tab title size in DIPs.
 const TAB_FONT_SIZE: f32 = 12.5;
 
@@ -508,7 +529,11 @@ fn make_icon_format(dwrite: &IDWriteFactory, size: f32) -> Option<IDWriteTextFor
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
             )
-            .ok();
+            .ok()
+            .inspect(|format| unsafe {
+                let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                let _ = format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            });
         }
     }
     None
@@ -564,10 +589,14 @@ pub struct Renderer {
     tab_format: IDWriteTextFormat,
     /// Tab close and `+` glyphs: the UI font, centred both ways.
     tab_close_format: IDWriteTextFormat,
-    /// Icon face ("Segoe Fluent Icons" / "Segoe MDL2 Assets"); `None` when
-    /// neither is installed.
-    #[allow(dead_code, reason = "read by the caption buttons in the next change")]
-    icon_format: Option<IDWriteTextFormat>,
+    /// Caption button glyphs ("Segoe Fluent Icons" / "Segoe MDL2 Assets");
+    /// `None` when neither is installed.
+    caption_format: Option<IDWriteTextFormat>,
+    /// Title strip height in DIPs; 0 for quick and fullscreen windows.
+    caption_height: f32,
+    caption_hover: Option<caption::Hit>,
+    caption_pressed: Option<caption::Hit>,
+    caption_maximized: bool,
     metrics: CellMetrics,
     dpi: f32,
     /// Tab-bar strip height in DIPs; 0.0 when the bar is hidden
@@ -823,7 +852,7 @@ impl Renderer {
         // Family name is diagnostics-only; the formats carry the chosen face.
         let (_family, formats, metrics) = build_font_resources(&dwrite, dpi, font)?;
         let (tab_format, tab_close_format) = make_tab_formats(&dwrite)?;
-        let icon_format = make_icon_format(&dwrite, metrics.text_height);
+        let caption_format = make_icon_format(&dwrite, CAPTION_GLYPH_SIZE);
         let typography = build_typography(&dwrite, font)?;
         let width = dips_to_px(cols.max(1) as f32 * metrics.cell_width, dpi).max(1);
         let height = dips_to_px(
@@ -862,7 +891,11 @@ impl Renderer {
             powerline: None,
             tab_format,
             tab_close_format,
-            icon_format,
+            caption_format,
+            caption_height: 0.0,
+            caption_hover: None,
+            caption_pressed: None,
+            caption_maximized: false,
             metrics,
             dpi,
             tab_bar_height,
@@ -922,6 +955,117 @@ impl Renderer {
         self.tab_bar_height
     }
 
+    /// Set the caption strip height: 0 for quick and fullscreen windows. Callers
+    /// re-read [`Renderer::grid_size`] afterwards.
+    pub fn set_caption_height(&mut self, height: f32) {
+        self.caption_height = height.max(0.0);
+    }
+
+    /// The caption strip height.
+    #[must_use]
+    pub const fn caption_height(&self) -> f32 {
+        self.caption_height
+    }
+
+    /// Set the caption buttons' hover and press state and the window's
+    /// maximized state, which picks the maximize or restore glyph.
+    pub const fn set_caption_state(
+        &mut self,
+        hover: Option<caption::Hit>,
+        pressed: Option<caption::Hit>,
+        maximized: bool,
+    ) {
+        self.caption_hover = hover;
+        self.caption_pressed = pressed;
+        self.caption_maximized = maximized;
+    }
+
+    /// End of the `+` button as last painted.
+    #[must_use]
+    pub const fn tabs_end(&self) -> f32 {
+        self.layout.plus.1
+    }
+
+    fn tabs_on_top(&self) -> bool {
+        self.tab_bar_placement == TabBarPlacement::Top
+    }
+
+    /// The title strip: the window title when the strip holds no tabs, and the
+    /// three caption buttons.
+    fn paint_caption(&mut self, app: &App, theme: &Theme, width: f32) {
+        let height = self.caption_height;
+        let ui = theme.ui_colors();
+        let strip = theme.strip_color();
+        if !self.tabs_on_top() || self.tab_bar_height <= 0.0 {
+            self.fill_rect(0.0, 0.0, width, height, strip);
+            if let (Some(tab), Some(brush)) = (app.active_tab(), self.brush(ui.muted)) {
+                let mut units = std::mem::take(&mut self.utf16);
+                units.clear();
+                units.extend(tab.title().encode_utf16());
+                let rect = D2D_RECT_F {
+                    left: TAB_CHROME / 2.0,
+                    top: 0.0,
+                    right: (width - 3.0 * caption::BUTTON_WIDTH - TAB_CHROME / 2.0)
+                        .max(TAB_CHROME / 2.0),
+                    bottom: height,
+                };
+                self.draw_units(&units, &self.tab_format, rect, &brush);
+                units.clear();
+                self.utf16 = units;
+            }
+        }
+        for (slot, button) in [caption::Hit::Close, caption::Hit::Max, caption::Hit::Min]
+            .into_iter()
+            .enumerate()
+        {
+            let right = width - slot as f32 * caption::BUTTON_WIDTH;
+            let left = (right - caption::BUTTON_WIDTH).max(0.0);
+            let close = button == caption::Hit::Close;
+            let pressed = self.caption_pressed == Some(button);
+            let hovered = self.caption_hover == Some(button);
+            let fill = match (close, pressed, hovered) {
+                (true, true, _) => Some(CLOSE_PRESSED),
+                (true, false, true) => Some(CLOSE_HOVER),
+                (false, true, _) => Some(strip.mix(ui.foreground, 0.2)),
+                (false, false, true) => Some(strip.mix(ui.foreground, 0.1)),
+                _ => None,
+            };
+            if let Some(fill) = fill {
+                self.fill_rect(left, 0.0, right, height, fill);
+            }
+            let color = if close && (pressed || hovered) {
+                Color::rgb(0xFF, 0xFF, 0xFF)
+            } else {
+                ui.foreground
+            };
+            let glyph = match button {
+                caption::Hit::Close => CAPTION_GLYPH_CLOSE,
+                caption::Hit::Max if self.caption_maximized => CAPTION_GLYPH_RESTORE,
+                caption::Hit::Max => CAPTION_GLYPH_MAXIMIZE,
+                _ => CAPTION_GLYPH_MINIMIZE,
+            };
+            let Some(brush) = self.brush(color) else {
+                continue;
+            };
+            let rect = D2D_RECT_F {
+                left,
+                top: 0.0,
+                right,
+                bottom: height,
+            };
+            let units = [glyph as u16];
+            // Without the system icon font these show as plain text symbols,
+            // which still work; the close button keeps its usual mark.
+            match &self.caption_format {
+                Some(format) => self.draw_units(&units, format, rect, &brush),
+                None => {
+                    let text = [plain_caption_glyph(glyph) as u16];
+                    self.draw_units(&text, &self.tab_close_format, rect, &brush);
+                }
+            }
+        }
+    }
+
     /// Set the tab-bar strip height (TAB-010 visibility modes). The grid
     /// area below the strip changes with it — callers re-read
     /// [`Renderer::grid_size`] and resize the grid afterwards.
@@ -961,7 +1105,6 @@ impl Renderer {
         let (_family, formats, metrics) = build_font_resources(&self.dwrite, self.dpi, font)?;
         self.typography = build_typography(&self.dwrite, font)?;
         self.formats = formats;
-        self.icon_format = make_icon_format(&self.dwrite, metrics.text_height);
         self.metrics = metrics;
         self.ligatures = font.ligatures;
         self.atlas = None;
@@ -1075,12 +1218,8 @@ impl Renderer {
     /// when the bar is at the top (WINDOW-011, TAB-022).
     #[must_use]
     pub fn grid_top(&self) -> f32 {
-        let bar = if self.tab_bar_placement == TabBarPlacement::Top {
-            self.tab_bar_height
-        } else {
-            0.0
-        };
-        bar + self.pad_y
+        caption::top_chrome(self.tabs_on_top(), self.tab_bar_height, self.caption_height)
+            + self.pad_y
     }
 
     fn draw_units(
@@ -1202,7 +1341,9 @@ impl Renderer {
     pub fn grid_size(&self) -> (usize, usize) {
         let px = unsafe { self.target.GetPixelSize() };
         let w = (px_to_dips(px.width, self.dpi) - 2.0 * self.pad_x).max(0.0);
-        let h = (px_to_dips(px.height, self.dpi) - self.tab_bar_height - 2.0 * self.pad_y).max(0.0);
+        let chrome =
+            caption::total_chrome(self.tabs_on_top(), self.tab_bar_height, self.caption_height);
+        let h = (px_to_dips(px.height, self.dpi) - chrome - 2.0 * self.pad_y).max(0.0);
         (
             (w / self.metrics.cell_width).floor().max(1.0) as usize,
             (h / self.metrics.cell_height).floor().max(1.0) as usize,
@@ -1610,6 +1751,9 @@ impl Renderer {
         }
         if self.tab_bar_height > 0.0 {
             self.paint_tab_bar(app, theme, width, height);
+        }
+        if self.caption_height > 0.0 {
+            self.paint_caption(app, theme, width);
         }
         // TAB-013: the rename prompt takes the overlay strip from search.
         // PALETTE-001 (issue #39): the palette takes it from search too, and
@@ -2260,9 +2404,15 @@ impl Renderer {
             }
             std::mem::swap(slot, &mut label);
         }
+        // The buttons share a top strip; a bottom bar has the full width.
+        let tab_room = if self.caption_height > 0.0 && self.tabs_on_top() {
+            caption::tab_area_width(width)
+        } else {
+            width
+        };
         tabbar::layout_into(
             &self.titles,
-            width,
+            tab_room,
             cw,
             app.active_index(),
             &mut self.layout,
