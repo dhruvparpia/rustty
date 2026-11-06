@@ -890,6 +890,9 @@ mod tests {
             feed(&mut p, &mut g, "\x1b]7501;?\x1b\\"),
             vec![ParserEvent::Respond(crate::program_status::query_reply())]
         );
+        // Break caught: a program flooding the query, each reply being about 2 KiB
+        // of key events written on the UI thread. A second query this soon is dropped.
+        assert_eq!(feed(&mut p, &mut g, "\x1b]7501;?\x1b\\"), vec![]);
         assert_eq!(feed(&mut p, &mut g, "\x1b]7501;state=bad\x07"), vec![]);
     }
 

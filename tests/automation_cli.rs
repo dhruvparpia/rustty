@@ -345,6 +345,36 @@ fn mcp_serves_a_handshake_client_with_no_window_open() {
 }
 
 #[test]
+fn mcp_survives_a_deeply_nested_line() {
+    // Break caught: stack overflow on the main thread in a debug build.
+    let deep = format!("{}1{}", r#"{"a":"#.repeat(127), "}".repeat(127));
+    let dir = scratch();
+    let mut child = rustty(&dir, &["mcp"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("started");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        writeln!(stdin, "{deep}").expect("written");
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc": "2.0", "id": 2, "method": "ping"})
+        )
+        .expect("written");
+    }
+    let output = child.wait_with_output().expect("exited");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let replies: Vec<Value> = String::from_utf8(output.stdout)
+        .expect("utf8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one message per line"))
+        .collect();
+    assert!(replies.iter().any(|reply| reply["id"] == 2), "{replies:?}");
+}
+
+#[test]
 fn mcp_serves_a_current_client_with_no_window_open() {
     let meta = json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",

@@ -244,6 +244,31 @@ fn decode_base64(text: &str) -> Option<Vec<u8>> {
     (count < 6).then_some(out)
 }
 
+/// Limits replies to the support query, per pane. A program needs one answer, and each
+/// is about 2 KiB of key events written on the UI thread, so a flood of queries must
+/// not get a flood of replies. The first always goes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QueryLimit {
+    last: Option<std::time::Instant>,
+}
+
+impl QueryLimit {
+    /// Least time between replies.
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Whether a query arriving at `now` gets a reply. A refused one changes nothing.
+    pub fn allow(&mut self, now: std::time::Instant) -> bool {
+        if self
+            .last
+            .is_some_and(|last| now.saturating_duration_since(last) < Self::EVERY)
+        {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+}
+
 /// The records a pane holds. Newest last.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Records {
@@ -435,6 +460,25 @@ mod tests {
         let deep = ["a"; 9].join("/");
         assert_eq!(parse(&format!("state=done:id={deep}")), Report::Ignored);
         assert_eq!(parse("state=done:app=has space"), Report::Ignored);
+    }
+
+    #[test]
+    fn the_query_reply_is_limited_to_one_a_second_and_the_first_always_goes() {
+        let start = std::time::Instant::now();
+        let at = |ms| start + std::time::Duration::from_millis(ms);
+        let mut limit = QueryLimit::default();
+        assert!(
+            limit.allow(at(0)),
+            "the first reply is what the protocol needs"
+        );
+        assert!(!limit.allow(at(1)));
+        assert!(!limit.allow(at(999)));
+        assert!(limit.allow(at(1000)));
+        assert!(!limit.allow(at(1500)));
+        // A refused query doesn't push the next one back.
+        assert!(limit.allow(at(2000)));
+        // Earlier than the last reply is too soon, not a reason to answer.
+        assert!(!limit.allow(at(1999)));
     }
 
     #[test]

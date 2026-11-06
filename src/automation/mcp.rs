@@ -600,7 +600,14 @@ pub fn run_stdio<C: Connector>(
                 );
             }
             Some(Line::Text(text)) if !text.trim_ascii().is_empty() => {
-                match serde_json::from_slice::<Value>(text.trim_ascii()) {
+                // Parsed on this thread, so hold it to the same limit as a pipe frame.
+                let line = text.trim_ascii();
+                let parsed = if crate::host::json_depth(line) > crate::host::MAX_JSON_DEPTH {
+                    Err(())
+                } else {
+                    serde_json::from_slice::<Value>(line).map_err(|_| ())
+                };
+                match parsed {
                     Ok(message) => server.handle(&message, &mut |frame| frames.push(frame)),
                     Err(_) => frames.push(
                         ProtocolError::new(PARSE_ERROR, "that line is not valid JSON").frame(None),

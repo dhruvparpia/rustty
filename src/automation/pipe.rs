@@ -42,6 +42,10 @@ use crate::host::{encode_frame, overlapped_read, overlapped_write, read_frame, w
 const CUT_OFF_GRACE: Duration = Duration::from_millis(250);
 /// How long closing a window waits for replies already queued to go out.
 const SHUTDOWN_FLUSH: Duration = Duration::from_millis(250);
+/// How long a connection gets to send `initialize`, so connections that say nothing
+/// can't hold all of [`MAX_CLIENTS`]. After that a quiet client may stay: it might be
+/// waiting on events.
+pub const INITIALIZE_DEADLINE: Duration = Duration::from_secs(5);
 /// How long a client keeps trying while every pipe instance is busy.
 const OPEN_BUSY_WAIT: Duration = Duration::from_secs(2);
 /// `ERROR_PIPE_BUSY`.
@@ -144,6 +148,9 @@ struct Client {
     writing: AtomicBool,
     done: AtomicBool,
     cut_at: Mutex<Option<Instant>>,
+    connected_at: Instant,
+    /// It has sent `initialize`, whether or not that went on to succeed.
+    initialize_seen: AtomicBool,
 }
 
 impl Client {
@@ -158,6 +165,8 @@ impl Client {
             writing: AtomicBool::new(false),
             done: AtomicBool::new(false),
             cut_at: Mutex::new(None),
+            connected_at: Instant::now(),
+            initialize_seen: AtomicBool::new(false),
         }
     }
 
@@ -205,12 +214,38 @@ struct Shared {
     gone: Mutex<Vec<ClientId>>,
     turn: AtomicUsize,
     next_client: AtomicU64,
+    /// [`INITIALIZE_DEADLINE`], which tests shorten.
+    initialize_deadline: Mutex<Duration>,
+}
+
+impl Shared {
+    /// Cut off connections that have said nothing useful for too long.
+    fn expire_uninitialized(&self) {
+        let deadline = *lock(&self.initialize_deadline);
+        for client in lock(&self.clients).iter() {
+            if client.is_done()
+                || client.initialize_seen.load(Ordering::Acquire)
+                || client.connected_at.elapsed() < deadline
+                || lock(&client.cut_at).is_some()
+            {
+                continue;
+            }
+            let error = RpcError::new(
+                ErrorCode::Timeout,
+                "this connection did not send initialize in time",
+            );
+            client.cut_off(encode_frame(&error_frame(Value::Null, &error)).ok());
+        }
+    }
 }
 
 fn read_loop(client: &Client, shared: &Shared) {
     while !client.is_done() {
         match read_frame(&mut &client.pipe, MAX_REQUEST_BYTES) {
             Ok(request) => {
+                if request.get("method").and_then(Value::as_str) == Some("initialize") {
+                    client.initialize_seen.store(true, Ordering::Release);
+                }
                 let mut inbox = lock(&client.inbox);
                 // Full: stop reading, and the pipe pushes back on this client alone.
                 while inbox.len() >= CLIENT_INBOX_CAP && !client.is_done() {
@@ -227,7 +262,7 @@ fn read_loop(client: &Client, shared: &Shared) {
             Err(e) if e.kind() == io::ErrorKind::InvalidData => {
                 // Framing can't be trusted past this: answer, then hang up.
                 let error = RpcError::bad_params(
-                    "the request is over the 64 KiB frame cap or is not valid JSON",
+                    "the request is over the 64 KiB frame cap, nested too deeply or not valid JSON",
                 );
                 client.cut_off(encode_frame(&error_frame(Value::Null, &error)).ok());
                 return;
@@ -338,6 +373,8 @@ fn accept_loop(
             }
         };
         let accepted = std::mem::replace(&mut current, next);
+        // Make room first, so silent connections can't turn this one away.
+        shared.expire_uninitialized();
         let serving = lock(&shared.clients)
             .iter()
             .filter(|client| !client.is_done())
@@ -383,6 +420,7 @@ impl Server {
             gone: Mutex::new(Vec::new()),
             turn: AtomicUsize::new(0),
             next_client: AtomicU64::new(1),
+            initialize_deadline: Mutex::new(INITIALIZE_DEADLINE),
         });
         let (ready_tx, ready_rx) = mpsc::channel();
         let thread_shared = Arc::clone(&shared);
@@ -466,6 +504,7 @@ impl Server {
     /// clients being cut off, wakes threads of finished connections and forgets
     /// connections whose threads have ended, which closes their handles.
     pub fn reap(&self) {
+        self.shared.expire_uninitialized();
         let mut clients = lock(&self.shared.clients);
         for client in clients.iter() {
             let overdue = lock(&client.cut_at).is_some_and(|at| at.elapsed() >= CUT_OFF_GRACE);
@@ -474,6 +513,12 @@ impl Server {
             }
         }
         clients.retain(|client| !client.is_done() || Arc::strong_count(client) > 1);
+    }
+
+    /// Shorten [`INITIALIZE_DEADLINE`] for a test.
+    #[cfg(test)]
+    pub(crate) fn set_initialize_deadline(&self, deadline: Duration) {
+        *lock(&self.shared.initialize_deadline) = deadline;
     }
 
     /// Connections being served.

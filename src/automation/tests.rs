@@ -404,6 +404,21 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+#[test]
+fn the_largest_protocol_version_is_an_error_and_not_an_overflow() {
+    // Break caught: `client + 1` panicking on the UI thread in a debug build, and
+    // wrapping to version 0 in a release one.
+    assert_eq!(
+        negotiate(u32::MAX).map_err(|e| e.code),
+        Err(ErrorCode::ProtocolMismatch)
+    );
+    assert_eq!(
+        negotiate_with(u32::MAX, u32::MAX),
+        Ok(u32::MAX),
+        "still its own version"
+    );
+}
+
 fn honest_entry() -> DiscoveryEntry {
     let pid = 4242;
     DiscoveryEntry {

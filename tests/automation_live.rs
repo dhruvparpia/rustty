@@ -570,6 +570,50 @@ fn a_spoofed_discovery_file_never_sees_the_real_windows_token() {
 
 #[test]
 #[ignore = "opens a window; run by hand"]
+fn hostile_clients_dont_take_a_real_window_down() {
+    let window = TestWindow::start(
+        "hostile",
+        &format!("{BASE_CONFIG}automation-reads = true\n"),
+    );
+    let entry = window.entry();
+
+    // A protocol version that used to overflow on the UI thread.
+    for version in [u64::from(u32::MAX), u64::MAX] {
+        let error = open(&entry)
+            .expect("connected")
+            .call("initialize", json!({"protocolVersion": version}))
+            .expect_err("refused");
+        assert_eq!(error.code, ErrorCode::ProtocolMismatch);
+    }
+
+    // JSON nested past the reader's stack: only this connection pays for it.
+    let mut deep = json!(1);
+    for _ in 0..127 {
+        deep = json!({"a": deep});
+    }
+    let refused = window.connect().call("list", deep);
+    assert!(refused.is_err(), "{refused:?}");
+
+    // Connections that say nothing hold every slot, then lose them.
+    let idle: Vec<PipeTransport> = (0..32)
+        .map(|_| {
+            let mut opened = None;
+            wait_for("a pipe instance", || {
+                opened = open(&entry).ok();
+                opened.is_some().then_some(())
+            });
+            opened.expect("opened")
+        })
+        .collect();
+    std::thread::sleep(Duration::from_secs(6));
+    assert!(window.ctl(&["list"]).status.success(), "a slot came free");
+    drop(idle);
+
+    assert!(!window.exited(), "the window survived all of it");
+}
+
+#[test]
+#[ignore = "opens a window; run by hand"]
 fn stale_and_wrong_tokens_get_no_writes_on_a_real_window() {
     let window = TestWindow::start("token", BASE_CONFIG);
     let entry = window.entry();

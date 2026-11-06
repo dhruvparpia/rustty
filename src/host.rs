@@ -302,11 +302,95 @@ pub fn write_frame(w: &mut impl Write, v: &Value) -> io::Result<()> {
     w.write_all(&encode_frame(v)?)
 }
 
+/// How deep a frame's JSON may nest. serde_json stops at 128, but that is 128 levels
+/// of recursion for each of parsing, cloning, printing and dropping it, and at 128
+/// levels of objects a debug build runs past a pipe reader's stack, which ends the
+/// process with every tab in it. Nothing in these protocols comes close to this.
+pub const MAX_JSON_DEPTH: usize = 32;
+
+/// How deep JSON text nests, counting brackets outside strings. It doesn't check
+/// the text is valid: the parser does that, once this has said it is safe to try.
+#[must_use]
+pub fn json_depth(body: &[u8]) -> usize {
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    let (mut in_string, mut escaped) = (false, false);
+    for byte in body {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
+}
+
 /// Whether a request should keep an idle host alive. A sidebar polling the
 /// session list is not someone using the host.
 #[must_use]
 pub fn counts_as_activity(request: &Value) -> bool {
     request.get("method").and_then(Value::as_str) != Some("session.list")
+}
+
+#[cfg(test)]
+mod frame_depth_tests {
+    use super::*;
+
+    fn frame(body: &[u8]) -> Vec<u8> {
+        let mut out = u32::try_from(body.len())
+            .unwrap_or(0)
+            .to_le_bytes()
+            .to_vec();
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn nesting_is_counted_only_outside_strings() {
+        assert_eq!(json_depth(b"{}"), 1);
+        assert_eq!(json_depth(br#"{"a":[1,{"b":[]}]}"#), 4);
+        assert_eq!(json_depth(br#"{"a":"[[[[[["}"#), 1);
+        assert_eq!(json_depth(br#"{"a":"\"[[[["}"#), 1);
+        assert_eq!(json_depth(br#"{"a":"\\"}"#), 1);
+        assert_eq!(json_depth(b"]]]]"), 0, "serde's to refuse");
+    }
+
+    #[test]
+    fn a_frame_nested_past_the_limit_is_invalid() {
+        let at_limit = format!(
+            "{}{}",
+            "[".repeat(MAX_JSON_DEPTH),
+            "]".repeat(MAX_JSON_DEPTH)
+        );
+        let read = read_frame(&mut frame(at_limit.as_bytes()).as_slice(), 4096);
+        assert!(read.is_ok(), "{read:?}");
+        let over = format!("[{at_limit}]");
+        let error = read_frame(&mut frame(over.as_bytes()).as_slice(), 4096).expect_err("refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn what_a_real_reply_holds_fits_the_limit() {
+        // Break caught: a limit that refuses the protocol's own messages.
+        let reply = serde_json::to_vec(&crate::automation::capabilities()).unwrap_or_default();
+        assert!(
+            json_depth(&reply) <= MAX_JSON_DEPTH,
+            "{}",
+            json_depth(&reply)
+        );
+    }
 }
 
 /// Read one frame, enforcing `max` on the declared length.
@@ -326,6 +410,12 @@ pub fn read_frame(r: &mut impl Read, max: usize) -> io::Result<Value> {
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
+    if json_depth(&buf) > MAX_JSON_DEPTH {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame nested too deeply",
+        ));
+    }
     serde_json::from_slice(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 

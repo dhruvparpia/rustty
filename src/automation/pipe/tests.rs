@@ -396,6 +396,98 @@ fn malformed_json_is_answered_and_the_connection_closed() {
     assert_eq!(error.code, ErrorCode::BadParams, "{error}");
 }
 
+/// `{"a":{"a":...1...}}`, `depth` deep: objects take the most stack per level.
+fn nested(depth: usize) -> Vec<u8> {
+    let mut body = br#"{"a":"#.repeat(depth);
+    body.push(b'1');
+    body.extend(std::iter::repeat_n(b'}', depth));
+    body
+}
+
+#[test]
+fn a_deeply_nested_frame_cant_overflow_a_stack() {
+    // Break caught: serde_json's 128 levels running past the reader thread's stack
+    // in a debug build, which takes the whole terminal down with every tab in it.
+    // Everything the frame could reach is here too: nothing deep gets to the window.
+    let mut rig = Rig::new("deep");
+    let mut transport = open(&rig.entry()).expect("connect");
+    let body = nested(127);
+    transport
+        .write_raw(&(body.len() as u32).to_le_bytes())
+        .expect("written");
+    transport.write_raw(&body).expect("written");
+    let error = transport.next_event(WAIT).expect_err("connection ended");
+    assert_eq!(error.code, ErrorCode::BadParams, "{error}");
+    // The server is still here for the next client.
+    let entry = rig.entry();
+    let handle = std::thread::spawn(move || {
+        let mut next = open(&entry).expect("connect");
+        hello(&mut next);
+    });
+    rig.pump_until(|_| handle.is_finished());
+    handle.join().expect("client");
+}
+
+#[test]
+fn a_connection_that_never_initializes_is_dropped() {
+    // Break caught: idle connections filling every slot, so nobody can connect.
+    assert_eq!(INITIALIZE_DEADLINE, Duration::from_secs(5));
+    let mut rig = Rig::new("idle");
+    let entry = rig.entry();
+    let idle: Vec<_> = (0..MAX_CLIENTS)
+        .map(|_| {
+            let start = Instant::now();
+            loop {
+                match open_named_pipe(&entry.pipe, 0) {
+                    Ok(pipe) => break pipe,
+                    // The next instance isn't up yet.
+                    Err(e) => assert!(start.elapsed() < WAIT, "{e}"),
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .collect();
+    rig.pump_until(|rig| rig.server.client_count() == MAX_CLIENTS);
+    rig.server.set_initialize_deadline(Duration::from_millis(1));
+    rig.pump_until(|rig| rig.server.client_count() == 0);
+    // A slot is free again, and this one gets served.
+    let handle = std::thread::spawn(move || {
+        let mut next = open(&entry).expect("connect");
+        hello(&mut next);
+    });
+    rig.pump_until(|_| handle.is_finished());
+    handle.join().expect("client");
+    drop(idle);
+}
+
+#[test]
+fn a_connection_that_initializes_stays_however_quiet_it_is() {
+    let mut rig = Rig::new("quiet");
+    rig.server
+        .set_initialize_deadline(Duration::from_millis(50));
+    let entry = rig.entry();
+    let handle = std::thread::spawn(move || {
+        let mut client = open(&entry).expect("connect");
+        hello(&mut client);
+        std::thread::sleep(Duration::from_millis(300));
+        client.call("capabilities", json!({})).expect("still here");
+    });
+    rig.pump_until(|_| handle.is_finished());
+    handle.join().expect("client");
+}
+
+#[test]
+fn only_initialize_stops_the_clock() {
+    // Sending something else first gets it told off, and doesn't buy it a slot.
+    let mut rig = Rig::new("wrongfirst");
+    rig.server
+        .set_initialize_deadline(Duration::from_millis(100));
+    let entry = rig.entry();
+    let _silent = silent_client(&entry);
+    rig.pump_until(|rig| rig.server.client_count() == 1);
+    rig.pump_until(|rig| rig.server.client_count() == 0);
+}
+
 #[test]
 fn the_discovery_file_lasts_as_long_as_the_server() {
     let rig = Rig::new("discovery");

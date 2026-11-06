@@ -567,7 +567,7 @@ pub fn negotiate(client: u32) -> Result<u32, RpcError> {
 ///
 /// `protocol-mismatch` when `client` is neither `server` nor the one before.
 pub fn negotiate_with(server: u32, client: u32) -> Result<u32, RpcError> {
-    if client >= 1 && (client == server || client + 1 == server) {
+    if client >= 1 && (client == server || client.checked_add(1) == Some(server)) {
         Ok(client)
     } else {
         Err(RpcError::new(

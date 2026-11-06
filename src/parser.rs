@@ -133,6 +133,8 @@ pub enum MouseProtocol {
 /// Streaming VT parser plus the terminal state for one pane.
 #[derive(Debug, Clone)]
 pub struct Parser {
+    /// How often OSC 7501's support query is answered (STATUS-001).
+    status_query_limit: crate::program_status::QueryLimit,
     /// Current state-machine state.
     pub state: State,
     /// CSI parameter buffer.
@@ -212,6 +214,7 @@ impl Parser {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            status_query_limit: crate::program_status::QueryLimit::default(),
             state: State::Ground,
             params: Vec::new(),
             private: Vec::new(),
@@ -823,7 +826,9 @@ impl Parser {
                 }
                 "7501" => match crate::program_status::parse(rest) {
                     crate::program_status::Report::Query => {
-                        events.push(ParserEvent::Respond(crate::program_status::query_reply()));
+                        if self.status_query_limit.allow(std::time::Instant::now()) {
+                            events.push(ParserEvent::Respond(crate::program_status::query_reply()));
+                        }
                     }
                     crate::program_status::Report::Ignored => {}
                     report => events.push(ParserEvent::ProgramStatus(report)),
