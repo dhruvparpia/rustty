@@ -229,6 +229,7 @@ their windows. It starts without activation, and only its own process is stopped
 | A command that ends reports its output and exit code | pass | Live: subscribe, `tab.open`, `pane-output`, then `pane-closed` with `exitCode` 3 |
 | `rustty mcp` driving a real window | pass | Live: handshake, `tools/list`, `list`, `tab_open`, `pane_send-text`, `pane_read` |
 | A wrong token gets no writes | pass | Live |
+| Session host route | Known exception, not a pass: `--attach --take-control`, `session.input`, `session.terminate` and `host.shutdown` need no grant (AUTO-007), so the grants in this table don't cover host sessions | Not changed, not tested |
 | Painting | pass | `PrintWindow` read by eye: sidebar rows, titles, grid text sent through the API, and "Typed by automation" on the row |
 | The window never took the foreground | pass | Checked in the flow above and at the capture |
 | A shell's exit is noticed (AUTO-015) | pass | Real ConPTY, headless. Failed before the fix, as did ff51b46 and 0e7dae6 under the same launch |

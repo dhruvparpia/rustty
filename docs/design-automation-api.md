@@ -174,3 +174,7 @@ JSON-RPC 2.0 (same base as MCP, so the adapter is a thin encoder):
     away. `automation-reads` defaults to false and is read once, as in amendment 11.
     Denied calls get `denied-grant` with one line naming the key. `capabilities`
     reports each operation's grant as `none`, `read` or `write`.
+16. **The session host is a known exception** (AUTO-007). None of these grants cover
+    its own pipe: `--attach --take-control`, `session.input`, `session.terminate` and
+    `host.shutdown` need no grant. They stay as they are, so a host session can be
+    typed into and ended by any client of this user.
