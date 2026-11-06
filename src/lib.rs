@@ -92,6 +92,13 @@ mod perf_bench;
 pub mod portable;
 /// Terminal search over screen + scrollback (SPEC SEARCH-001..015).
 pub mod search;
+// The real `op` runner and the command launcher behind `rustty secrets`.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "SECRET-011: CreateProcessW with a wiped environment block is a raw Win32 FFI boundary"
+)]
+pub mod secret_exec;
 /// Per-project 1Password secrets: manifest, naming, token store and verb
 /// logic (SECRET-001..012). Portable; every `op` call goes through a trait.
 pub mod secrets;
