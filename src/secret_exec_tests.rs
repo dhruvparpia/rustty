@@ -380,6 +380,57 @@ fn the_owner_run_of_op_keeps_account_choice_but_drops_service_credentials() {
 }
 
 #[test]
+fn a_command_gets_no_1password_settings_and_no_automation_token() {
+    // Break caught: an owner's OP_SESSION_ or a boss's write token reaching whatever
+    // `secrets run` starts, which is exactly the program the secret is for.
+    let mut block = build_env_block(
+        inherited(&[
+            ("KEEP", "yes"),
+            ("OP_SESSION_abc", "x"),
+            ("op_account", "x"),
+            ("OP_CONNECT_HOST", "x"),
+            ("OP_SERVICE_ACCOUNT_TOKEN", "x"),
+            ("RUSTTY_AUTOMATION_TOKEN", "x"),
+            ("rustty_automation_token", "x"),
+            ("RUSTTY_WINDOW", "7"),
+        ]),
+        EnvPolicy::Command,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(block_entries(&mut block), ["KEEP=yes", "RUSTTY_WINDOW=7"]);
+}
+
+#[test]
+fn op_gets_neither_automation_variable() {
+    for policy in [EnvPolicy::OpOwner, EnvPolicy::OpServiceAccount] {
+        let mut block = build_env_block(
+            inherited(&[
+                ("KEEP", "yes"),
+                ("RUSTTY_AUTOMATION_TOKEN", "x"),
+                ("rustty_window", "7"),
+            ]),
+            policy,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(block_entries(&mut block), ["KEEP=yes"], "{policy:?}");
+    }
+}
+
+#[test]
+fn a_command_that_is_not_found_is_not_quoted() {
+    // Break caught: a secret pasted where the command goes coming back in an error
+    // that ends up in a log (SECRET-002).
+    let argv = [OsString::from("sk-live-not-a-program-0123456789")];
+    let error = SystemLauncher.launch(&argv, Vec::new()).unwrap_err();
+    assert_eq!(error.exit_code(), u32::from(EXIT_LAUNCH));
+    let said = error.to_string();
+    assert!(!said.contains("sk-live"), "{said}");
+    assert!(said.contains("not found"), "{said}");
+}
+
+#[test]
 fn a_secret_that_is_not_text_fails_the_block() {
     let secret = LockedSecret::from_slice(&[0xff, 0xfe]).unwrap();
     assert!(build_env_block(inherited(&[]), EnvPolicy::Command, &[("A", &secret)]).is_err());

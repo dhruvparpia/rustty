@@ -280,28 +280,34 @@ fn resolve_op() -> Result<PathBuf, SecretsError> {
 /// compared in upper case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvPolicy {
-    /// The command for `secrets run`: everything but a stray token.
+    /// The command for `secrets run`: no 1Password settings of any kind, and no
+    /// automation token.
     Command,
     /// `op` under the owner's session: no service credentials, or `op` would
-    /// use them instead. The owner's account choice stays.
+    /// use them instead. The owner's account choice stays. `op` has no use for
+    /// either automation variable.
     OpOwner,
     /// `op` holding a project token: no inherited `OP_*` at all, so nothing
-    /// can divert it, such as `OP_CONNECT_HOST`.
+    /// can divert it, such as `OP_CONNECT_HOST`, and neither automation variable.
     OpServiceAccount,
 }
 
 impl EnvPolicy {
     /// This policy drops the variable named `upper`.
     fn drops(self, upper: &str) -> bool {
+        let automation = |name: &str| {
+            name == crate::automation::ENV_TOKEN || name == crate::automation::ENV_WINDOW
+        };
         match self {
-            Self::Command => upper == TOKEN_VARIABLE,
+            Self::Command => upper.starts_with("OP_") || upper == crate::automation::ENV_TOKEN,
             Self::OpOwner => {
-                matches!(
-                    upper,
-                    TOKEN_VARIABLE | "OP_CONNECT_HOST" | "OP_CONNECT_TOKEN"
-                )
+                automation(upper)
+                    || matches!(
+                        upper,
+                        TOKEN_VARIABLE | "OP_CONNECT_HOST" | "OP_CONNECT_TOKEN"
+                    )
             }
-            Self::OpServiceAccount => upper.starts_with("OP_"),
+            Self::OpServiceAccount => automation(upper) || upper.starts_with("OP_"),
         }
     }
 }
@@ -791,11 +797,12 @@ impl Launcher for SystemLauncher {
         let path_var = std::env::var_os("PATH");
         let file =
             resolve_command(command, path_var.as_deref(), is_runnable_file).ok_or_else(|| {
-                SecretsError::Launch(format!(
-                    "{} was not found as a .exe, .com, .bat or .cmd; the current directory is only \
-                 searched for an explicit path such as .\\tool.exe",
-                    Path::new(command).display()
-                ))
+                // Not quoted: a secret pasted in the wrong place must not land in a log.
+                SecretsError::Launch(
+                    "the command was not found as a .exe, .com, .bat or .cmd; the current \
+                     directory is only searched for an explicit path such as .\\tool.exe"
+                        .to_owned(),
+                )
             })?;
         let file = std::path::absolute(&file).map_err(failed)?;
         let (application, mut command_line) = if is_batch(&file) {
