@@ -4,9 +4,9 @@ All notable changes to `rusttyterm` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - unreleased feature work
+## [0.7.0] - unreleased feature work
 
-Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. Feature work targets minors. `packaging/check-release.ps1` checks tag/version/SHA and CI fetches tags and runs it for `v0.5.1`.
+Everything built on top of 0.6.0: the sessions sidebar, restart safety, worktrees, automation, per-project secrets, King Crab and skinned dialogs.
 
 ### Added
 
@@ -23,38 +23,6 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
   and cannot prevent it: code running as the same Windows user can still reach these secrets, and a
   command given a secret can print it. A separate Windows user for agents is the real boundary, and
   it is not built.
-- Copper native dark/light skins, independent UI color overrides, native caption
-  Fix: caption uses the window background instead of the tab-bar strip, title icon slots are reserved only when an icon is drawn, and the active-tab marker is 3 DIPs.
-  colors and positional active-tab/palette/bookmark indicators. See
-  [Copper skin](docs/copper-skin.md) for configuration and Windows validation.
-- Session browser slice (#88): palette rows list live and exited host sessions with profile, cwd,
-  controller/watcher counts, status, and a disabled reason for exited targets. The palette registry refreshes every ~3 s while open, keeping the selected command and typed query.
-- Settings overlay UIA node (#91): `Node::Settings` exposes overlay bounds, selected setting/count and the typed TOML value, with keyboard focus and help text.
-- Project task runner slice (#89): `tasks.toml` schema, dependency validation, palette Run/Stop/Restart
-  actions, host explicit program/args, and canonical `task#<id> <name>` session labels.
-- Palette providers slice (#93): focus pane, open saved workspace, and switch theme rows reuse the
-  shared action registry. Settings navigation waits for the #91 editor destination.
-- Command timeline slice (#90): palette rows expose retained command ids, exit status and duration; jump/copy/export actions use canonical command ids from the active pane. Finished-command rows also open a search overlay scoped to that command's output range. Durable cross-restart indexing remains later.
-- TaskRunner seam (#89 architecture): task lifecycle moved from `window.rs` into a deep `TaskRunner` module with a `HostAdapter` seam, explicit outcomes, and synthetic host tests.
-
-### Changed
-
-- A pane now closes when its program exits even if the pseudo-console keeps its output pipe open,
-  as it does on current Windows builds, where `exit` used to leave the pane open and blank.
-- The permanent menu bar is gone. Tap Alt to open the same menu as a popup; every menu
-  command is also in the command palette, including minimize, maximize, close window, about
-  and saving workspaces.
-- Tabs now sit in the title bar on one seamless surface, with rustty drawing the minimize,
-  maximize and close buttons in theme colors. Dragging, resizing and Snap Layouts stay native.
-- The tab strip is quieter: taller, with no divider line, Windows UI font titles, the `+`
-  button after the last tab, and no default shell icon. The window has 12 by 10 DIPs of
-  padding by default.
-- Copper is the default skin: `copper-dark` on a dark system and `copper-light` on a light
-  one. An explicit theme in config still wins. The tab strip now matches the terminal
-  background unless `tab-bar` is set explicitly.
-
-### Added
-
 - Dialogs now wear the theme: questions and messages use the skin's colors, with buttons that say what they do, such as Quit or Start. The Save dialog is still Windows' own.
 - King Crab, the boss agent: "Start King Crab" in the command palette opens a Claude Code session that can
   split work across sessions in their own worktrees, watch them, and report back. It stops before
@@ -88,6 +56,22 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 - Symbols Nerd Font Mono v3.5.1 is embedded as a fallback, so prompt icons work with no
   setup. It adds about 2.6 MB to the executable. A chosen font that has the glyph keeps it.
 
+### Changed
+
+- A pane now closes when its program exits even if the pseudo-console keeps its output pipe open,
+  as it does on current Windows builds, where `exit` used to leave the pane open and blank.
+- The permanent menu bar is gone. Tap Alt to open the same menu as a popup; every menu
+  command is also in the command palette, including minimize, maximize, close window, about
+  and saving workspaces.
+- Tabs now sit in the title bar on one seamless surface, with rustty drawing the minimize,
+  maximize and close buttons in theme colors. Dragging, resizing and Snap Layouts stay native.
+- The tab strip is quieter: taller, with no divider line, Windows UI font titles, the `+`
+  button after the last tab, and no default shell icon. The window has 12 by 10 DIPs of
+  padding by default.
+- Copper is the default skin: `copper-dark` on a dark system and `copper-light` on a light
+  one. An explicit theme in config still wins. The tab strip now matches the terminal
+  background unless `tab-bar` is set explicitly.
+
 ### Fixed
 
 - A normal launch no longer crashes. After a GUI launch released its console, printing any
@@ -102,6 +86,29 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 - Theme palettes now colour ANSI output, so each theme shows its own 16 colors. Text
   already on screen keeps its colors after a theme switch, and a session host's snapshot
   of existing text uses the default palette.
+
+## [0.6.0] - unreleased feature work
+
+Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. Feature work targets minors. `packaging/check-release.ps1` checks tag/version/SHA and CI fetches tags and runs it for `v0.5.1`.
+
+### Added
+
+- Copper native dark/light skins, independent UI color overrides, native caption
+  Fix: caption uses the window background instead of the tab-bar strip, title icon slots are reserved only when an icon is drawn, and the active-tab marker is 3 DIPs.
+  colors and positional active-tab/palette/bookmark indicators. See
+  [Copper skin](docs/copper-skin.md) for configuration and Windows validation.
+- Session browser slice (#88): palette rows list live and exited host sessions with profile, cwd,
+  controller/watcher counts, status, and a disabled reason for exited targets. The palette registry refreshes every ~3 s while open, keeping the selected command and typed query.
+- Settings overlay UIA node (#91): `Node::Settings` exposes overlay bounds, selected setting/count and the typed TOML value, with keyboard focus and help text.
+- Project task runner slice (#89): `tasks.toml` schema, dependency validation, palette Run/Stop/Restart
+  actions, host explicit program/args, and canonical `task#<id> <name>` session labels.
+- Palette providers slice (#93): focus pane, open saved workspace, and switch theme rows reuse the
+  shared action registry. Settings navigation waits for the #91 editor destination.
+- Command timeline slice (#90): palette rows expose retained command ids, exit status and duration; jump/copy/export actions use canonical command ids from the active pane. Finished-command rows also open a search overlay scoped to that command's output range. Durable cross-restart indexing remains later.
+- TaskRunner seam (#89 architecture): task lifecycle moved from `window.rs` into a deep `TaskRunner` module with a `HostAdapter` seam, explicit outcomes, and synthetic host tests.
+
+### Fixed
+
 - Reading scrollback: the view now keeps its text while output arrives, and line
   edits (erase, insert, delete) apply to the live screen, never the history on screen.
   Images placed while scrolled back anchor to the live cursor.
