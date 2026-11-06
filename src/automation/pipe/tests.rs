@@ -490,6 +490,50 @@ fn window_tokens_are_random_and_never_repeat() {
 }
 
 #[test]
+fn the_token_grants_writes_over_a_real_pipe_to_that_connection_only() {
+    let token = new_token().expect("token");
+    let secret = token.as_str().to_string();
+    let mut rig = Rig::new("token");
+    rig.window.token = Some(token);
+    let entry = rig.entry();
+    let handle = std::thread::spawn(move || {
+        let mut with = open(&entry).expect("connect");
+        let init = with
+            .call("initialize", json!({"protocolVersion": 1, "token": secret}))
+            .expect("initialize");
+        assert_eq!(init["grants"]["writes"], true);
+        with.call("tab.open", json!({})).expect("granted");
+
+        let mut without = open(&entry).expect("connect");
+        hello(&mut without);
+        let error = without
+            .call("tab.open", json!({}))
+            .expect_err("not granted");
+        assert_eq!(error.code, ErrorCode::DeniedGrant);
+    });
+    rig.pump_until(|_| handle.is_finished());
+    handle.join().expect("client");
+    assert_eq!(rig.window.opened.len(), 1);
+}
+
+/// What a window pays on its UI thread to start automation. Run with `--release`.
+#[test]
+#[ignore = "bench: run individually in release"]
+fn starting_the_server_costs_the_window_little() {
+    let dir = temp_dir("startcost");
+    let mut slowest = Duration::ZERO;
+    for _ in 0..20 {
+        let start = Instant::now();
+        let server =
+            Server::start(crate::automation::next_id(), false, Some(dir.clone())).expect("server");
+        slowest = slowest.max(start.elapsed());
+        drop(server);
+    }
+    println!("Server::start worst of 20: {slowest:?}");
+    assert!(slowest < Duration::from_millis(50), "{slowest:?}");
+}
+
+#[test]
 fn a_timed_out_call_says_timeout() {
     // Nothing serves this client: this thread isn't pumping.
     let rig = Rig::new("timeout");

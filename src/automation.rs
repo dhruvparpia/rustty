@@ -36,6 +36,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -54,6 +55,14 @@ pub const OUTBOUND_CAP: usize = 4 * 1024 * 1024;
 pub const SEND_RATE_BYTES_PER_SEC: u64 = 64 * 1024;
 /// `pane.send-text` burst, which is also the most one call can carry (ADR §5).
 pub const SEND_BURST_BYTES: u64 = 8 * 1024;
+/// How long one read, or one tick's scan for pane output, may hold the UI thread
+/// (AUTO-008). A full 1 MiB page takes about 35 ms on the machine this was measured
+/// on, longer than a tick, so a page is a limit and not a promise: a read that runs
+/// out of time returns what it has and says `more`.
+pub const READ_TIME_BUDGET: Duration = Duration::from_millis(4);
+/// Lines read before the clock counts, so a small read is never cut short by the
+/// thread happening to lose the processor.
+const MIN_LINES_BEFORE_CLOCK: usize = 256;
 /// Most requests the window serves per tick.
 pub const TICK_REQUEST_BUDGET: usize = 16;
 /// Time after which the window stops serving requests for this tick. A request
@@ -681,6 +690,28 @@ pub fn read_lines(
     first: usize,
     last: usize,
     budget: usize,
+    line: impl FnMut(usize) -> Option<String>,
+) -> LinePage {
+    read_lines_while(first, last, budget, &mut || true, line)
+}
+
+/// A clock for [`read_lines_while`]: stops a read `budget` after `started`. A zero
+/// budget stops it after one line.
+pub fn time_box(started: Instant, budget: Duration) -> impl FnMut() -> bool {
+    let mut lines = 0usize;
+    move || {
+        lines += 1;
+        !budget.is_zero() && (lines < MIN_LINES_BEFORE_CLOCK || started.elapsed() < budget)
+    }
+}
+
+/// [`read_lines`], asking `keep_going` after each line. At least one line is always
+/// read, so a read that keeps running out of time still moves forward.
+pub fn read_lines_while(
+    first: usize,
+    last: usize,
+    budget: usize,
+    keep_going: &mut dyn FnMut() -> bool,
     mut line: impl FnMut(usize) -> Option<String>,
 ) -> LinePage {
     let mut text = String::new();
@@ -710,6 +741,9 @@ pub fn read_lines(
         text.push_str(&content);
         text.push('\n');
         next += 1;
+        if !keep_going() {
+            break;
+        }
     }
     LinePage {
         text,

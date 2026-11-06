@@ -288,6 +288,34 @@ fn a_page_reaches_the_end_and_says_so() {
 }
 
 #[test]
+fn a_page_can_stop_early_when_time_is_up_and_still_moves() {
+    // Break caught: one 1 MiB read holding the UI thread past a whole tick.
+    let mut calls = 0;
+    let page = read_lines_while(
+        10,
+        1000,
+        1_000_000,
+        &mut || {
+            calls += 1;
+            calls < 3
+        },
+        |abs| Some(format!("line {abs}")),
+    );
+    assert_eq!(page.text, "line 10\nline 11\nline 12\n");
+    assert_eq!(page.next, 13);
+    assert!(page.more, "the caller is told to come back");
+    // Out of time from the start still reads one line, so a read can't stall.
+    let page = read_lines_while(10, 1000, 1_000_000, &mut || false, |_| {
+        Some("x".to_string())
+    });
+    assert_eq!(page.text, "x\n");
+    assert_eq!(page.next, 11);
+    // Finishing exactly as time runs out isn't "more".
+    let page = read_lines_while(10, 10, 1_000_000, &mut || false, |_| Some("x".to_string()));
+    assert!(!page.more);
+}
+
+#[test]
 fn a_line_longer_than_the_page_is_cut_so_the_read_still_moves() {
     let page = read_lines(0, 1, 16, |_| Some("é".repeat(100)));
     assert!(json_escaped_len(&page.text) <= 16);

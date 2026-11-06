@@ -4,11 +4,14 @@
 //! grid as plain text, in whole lines, after the window has already parsed it.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use super::ops::ClientId;
-use super::{OUTPUT_CHUNK_BYTES, encode_cursor, event_frame, read_lines};
+use super::{
+    OUTPUT_CHUNK_BYTES, READ_TIME_BUDGET, encode_cursor, event_frame, read_lines_while, time_box,
+};
 use crate::app::App;
 use crate::pane::Pane;
 use crate::rail::Status;
@@ -175,6 +178,11 @@ impl Baseline {
 pub struct Tracker {
     baseline: Option<Baseline>,
     seq: u64,
+    /// Which pane's output goes first this scan, so that when time runs out each
+    /// busy pane still gets its turn.
+    turn: usize,
+    /// Replaces [`READ_TIME_BUDGET`] in tests.
+    output_budget: Option<Duration>,
 }
 
 /// Sends one event to every client that wants it.
@@ -205,6 +213,12 @@ impl Sender<'_> {
 }
 
 impl Tracker {
+    /// Give the output scan a different time budget.
+    #[cfg(test)]
+    pub(crate) const fn set_output_budget(&mut self, budget: Duration) {
+        self.output_budget = Some(budget);
+    }
+
     /// Take the baseline now if nobody was subscribed until this moment, so a
     /// tab opened right after subscribing still counts as news.
     pub fn ensure_baseline(&mut self, app: &App) {
@@ -261,13 +275,39 @@ impl Tracker {
                 });
             }
         }
-        // Output is per client: each has read to its own point.
-        for tab in app.tabs() {
-            tab.for_each_pane_ref(|pane, _| {
-                for (client, client_subs) in subs.iter_mut() {
-                    send_output(pane, tab.id(), *client, client_subs, &mut self.seq, send);
-                }
-            });
+        // Output is per client: each has read to its own point. One tick's worth
+        // is bounded however many panes and clients there are: past the budget the
+        // rest waits for the next tick, starting from the next pane along.
+        let budget = self.output_budget.unwrap_or(READ_TIME_BUDGET);
+        let started = Instant::now();
+        let offset = self.turn % live_panes.len().max(1);
+        self.turn = self.turn.wrapping_add(1);
+        let mut sent = false;
+        for first_pass in [true, false] {
+            let mut index = 0;
+            for tab in app.tabs() {
+                tab.for_each_pane_ref(|pane, _| {
+                    let turn = (index >= offset) == first_pass;
+                    index += 1;
+                    if !turn {
+                        return;
+                    }
+                    for (client, client_subs) in subs.iter_mut() {
+                        if sent && started.elapsed() >= budget {
+                            return;
+                        }
+                        sent |= send_output(
+                            pane,
+                            tab.id(),
+                            *client,
+                            client_subs,
+                            &mut self.seq,
+                            time_box(started, budget),
+                            send,
+                        );
+                    }
+                });
+            }
         }
         let gone: Vec<u64> = baseline
             .panes
@@ -376,26 +416,27 @@ fn send_output(
     client: ClientId,
     subs: &mut Subscriptions,
     seq: &mut u64,
+    mut keep_going: impl FnMut() -> bool,
     send: &mut dyn FnMut(ClientId, &Value),
-) {
+) -> bool {
     let id = pane.id();
     if pane.in_alt() || !subs.wants(OUTPUT, Some(id)) {
-        return;
+        return false;
     }
     let grid = pane.grid();
     let cursor = *subs.output.entry(id).or_insert(0);
     let end = output_end(pane);
     if cursor >= end {
-        return;
+        return false;
     }
     let first = cursor.max(grid.first_abs());
     let skipped = first - cursor;
     let page = if first < end {
-        read_lines(first, end - 1, OUTPUT_CHUNK_BYTES, |abs| {
+        read_lines_while(first, end - 1, OUTPUT_CHUNK_BYTES, &mut keep_going, |abs| {
             grid.line_text_abs(abs)
         })
     } else {
-        read_lines(first, 0, OUTPUT_CHUNK_BYTES, |_| None)
+        read_lines_while(first, 0, OUTPUT_CHUNK_BYTES, &mut keep_going, |_| None)
     };
     subs.output.insert(id, page.next);
     let mut fields = json!({
@@ -411,6 +452,7 @@ fn send_output(
     }
     *seq += 1;
     send(client, &event_frame(OUTPUT, *seq, fields));
+    true
 }
 
 #[cfg(test)]

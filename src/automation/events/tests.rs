@@ -313,6 +313,29 @@ fn output_bursts_are_cut_into_bounded_chunks_that_lose_nothing() {
 }
 
 #[test]
+fn busy_panes_take_turns_when_the_scan_runs_out_of_time() {
+    // Break caught: the first pane in a flood using every tick's time while the
+    // second's output scrolls out of history unread.
+    let (mut d, mut w) = setup();
+    w.app.split_active(Dir::Vertical);
+    let (a, b) = (pane_id(&w, 0, 0), pane_id(&w, 0, 1));
+    subscribe(&mut d, &mut w, json!({"pane": a}));
+    subscribe(&mut d, &mut w, json!({"pane": b}));
+    for i in 0..4 {
+        feed(&mut w, 0, 0, format!("a{i}\r\n").as_bytes());
+        feed(&mut w, 0, 1, format!("b{i}\r\n").as_bytes());
+    }
+    d.set_output_budget(std::time::Duration::ZERO);
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let events = scan(&mut d, &w);
+        assert_eq!(events.len(), 1, "out of time after one chunk: {events:?}");
+        seen.push(events[0].1["pane"].as_u64().expect("pane"));
+    }
+    assert!(seen.contains(&a) && seen.contains(&b), "{seen:?}");
+}
+
+#[test]
 fn output_lost_to_eviction_is_counted_never_silently_skipped() {
     let mut d = Dispatcher::new();
     let mut w = FakeWindow::sized(40, 5, 20);

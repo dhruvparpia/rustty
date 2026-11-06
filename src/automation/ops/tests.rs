@@ -762,7 +762,7 @@ fn scrollback_reads_page_through_everything_in_order() {
     for (i, row) in rows.iter().enumerate() {
         assert_eq!(*row, format!("row {i}"));
     }
-    assert_eq!(pages, 1, "all of that fits one page");
+    assert!(pages >= 1);
 }
 
 fn setup_sized(cols: usize, rows: usize, scrollback: usize) -> (Dispatcher, FakeWindow) {
@@ -785,25 +785,34 @@ fn a_full_page_read_stays_well_inside_a_tick() {
         }
     }
     let mut slowest = std::time::Duration::ZERO;
-    let mut bytes = 0;
-    for _ in 0..20 {
+    let mut cursor: Option<String> = None;
+    let (mut pages, mut bytes) = (0, 0);
+    let all = std::time::Instant::now();
+    loop {
+        let mut params = json!({"pane": pane, "scrollback": true});
+        if let Some(cursor) = &cursor {
+            params["cursor"] = json!(cursor);
+        }
         let start = std::time::Instant::now();
-        let frame = call(
-            &mut d,
-            &mut w,
-            CLIENT,
-            "pane.read",
-            json!({"pane": pane, "scrollback": true}),
-        );
+        let frame = call(&mut d, &mut w, CLIENT, "pane.read", params);
         let encoded = crate::host::encode_frame(&frame).expect("under the cap");
         slowest = slowest.max(start.elapsed());
-        bytes = encoded.len();
+        bytes += encoded.len();
+        pages += 1;
+        let result = ok(&frame);
+        cursor = result["cursor"].as_str().map(str::to_string);
+        if result["more"] == false {
+            break;
+        }
     }
-    println!("one full page ({bytes} bytes) read and encoded: worst {slowest:?}");
-    assert!(bytes > 900 * 1024, "that was not a full page: {bytes}");
+    println!(
+        "{bytes} bytes in {pages} pages, {:?} of work: worst page {slowest:?}",
+        all.elapsed()
+    );
+    assert!(bytes > 9_000_000, "that was not the whole history: {bytes}");
     assert!(
-        slowest < std::time::Duration::from_millis(33),
-        "longer than the 33 ms poll: {slowest:?}"
+        slowest < std::time::Duration::from_millis(10),
+        "a read holds the UI thread too long: {slowest:?}"
     );
 }
 

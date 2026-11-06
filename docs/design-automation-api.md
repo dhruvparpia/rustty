@@ -138,3 +138,7 @@ JSON-RPC 2.0 (same base as MCP, so the adapter is a thin encoder):
    clients that pass tools to a model API commonly refuse dots. Events go out as
    `notifications/message` to handshake clients, and on a `subscriptions/listen`
    stream with the `com.rustty/events` extension to current ones.
+10. **Reads stop on time as well as size** (§3). A full 1 MiB page held the UI thread
+    for about 35 ms when measured, more than a tick, against the bounded per-tick work
+    §2 requires. A read now stops after 4 ms and says `more`, and the pane-output scan
+    shares 4 ms per tick, with busy panes taking turns. 1 MiB stays the cap on a page.

@@ -7,14 +7,15 @@
 //! real [`App`] and no HWND, which is why almost all of this is tested headless.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 
 use super::events::{Subscriptions, Tracker};
 use super::{
-    ErrorCode, OPERATIONS, OpSpec, PAGE_TEXT_BYTES, PROTOCOL_VERSION, RpcError, SEND_BURST_BYTES,
-    Token, TokenBucket, can_write, capabilities, decode_cursor, encode_cursor, error_frame,
-    negotiate, read_lines,
+    ErrorCode, OPERATIONS, OpSpec, PAGE_TEXT_BYTES, PROTOCOL_VERSION, READ_TIME_BUDGET, RpcError,
+    SEND_BURST_BYTES, Token, TokenBucket, can_write, capabilities, decode_cursor, encode_cursor,
+    error_frame, negotiate, read_lines, read_lines_while, time_box,
 };
 use crate::app::App;
 use crate::pane::Pane;
@@ -174,6 +175,12 @@ impl Dispatcher {
     #[must_use]
     pub fn has_subscribers(&self) -> bool {
         self.subscriptions.values().any(|s| !s.is_empty())
+    }
+
+    /// Give the output scan a different time budget.
+    #[cfg(test)]
+    pub(crate) fn set_output_budget(&mut self, budget: std::time::Duration) {
+        self.tracker.set_output_budget(budget);
     }
 
     /// Send what changed since the last scan. Runs once per tick, before the
@@ -649,7 +656,10 @@ fn read_history(pane: &Pane, cursor: Option<&str>) -> Result<Value, RpcError> {
         None => grid.first_abs(),
     };
     let first = start.max(grid.first_abs());
-    let page = read_lines(first, end, PAGE_TEXT_BYTES, |abs| grid.line_text_abs(abs));
+    let mut keep_going = time_box(Instant::now(), READ_TIME_BUDGET);
+    let page = read_lines_while(first, end, PAGE_TEXT_BYTES, &mut keep_going, |abs| {
+        grid.line_text_abs(abs)
+    });
     let next = live.map_or(page.next, |line| page.next.min(line));
     let mut result = json!({
         "pane": pane.id(),
