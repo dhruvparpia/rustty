@@ -92,6 +92,9 @@ mod perf_bench;
 pub mod portable;
 /// Terminal search over screen + scrollback (SPEC SEARCH-001..015).
 pub mod search;
+/// Per-project 1Password secrets: manifest, naming, token store and verb
+/// logic (SECRET-001..012). Portable; every `op` call goes through a trait.
+pub mod secrets;
 /// Locked, encrypted-at-rest secret buffers and DPAPI (SECRET-004..006).
 #[allow(
     unsafe_code,
