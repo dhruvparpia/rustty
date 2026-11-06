@@ -375,6 +375,8 @@ fn burst_of_10000_lines_paints_inside_the_budget() {
         "bench: worst frame painted in {:?}, over the {frame_budget:?} budget",
         report.worst,
     );
+    // The target must go before its window.
+    drop(renderer);
     let _ = unsafe { DestroyWindow(hwnd) };
 }
 
@@ -423,6 +425,8 @@ fn damage_frames_allocate_nothing() {
          with a full atlas of {} tiles (issue #28)",
         report.frames, report.fallbacks, report.tiles,
     );
+    // The target must go before its window.
+    drop(renderer);
     let _ = unsafe { DestroyWindow(hwnd) };
 }
 
@@ -466,6 +470,8 @@ fn damage_frames_cover_only_the_dirty_rows() {
         damaged < rows / 2,
         "bench: a one-line change repainted {damaged} of {rows} rows",
     );
+    // The target must go before its window.
+    drop(renderer);
     let _ = unsafe { DestroyWindow(hwnd) };
 }
 

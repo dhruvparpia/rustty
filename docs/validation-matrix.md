@@ -55,12 +55,37 @@ pre-existing teardown AV; device-loss and full-vs-damage comparisons exited clea
 | Resize (rows/cols, DPI) | Build 26300, per-monitor DPI | grid/pane resize tests | live resize dogfood |
 | Sleep / wake, GPU/device recovery | n/a | — | `device_loss_recovery_repaints`, `damage_repaint_matches_full_paint` |
 
+## Native look and startup crab (2026-11-06, build 26300, one 100% display)
+
+Driven through the real window, with screenshots read by hand.
+
+| Check | Result |
+|---|---|
+| cmd, Windows PowerShell, Git Bash, WSL | Banner appears, claws move, prompt sits below it, `rustty --version` (`rustty.exe` under WSL) works |
+| pwsh 7 | Not run: not installed |
+| Second window while one is open | No crab. Closing all windows brings it back |
+| `welcome = false`, 60 columns, `copper-light` | No banner; text without crab; readable |
+| Live host session | Status shows `session host running · 1 session` |
+| Hit tests | Tab, `+`, empty strip, top edge, min, max, close report correctly; the corner of a maximized window is close |
+| Caption button messages | Maximize, restore and minimize work; press and release on different buttons does nothing; close reaches the WINDOW-014 prompt, as before |
+| Many tabs, fullscreen and back, Alt popup | Work |
+| Startup | Window in about 62 ms, same as `fix/ci-and-scrollback` |
+| Idle CPU over 30 s | 16-47 ms, against 31-94 ms before: no difference beyond noise |
+| Memory | About 5-6 MB more, from the embedded font |
+| Desktop benches, one at a time | All pass, with 0 allocations in damage frames |
+| Snap Layouts flyout, real mouse drag and resize | Not run: needs a person. The window reports `HTMAXBUTTON`, `HTCAPTION` and the resize codes |
+| 150% and 200% DPI, mixed DPI | Not run: one 100% display |
+| Windows animation effects off | Not run live, to leave system settings alone. Covered by a unit test |
+| Windows 10 | Not run: no machine |
+| Narrator on the drawn caption | Not run |
+
 ## Known gaps
 
 - The graphics marquee (progress animation) has no unit test; `a=;` key
   behaviour is covered by parser tests.
 - Theme ids at and above `0xF100` collide with the palette-extension range.
-- The perf-suite process-teardown AV on this machine is pre-existing; bench
-  tests are run individually.
+- The perf-suite teardown crash came from destroying the window before the
+  renderer. The benches now drop the renderer first. `device_loss_recovery_repaints`
+  still leaves its window to process exit, so bench tests are run individually.
 - Desktop rows marked "open" need the app installed (pwsh 7, Neovim, tmux,
   fzf) — automated fixtures already cover their wire shapes.
