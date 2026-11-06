@@ -547,7 +547,16 @@ fn spawn_request(params: &Value) -> Result<SpawnRequest, RpcError> {
     let mut request = SpawnRequest {
         dir: optional_text(params, "dir")?,
         profile: optional_text(params, "profile")?,
-        name: optional_text(params, "name")?,
+        name: optional_text(params, "name")?
+            .map(|name| {
+                let name = rail::clean_message(&name);
+                if name.trim().is_empty() {
+                    Err(RpcError::bad_params("name has nothing that can be shown"))
+                } else {
+                    Ok(name)
+                }
+            })
+            .transpose()?,
         ..SpawnRequest::default()
     };
     if let Some(command) = params.get("command") {
@@ -631,6 +640,7 @@ fn describe_pane(
         "title": rail::row_title(pane.title().unwrap_or(""), tab.profile()),
         "status": status.as_str(),
         "detail": pane.rail_detail(),
+        "detailSource": pane.rail_detail_source().as_str(),
         "project": project_of_pane(pane, home),
         "cwd": pane.saved_cwd(),
         "agent": pane.saved_agent(),
@@ -654,12 +664,14 @@ fn list(win: &dyn WindowOps) -> Result<Value, RpcError> {
         let mut panes = Vec::with_capacity(tab.pane_count());
         let mut statuses = Vec::with_capacity(tab.pane_count());
         let mut messages = Vec::with_capacity(tab.pane_count());
+        let mut sources = Vec::with_capacity(tab.pane_count());
         let mut stopped = None;
         let mut slot = 0;
         tab.for_each_pane_ref(|pane, _| {
             let status = pane.rail_status();
             statuses.push(status);
             messages.push((status, pane.status_message(status)));
+            sources.push((status, pane.detail_source(status)));
             if stopped.is_none() {
                 stopped = pane.interrupted().map(str::to_string);
             }
@@ -679,6 +691,7 @@ fn list(win: &dyn WindowOps) -> Result<Value, RpcError> {
             "title": rail::row_title(tab.title(), tab.profile()),
             "status": status.as_str(),
             "detail": rail::tab_detail(status, stopped.as_deref(), &messages),
+            "detailSource": rail::tab_detail_source(status, &sources).as_str(),
             "project": project_of_pane(&tab.pane(), &home),
             "profile": tab.profile(),
             "active": index == selected,

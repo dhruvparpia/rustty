@@ -178,3 +178,7 @@ JSON-RPC 2.0 (same base as MCP, so the adapter is a thin encoder):
     its own pipe: `--attach --take-control`, `session.input`, `session.terminate` and
     `host.shutdown` need no grant. They stay as they are, so a host session can be
     typed into and ended by any client of this user.
+17. **Statuses are claims** (§5). A question on the screen outranks a report other
+    than `blocked`, including `done` and `error`, which would hide it the same way as
+    `working`. `list` and `status-changed` carry `detailSource`, so a reader can tell
+    what a program claimed from what rustty saw.

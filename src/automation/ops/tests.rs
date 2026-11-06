@@ -520,6 +520,123 @@ fn initialize_reports_the_read_grant() {
 }
 
 #[test]
+fn a_tab_name_is_cleaned_and_capped() {
+    // Break caught: a name carrying a direction override into every later `list`,
+    // or running to any length.
+    let (mut d, mut w) = setup();
+    w.allow_writes = true;
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "tab.open",
+        json!({"name": "wor\u{202e}ker\u{200b}\u{7}"}),
+    ));
+    assert_eq!(w.opened[0].name.as_deref(), Some("worker"));
+    let long = "x".repeat(1000);
+    ok(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "tab.open",
+        json!({"name": long}),
+    ));
+    assert_eq!(
+        w.opened[1].name.as_deref().map(|name| name.chars().count()),
+        Some(120)
+    );
+    // Nothing left to show is a mistake, not an untitled tab.
+    let error = err(&call(
+        &mut d,
+        &mut w,
+        CLIENT,
+        "tab.open",
+        json!({"name": "\u{202e}\u{200b}"}),
+    ));
+    assert_eq!(error.code, ErrorCode::BadParams);
+}
+
+fn pane_row(w: &mut FakeWindow, d: &mut Dispatcher) -> Value {
+    let listed = ok(&call(d, w, CLIENT, "list", json!({})));
+    listed["tabs"][0]["panes"][0].clone()
+}
+
+#[test]
+fn list_says_where_each_detail_came_from() {
+    // A boss has to be able to tell a program's claim from what rustty itself saw.
+    let (mut d, mut w) = setup();
+    let pane = first_pane(&w);
+    assert_eq!(pane_row(&mut w, &mut d)["detailSource"], "none");
+    let listed = ok(&call(&mut d, &mut w, CLIENT, "list", json!({})));
+    assert_eq!(listed["tabs"][0]["detailSource"], "none");
+
+    // base64 of "Approve?"
+    feed_pane(
+        &mut w,
+        pane,
+        b"\x1b]7501;state=blocked:msg=QXBwcm92ZT8=\x07",
+    );
+    step_panes(&mut w);
+    let row = pane_row(&mut w, &mut d);
+    assert_eq!(row["detail"], "Approve?");
+    assert_eq!(row["detailSource"], "program-report");
+    let listed = ok(&call(&mut d, &mut w, CLIENT, "list", json!({})));
+    assert_eq!(listed["tabs"][0]["detailSource"], "program-report");
+
+    // A report whose state shows no message says nothing.
+    feed_pane(&mut w, pane, b"\x1b]7501;state=idle:msg=QXBwcm92ZT8=\x07");
+    step_panes(&mut w);
+    let row = pane_row(&mut w, &mut d);
+    assert_eq!(row["status"], "idle");
+    assert_eq!(row["detailSource"], "none");
+}
+
+#[test]
+fn a_question_read_off_the_screen_is_marked_as_a_guess() {
+    let (mut d, mut w) = setup();
+    let pane = first_pane(&w);
+    {
+        let (tab, slot) = w.app.locate_pane(pane).expect("pane");
+        let tab = w.app.tab_at_mut(tab).expect("tab");
+        tab.pane_at_mut(slot)
+            .expect("pane")
+            .set_agent(Some("claude"));
+    }
+    feed_pane(
+        &mut w,
+        pane,
+        b"Do you want to run this?\r\n 1. Yes\r\n Esc to cancel\r\n",
+    );
+    step_panes(&mut w);
+    let row = pane_row(&mut w, &mut d);
+    assert_eq!(row["status"], "needs-you");
+    assert_eq!(row["detail"], "Do you want to run this?");
+    assert_eq!(row["detailSource"], "screen-guess");
+}
+
+#[test]
+fn a_notification_is_marked_as_one() {
+    let (mut d, mut w) = setup();
+    let pane = first_pane(&w);
+    feed_pane(&mut w, pane, b"\x1b]9;Build done\x07");
+    step_panes(&mut w);
+    let row = pane_row(&mut w, &mut d);
+    assert_eq!(row["status"], "needs-you");
+    assert_eq!(row["detail"], "Build done");
+    assert_eq!(row["detailSource"], "notification");
+}
+
+fn step_panes(w: &mut FakeWindow) {
+    for index in 0..w.app.tab_count() {
+        if let Some(tab) = w.app.tab_at_mut(index) {
+            tab.for_each_pane(|pane, _| {
+                pane.rail_step(false, 0);
+            });
+        }
+    }
+}
+
+#[test]
 fn a_session_cant_be_handed_the_token_through_env() {
     // Break caught: a boss passing its grant to every worker it starts, in any
     // spelling of the name.

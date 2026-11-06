@@ -313,13 +313,65 @@ pub const fn heading(writes: bool, reads: bool) -> &'static str {
     }
 }
 
-/// A notification's text, made safe to draw: no control characters, bounded.
+/// Text a program chose, made safe to draw or to hand a boss: no control characters,
+/// nothing that hides or reorders it, bounded.
 #[must_use]
 pub fn clean_message(text: &str) -> String {
     text.chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !crate::program_status::is_invisible(*c))
         .take(MESSAGE_MAX_CHARS)
         .collect()
+}
+
+/// The window's caption for a tab title, which a program can set.
+#[must_use]
+pub fn window_caption(title: &str, app: &str) -> String {
+    format!("{} \u{2014} {app}", clean_message(title))
+}
+
+/// Where a session's detail line came from. A program can say anything, so a reader
+/// needs to tell what it claimed from what rustty saw or made up itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailSource {
+    /// A program said so through OSC 7501.
+    ProgramReport,
+    /// Read off the screen: an agent's prompt, as a best guess.
+    ScreenGuess,
+    /// A program's desktop notification.
+    Notification,
+    /// rustty's own words for the status.
+    None,
+}
+
+impl DetailSource {
+    /// The name on the wire.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProgramReport => "program-report",
+            Self::ScreenGuess => "screen-guess",
+            Self::Notification => "notification",
+            Self::None => "none",
+        }
+    }
+}
+
+/// Whether [`detail_for`] shows a message for this status rather than its own words.
+#[must_use]
+pub const fn shows_message(status: Status) -> bool {
+    matches!(
+        status,
+        Status::NeedsYou | Status::Working | Status::Finished | Status::Failed
+    )
+}
+
+/// Where [`tab_detail`]'s line came from, given each pane's status and source.
+#[must_use]
+pub fn tab_detail_source(status: Status, sources: &[(Status, DetailSource)]) -> DetailSource {
+    sources
+        .iter()
+        .find(|(pane_status, _)| *pane_status == status)
+        .map_or(DetailSource::None, |(_, source)| *source)
 }
 
 /// What a row opens.
@@ -775,6 +827,20 @@ mod tests {
         assert_eq!(
             clean_message(&"x".repeat(500)).chars().count(),
             MESSAGE_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn clean_text_has_nothing_that_hides_or_reorders_it() {
+        // Break caught: a right-to-left override in a title making a boss, or a
+        // person, read something other than what is there.
+        let cleaned = clean_message("rm -rf\u{202e}txt.safe\u{200b}\u{feff}\u{2066}\x07 end");
+        assert_eq!(cleaned, "rm -rftxt.safe end");
+        assert_eq!(row_title("a\u{200f}b", "fallback"), "ab");
+        assert_eq!(row_title("\u{202e}\u{200b}", "fallback"), "fallback");
+        assert_eq!(
+            window_caption("a\u{202e}b\x1b", "rustty"),
+            "ab \u{2014} rustty"
         );
     }
 

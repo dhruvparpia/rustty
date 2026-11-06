@@ -255,6 +255,7 @@ fn boss_flow(tag: &str, config: &str) {
     assert_eq!(tabs[1]["id"], tab);
     assert_eq!(tabs[1]["active"], false);
     assert_eq!(tabs[1]["title"], "worker");
+    assert_eq!(tabs[1]["detailSource"], "none");
 
     // The session gets the environment it was given, and its own window's id.
     wait_screen(&window, pane, ">");

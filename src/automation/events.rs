@@ -14,7 +14,7 @@ use super::{
 };
 use crate::app::App;
 use crate::pane::Pane;
-use crate::rail::Status;
+use crate::rail::{DetailSource, Status};
 use crate::shell::ShellState;
 
 const OUTPUT: &str = "pane-output";
@@ -114,6 +114,7 @@ struct PaneSeen {
     tab: u64,
     status: Status,
     detail: String,
+    source: DetailSource,
     started: u64,
     finished: u64,
     exit: Option<i32>,
@@ -127,6 +128,7 @@ impl PaneSeen {
             tab,
             status: pane.rail_status(),
             detail: pane.rail_detail(),
+            source: pane.rail_detail_source(),
             started: commands.iter().map(|c| c.id).max().unwrap_or(0),
             finished: commands
                 .iter()
@@ -144,6 +146,7 @@ impl PaneSeen {
             tab,
             status: pane.rail_status(),
             detail: pane.rail_detail(),
+            source: pane.rail_detail_source(),
             started: 0,
             finished: 0,
             exit: None,
@@ -392,8 +395,10 @@ fn scan_pane(pane: &Pane, tab: u64, seen: &mut PaneSeen, sender: &mut Sender<'_>
     }
     let status = pane.rail_status();
     let detail = pane.rail_detail();
-    if status != seen.status || detail != seen.detail {
+    let source = pane.rail_detail_source();
+    if status != seen.status || detail != seen.detail || source != seen.source {
         seen.status = status;
+        seen.source = source;
         sender.emit(
             "status-changed",
             Some(id),
@@ -402,6 +407,7 @@ fn scan_pane(pane: &Pane, tab: u64, seen: &mut PaneSeen, sender: &mut Sender<'_>
                 "tab": tab,
                 "status": status.as_str(),
                 "detail": detail,
+                "detailSource": source.as_str(),
             }),
         );
         seen.detail = detail;

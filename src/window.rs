@@ -8015,7 +8015,7 @@ fn paste_clipboard(hwnd: HWND) {
 fn set_title(hwnd: HWND, app: &App) {
     let title = app
         .active_tab()
-        .map(|t| format!("{} — {APP_NAME}", t.title()))
+        .map(|t| rail::window_caption(t.title(), APP_NAME))
         .unwrap_or_else(|| APP_NAME.to_string());
     let wide = wstr(&title);
     let _ = unsafe { SetWindowTextW(hwnd, PCWSTR::from_raw(wide.as_ptr())) };

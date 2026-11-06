@@ -1119,28 +1119,63 @@ impl Pane {
     /// its name: a program's report, or an unseen notification.
     #[must_use]
     pub fn status_message(&self, status: crate::rail::Status) -> Option<String> {
-        use crate::rail::Status;
+        self.status_note(status).0
+    }
+
+    /// Where the line [`Pane::rail_detail`] gives for `status` comes from.
+    #[must_use]
+    pub fn detail_source(&self, status: crate::rail::Status) -> crate::rail::DetailSource {
+        use crate::rail::{DetailSource, shows_message};
+        match self.status_note(status) {
+            (Some(message), source) if shows_message(status) && !message.is_empty() => source,
+            _ => DetailSource::None,
+        }
+    }
+
+    /// The message for `status`, and who it is from. A question on the screen comes
+    /// before any report but `blocked`, whose words are about the wait itself: a
+    /// program mustn't be able to talk over a real prompt.
+    fn status_note(
+        &self,
+        status: crate::rail::Status,
+    ) -> (Option<String>, crate::rail::DetailSource) {
+        use crate::program_status::State;
+        use crate::rail::{DetailSource, Status, clean_message};
+        let on_screen = || {
+            self.screen_question
+                .as_deref()
+                .map(|question| (Some(clean_message(question)), DetailSource::ScreenGuess))
+        };
         if let Some(record) = self.program_status.summary() {
+            if status == Status::NeedsYou
+                && record.state != State::Blocked
+                && let Some(note) = on_screen()
+            {
+                return note;
+            }
             if let Some(msg) = &record.msg {
-                return Some(crate::rail::clean_message(msg));
+                return (Some(clean_message(msg)), DetailSource::ProgramReport);
             }
             if status == Status::NeedsYou {
                 let said = match record.kind.as_deref() {
                     Some("permission") => "Needs your permission",
                     Some("question") => "Has a question for you",
                     Some("auth") => "Needs you to sign in",
-                    _ => return None,
+                    _ => return (None, DetailSource::None),
                 };
-                return Some(said.to_string());
+                return (Some(said.to_string()), DetailSource::ProgramReport);
             }
-            return None;
+            return (None, DetailSource::None);
         }
         if status != Status::NeedsYou {
-            return None;
+            return (None, DetailSource::None);
         }
-        self.screen_question
-            .clone()
-            .or_else(|| self.attention_message().map(str::to_string))
+        on_screen()
+            .or_else(|| {
+                self.attention_message()
+                    .map(|said| (Some(said.to_string()), DetailSource::Notification))
+            })
+            .unwrap_or((None, DetailSource::None))
     }
 
     /// Forget work the sidebar was not watching, so showing it again does not
@@ -1162,6 +1197,12 @@ impl Pane {
     #[must_use]
     pub const fn rail_status(&self) -> crate::rail::Status {
         self.rail_status
+    }
+
+    /// Where [`Pane::rail_detail`]'s line comes from.
+    #[must_use]
+    pub fn rail_detail_source(&self) -> crate::rail::DetailSource {
+        self.detail_source(self.rail_status)
     }
 
     /// The line the sidebar shows for the last computed status.
@@ -1208,12 +1249,15 @@ impl Pane {
         if exited {
             self.program_status.program_gone();
         }
-        // A program saying what it is doing beats any guess from the outside.
-        if let Some(reported) = self.reported_status(viewed) {
-            return reported;
-        }
+        // A program saying what it is doing beats any guess from the outside, except
+        // that no report outranks a question on the screen. Otherwise a program could
+        // report that it is working to hide a real prompt from the person and a boss.
+        let reported = self.reported_status(viewed);
         if self.screen_question.is_some() && !exited {
             return crate::rail::Status::NeedsYou;
+        }
+        if let Some(reported) = reported {
+            return reported;
         }
         if self.interrupted.is_some() && !exited && status != crate::rail::Status::NeedsYou {
             return crate::rail::Status::Interrupted;
@@ -1788,6 +1832,45 @@ mod tests {
         assert_eq!(
             pane.status_message(Status::NeedsYou).as_deref(),
             Some("Has a question for you")
+        );
+    }
+
+    /// A pane with Claude Code's permission question on its screen.
+    fn asking_pane() -> Pane {
+        let mut pane = Pane::with_size(60, 8, 10);
+        pane.set_agent(Some("claude"));
+        pane.feed(b"Do you want to run this?\r\n 1. Yes\r\n 2. No\r\n Esc to cancel\r\n");
+        pane
+    }
+
+    #[test]
+    fn a_report_cant_hide_a_question_on_the_screen() {
+        // Break caught: a program reporting "working" or "idle" so a boss and a person
+        // both believe nothing is waiting while a real prompt sits on the screen.
+        use crate::rail::Status;
+        // base64 of "All fine"
+        for state in ["working", "idle", "done", "error"] {
+            let mut pane = asking_pane();
+            pane.feed(format!("\x1b]7501;state={state}:msg=QWxsIGZpbmU=\x07").as_bytes());
+            assert_eq!(pane.rail_step(false, 0), Status::NeedsYou, "{state}");
+            assert_eq!(
+                pane.status_message(Status::NeedsYou).as_deref(),
+                Some("Do you want to run this?"),
+                "{state}: the report's words must not stand in for the question"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blocked_report_still_says_what_it_is_waiting_for() {
+        use crate::rail::Status;
+        let mut pane = asking_pane();
+        // base64 of "Approve?"
+        pane.feed(b"\x1b]7501;state=blocked:kind=permission:msg=QXBwcm92ZT8=\x07");
+        assert_eq!(pane.rail_step(false, 0), Status::NeedsYou);
+        assert_eq!(
+            pane.status_message(Status::NeedsYou).as_deref(),
+            Some("Approve?")
         );
     }
 

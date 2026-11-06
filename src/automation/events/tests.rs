@@ -199,6 +199,7 @@ fn status_changes_come_from_the_sidebars_step_only() {
     assert_eq!(events[0].1["pane"], pane);
     assert_eq!(events[0].1["status"], "needs-you");
     assert_eq!(events[0].1["detail"], "Approve the edit?");
+    assert_eq!(events[0].1["detailSource"], "notification");
     assert!(scan(&mut d, &w).is_empty());
     if let Some(mut p) = w.app.tab_at_mut(0).and_then(|t| t.pane_at_mut(0)) {
         p.rail_step(true, 10);
@@ -206,6 +207,7 @@ fn status_changes_come_from_the_sidebars_step_only() {
     let events = scan(&mut d, &w);
     assert_eq!(events[0].1["status"], "working", "recent output, now seen");
     assert_eq!(events[0].1["detail"], "Working");
+    assert_eq!(events[0].1["detailSource"], "none");
 }
 
 #[test]

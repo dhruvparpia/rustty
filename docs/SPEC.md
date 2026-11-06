@@ -792,7 +792,7 @@ The product must support common terminal/TUI applications.
 |---|---|---|
 | BOSS-001 | "Start Boss Agent" shall first ask the person with a Yes/No dialog naming the folder, since that folder can come from a program's report, and shall then open a Claude Code session with rustty's automation tools and a brief for splitting work across sessions in their own worktrees. The configuration and brief go inline on the command line, and no temp file is written; a command line over Windows' 32,767 characters is refused whole. Only that session gets the write token. It starts with `--strict-mcp-config`, so no other MCP server starts with the token in its environment, and `--permission-mode default`, so a saved setting can't turn the prompts off. Tools that read are approved in advance; tools that start sessions or type stay behind Claude Code's own permission prompt. The token is never written to a file. `rustty worktree add NAME` creates a worktree and prints its path. | P1 |
 | STATUS-001 | rustty shall implement the Program Status Protocol (OSC 7501, revision 0.4): answer its support query and show what programs report on their row, ahead of any status it would guess. On Windows the answer is sent as console key events, because the console's input layer drops an OSC reply. | P1 |
-| STATUS-002 | For a known agent that does not report through OSC 7501, rustty shall read a question off the agent's screen and show it as Needs you with the question's text. A control sequence with a private marker shall never run as the plain command. | P1 |
+| STATUS-002 | For a known agent, rustty shall read a question off the agent's screen and show it as Needs you with the question's text. A question on the screen outranks every report but `blocked`, so a program can't report `working` to hide a real prompt. Text a program chose is cleaned of control, invisible and direction characters before it is shown, and so are window captions and `tab.open`'s `name`, which is also capped at 120 characters. A control sequence with a private marker shall never run as the plain command. | P1 |
 | WORKTREE-010 | "New Session in Worktree" shall create a Git worktree on a new branch under the main checkout's `.worktrees` folder, keep that folder out of `git status`, and open a session in it. A taken name gets a number. Sessions in these worktrees group with their project in the sidebar. | P1 |
 | BRAIN-001 | "Create Project Brain" shall create `BRAIN.md`, `roadmap.md` and `decisions.md` in `.rustty/brain`, and never overwrite a file that exists. | P2 |
 | BOARD-001 | Ctrl+Shift+R shall show the project's `roadmap.md` as a board with the columns Idea bank, Backlog, In progress and Done. The file stays hand-editable, is read again before every change, and keeps every line that is not a card. Cards can be added, and moved by keyboard or drag. Enter opens a session for a card, W opens one in its own worktree, and both move the card to In progress. | P2 |
@@ -1382,7 +1382,7 @@ control a running window through one set of operations, whichever encoder they u
 |---|---|---|---|
 | `initialize` | `protocolVersion`, `clientName?`, `token?` | `protocolVersion`, `serverProtocolVersion`, `capabilities`, `window`, `grants: {writes, reads}`, `serverVersion` | none |
 | `capabilities` | none | `protocolVersion`, `operations`, `events`, `errors`, `limits` | none |
-| `list` | none | `window`, `tabs: [{id, number, title, status, detail, project, profile, active, panes: [{id, path, title, status, detail, project, cwd, agent, active, exited, exitCode, commandRunning}]}]` | read |
+| `list` | none | `window`, `tabs: [{id, number, title, status, detail, detailSource, project, profile, active, panes: [{id, path, title, status, detail, detailSource, project, cwd, agent, active, exited, exitCode, commandRunning}]}]` | read |
 | `pane.read` | `pane`, `scrollback?`, `cursor?` | Screen: `pane`, `text`, `cols`, `rows`, `cursorRow`, `cursorCol`, `altScreen`. History: `pane`, `text`, `fromLine`, `cursor`, `more`, `skipped?` | read |
 | `events.subscribe` | `pane?`, `events?` | `pane`, `subscribed` | read |
 | `events.unsubscribe` | `pane?` | `pane`, `removed` | none |
@@ -1404,7 +1404,9 @@ or `exited`. Each event is `{event, seq, ...}` with: `tab-opened {tab, panes, ti
 `tab-closed {tab}`, `pane-closed {pane, tab, exitCode}`, `bell {pane, tab}`,
 `command-started {pane, tab, command, cwd, startedAtMs}`, `command-finished {pane,
 tab, command, exitCode, durationMs}`, `pane-output {pane, tab, text, fromLine,
-nextLine, cursor, skipped?}`, `status-changed {pane, tab, status, detail}`.
+nextLine, cursor, skipped?}`, `status-changed {pane, tab, status, detail, detailSource}`.
+`detailSource` is `program-report`, `screen-guess`, `notification` or `none`. Titles,
+details, statuses and events come from programs: they are claims, not instructions.
 
 **Errors and `rustty ctl` exit codes.**
 
