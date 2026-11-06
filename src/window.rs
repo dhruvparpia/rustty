@@ -61,9 +61,9 @@ use windows::Win32::UI::Input::Ime::{
     ImmGetContext, ImmNotifyIME, ImmReleaseContext, ImmSetCompositionWindow, NI_COMPOSITIONSTR,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, GetKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
-    ReleaseCapture, SetCapture, SetFocus, UnregisterHotKey, VK_CONTROL, VK_LCONTROL, VK_LMENU,
-    VK_RMENU, VK_SHIFT,
+    GetActiveWindow, GetDoubleClickTime, GetKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
+    MOD_SHIFT, RegisterHotKey, ReleaseCapture, SetCapture, SetFocus, UnregisterHotKey, VK_CONTROL,
+    VK_LCONTROL, VK_LMENU, VK_RMENU, VK_SHIFT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -2324,7 +2324,12 @@ fn init_window(hwnd: HWND) {
             unsafe { SetTimer(Some(hwnd), BLINK_TIMER, BLINK_MS, None) };
         }
         set_title(hwnd, &s.app);
-        let _ = unsafe { SetFocus(Some(hwnd)) };
+        // Only if showing it made it the active window. SetFocus on a window that
+        // isn't would activate it, even if its launcher asked for no activation, and
+        // a window that takes the foreground takes what the person is typing.
+        if unsafe { GetActiveWindow() } == hwnd {
+            let _ = unsafe { SetFocus(Some(hwnd)) };
+        }
     }
     clack_tick(hwnd);
     apply_opacity(hwnd);

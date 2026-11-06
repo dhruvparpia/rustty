@@ -102,6 +102,7 @@ pub mod boss;
 )]
 mod perf_bench;
 pub mod portable;
+pub mod program_search;
 pub mod program_status;
 pub mod project_brain;
 pub mod rail;

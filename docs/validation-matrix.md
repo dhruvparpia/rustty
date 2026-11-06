@@ -19,6 +19,7 @@ individually with `cargo test --release -- --ignored --nocapture --exact <name>`
 | Area | Coverage | Result |
 | --- | --- | --- |
 | Parser wire shapes | 19 protocol fixtures (CSI, OSC BEL/ST, OSC 7, OSC 133, DSR/DA, 1049 alt screen, 25 cursor, DECSTBM, SGR, save/restore, UTF-8 + CJK + emoji, kitty APC/DCS/BEL, ignored DCS/APC/PM, controls, mouse modes) each fed whole, in every chunk size 1..len, and split at every byte offset; events, cursor and grid compared to the whole-feed run (`protocol_fixtures_survive_every_chunk_boundary`) | pass |
+| Bare program names (SHELL-030) | A planted copy of `hostname.exe` in the current folder doesn't run, with or without `.exe`, while an explicit path still reaches it; relative `PATH` entries skipped; `cmd.exe`, `powershell.exe`, `wsl.exe`, the `winget.exe` App Execution Alias and Git Bash's paths still start (`tests/planted_command.rs`, `program_search::tests`). The test clears `NoDefaultCurrentDirectoryInExePath`, which Claude Code sets and which `CreateProcessW` honours, or the attack doesn't reproduce under it | pass |
 | Unit suite | 241 tests (grid, pane, app, config, graphics, parser, CLI, colour, portability) | pass |
 | Integration suite | 8 + 4 tests (`tests/`) | pass |
 | Damage row masks | damage repaint covers only dirty rows (`damage_frames_cover_only_the_dirty_rows`, desktop) | pass |

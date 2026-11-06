@@ -18,8 +18,10 @@
 //!   included — closes them; no leaks.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::mem::size_of;
+use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 
 use windows::Win32::Foundation::{
@@ -42,8 +44,66 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{HRESULT, Owned, PCWSTR, PWSTR};
 
+use crate::program_search::{find_in_dirs, has_path_part, is_batch, is_runnable_file, search_dirs};
+use crate::secret_exec::{batch_command_line, system_program, windows_folders};
+
 /// The longest command line `CreateProcessW` takes, in UTF-16 units with its NUL.
 pub const MAX_COMMAND_LINE: usize = 32_767;
+
+/// What `CreateProcessW` is told to start. There is always either a file named here
+/// or a path on the command line, so it never does a search of its own, which would
+/// look in the current folder first (SHELL-030).
+struct Launch {
+    /// `lpApplicationName`, NUL-terminated, for a batch file's `cmd.exe`.
+    application: Option<Vec<u16>>,
+    /// `lpCommandLine`, NUL-terminated.
+    line: Vec<u16>,
+}
+
+/// Work out what starting `program` means. A name with a path part is used as it
+/// always was. A bare name is searched for on absolute folders only, and if it isn't
+/// there the answer is not found: it never falls back to `CreateProcessW`'s search.
+fn plan_launch(program: &str, args: &[String]) -> Result<Launch, io::Error> {
+    let name = OsStr::new(program);
+    if has_path_part(name) {
+        return Ok(Launch {
+            application: None,
+            line: wide_command_line(program, args),
+        });
+    }
+    let path_var = std::env::var_os("PATH");
+    let dirs = search_dirs(&windows_folders(), path_var.as_deref());
+    let Some(file) = find_in_dirs(name, &dirs, is_runnable_file) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "{program} was not found on PATH. The current folder is not searched: use a \
+                 path such as .\\{program} to run one from there"
+            ),
+        ));
+    };
+    if is_batch(&file) {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let line = batch_command_line(&file, &args)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        let cmd = system_program("cmd.exe")?;
+        return Ok(Launch {
+            application: Some(cmd.as_os_str().encode_wide().chain(Some(0)).collect()),
+            line,
+        });
+    }
+    // A path that isn't valid text can't go through `wide_command_line` unchanged.
+    let Some(file) = file.to_str() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the path found for {program} is not valid Unicode"),
+        ));
+    };
+    Ok(Launch {
+        application: None,
+        line: wide_command_line(file, args),
+    })
+}
 
 /// An owned raw HANDLE safe to move onto a worker thread.
 ///
@@ -128,8 +188,11 @@ impl ConPty {
                 "terminal size must be 1..=i16::MAX in each dimension",
             ));
         }
+        let Launch {
+            application,
+            line: mut cmdline,
+        } = plan_launch(program, args)?;
         // Refused here, whole. Cutting it short would run something else.
-        let mut cmdline = wide_command_line(program, args);
         if cmdline.len() > MAX_COMMAND_LINE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -257,8 +320,11 @@ impl ConPty {
                 } else {
                     Default::default()
                 };
+            let application_ptr = application
+                .as_ref()
+                .map_or(std::ptr::null(), |app| app.as_ptr());
             let spawned = CreateProcessW(
-                PWSTR::null(),
+                PCWSTR::from_raw(application_ptr),
                 Some(PWSTR(cmdline.as_mut_ptr())),
                 None,
                 None,

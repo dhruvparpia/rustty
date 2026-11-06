@@ -500,6 +500,7 @@ Splits are not MVP, but are required for Ghostty-like parity.
 | SHELL-021 | The terminal shall pass environment variables to the shell. | P0 |
 | SHELL-029 | The terminal shall add its own folder to the end of the PATH of every shell it starts, unless already present, without changing any persistent setting. | P1 |
 | SHELL-022 | The terminal shall avoid injecting unsafe environment variables into shells. | P0 |
+| SHELL-030 | A program name with no path separator shall be resolved to an absolute path before it starts, for every shell, profile, `tab.open` command and boss: the Windows folders, then the absolute entries of `PATH`, as a `.com`, `.exe`, `.bat` or `.cmd`, with App Execution Aliases counting as files. The current folder and relative `PATH` entries are never searched. A name found nowhere fails with a clear not-found error, with no fallback to `CreateProcessW`'s own search, which looks in the current folder first. A `.bat` or `.cmd` found this way runs under the rules of SECRET-011. A name with a path part is used as given. | P0 |
 
 Recommended shell defaults:
 

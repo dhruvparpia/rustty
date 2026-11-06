@@ -164,11 +164,19 @@ pub fn discover() -> Vec<Found> {
 /// failure, timeout, or non-zero exit.
 #[cfg(windows)]
 fn run_captured(program: &str, args: &[&str], timeout_secs: u64) -> Option<Vec<u8>> {
+    use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
 
+    /// `CREATE_NO_WINDOW`. A window has released its console, so without this a
+    /// console program gets a new one, which a default terminal opens as a window.
+    /// When that closes, Windows activates the window under it, which is this one
+    /// even if it was started not to take the foreground.
+    const NO_WINDOW: u32 = 0x0800_0000;
+
     fn work(program: String, args: Vec<String>) -> Option<Vec<u8>> {
         let out = Command::new(&program)
+            .creation_flags(NO_WINDOW)
             .args(&args)
             .stdin(Stdio::null())
             .stderr(Stdio::null())

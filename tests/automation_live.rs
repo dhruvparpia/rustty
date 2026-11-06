@@ -393,6 +393,11 @@ fn boss_flow(tag: &str, config: &str) {
     // A short-lived command that fails to start is an error, and leaves no tab.
     let bad = window.ctl(&["open", "--", "C:\\no\\such\\program.exe"]);
     assert_eq!(bad.status.code(), Some(2), "{bad:?}");
+    // A bare name found nowhere says so, and doesn't look in the current folder.
+    let bad = window.ctl(&["open", "--", "rustty-no-such-program"]);
+    assert_eq!(bad.status.code(), Some(2), "{bad:?}");
+    let said = String::from_utf8_lossy(&bad.stderr);
+    assert!(said.contains("not found on PATH"), "{said}");
     let listed = json_of(&window.ctl(&["--json", "list"]));
     assert_eq!(listed["tabs"].as_array().map(Vec::len), Some(2));
 

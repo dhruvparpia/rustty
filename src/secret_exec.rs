@@ -9,7 +9,7 @@
 //! location is still writable by the same Windows user, which is part of the
 //! limit stated in SECRET-012.
 
-use std::ffi::{OsStr, OsString, c_void};
+use std::ffi::{OsString, c_void};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -24,7 +24,7 @@ use windows::Win32::System::Console::{
     STD_OUTPUT_HANDLE, SetConsoleCtrlHandler,
 };
 use windows::Win32::System::Pipes::CreatePipe;
-use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW};
 use windows::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, INFINITE,
@@ -40,6 +40,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, GUID, PCWSTR, PWSTR};
 
+use crate::program_search::{is_batch, is_runnable_file, resolve_command};
 use crate::secrets::{
     CopyApproval, Launcher, OpCall, OpOutput, OpRunner, SecretsError, copy_prompt,
 };
@@ -50,8 +51,6 @@ use crate::secure_mem::{LockedPages, LockedSecret, MAX_SECRET_LEN};
 pub const MAX_CAPTURED_STDERR: usize = 64 * 1024;
 /// The variable `op` reads a service-account token from.
 pub const TOKEN_VARIABLE: &str = "OP_SERVICE_ACCOUNT_TOKEN";
-/// File types `CreateProcessW` can start, in the order a shell tries them.
-const RUNNABLE_EXTENSIONS: [&str; 4] = [".com", ".exe", ".bat", ".cmd"];
 
 /// A `windows` error as an `io::Error`.
 fn io_error(e: &windows::core::Error) -> io::Error {
@@ -158,53 +157,6 @@ pub fn batch_command_line(script: &Path, args: &[OsString]) -> Result<Vec<u16>, 
     Ok(line)
 }
 
-/// `base` as a runnable file: itself if it already has a runnable extension,
-/// then with each runnable extension appended.
-fn runnable_file(base: &Path, is_file: &impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    let has_runnable_extension = base.extension().is_some_and(|ext| {
-        RUNNABLE_EXTENSIONS
-            .iter()
-            .any(|known| ext.eq_ignore_ascii_case(&known[1..]))
-    });
-    if has_runnable_extension && is_file(base) {
-        return Some(base.to_path_buf());
-    }
-    RUNNABLE_EXTENSIONS.iter().find_map(|extension| {
-        let mut name = base.as_os_str().to_os_string();
-        name.push(extension);
-        let candidate = PathBuf::from(name);
-        is_file(&candidate).then_some(candidate)
-    })
-}
-
-/// Find the file a command names. An explicit path is used as given. A bare
-/// name is searched on the absolute entries of `path_var` only, so the current
-/// directory never supplies a command by accident: a repository cannot plant
-/// `git.exe` for `secrets run -- git` to hand secrets to.
-pub fn resolve_command(
-    command: &OsStr,
-    path_var: Option<&OsStr>,
-    is_file: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    let units: Vec<u16> = command.encode_wide().collect();
-    let explicit = units
-        .iter()
-        .any(|u| matches!(*u, 0x5c | 0x2f | 0x3a /* \ / : */));
-    if explicit {
-        return runnable_file(Path::new(command), &is_file);
-    }
-    std::env::split_paths(path_var?)
-        .filter(|dir| dir.is_absolute())
-        .find_map(|dir| runnable_file(&dir.join(command), &is_file))
-}
-
-/// True for a file only `cmd.exe` can run.
-#[must_use]
-pub fn is_batch(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
-}
-
 /// Where `op` may be, best first: the machine install (only an administrator
 /// can change it), then the per-user WinGet locations. This list is the whole
 /// search: neither `PATH` nor the current directory is consulted.
@@ -265,6 +217,26 @@ pub fn system_program(name: &str) -> io::Result<PathBuf> {
         return Err(io::Error::last_os_error());
     }
     Ok(PathBuf::from(OsString::from_wide(&buffer[..len])).join(name))
+}
+
+/// The Windows folders, from the system rather than the environment: the system
+/// folder, then Windows itself.
+#[must_use]
+pub fn windows_folders() -> Vec<PathBuf> {
+    let folder = |buffer: &[u16], len: u32| {
+        let len = usize::try_from(len).ok()?;
+        (1..=buffer.len())
+            .contains(&len)
+            .then(|| PathBuf::from(OsString::from_wide(&buffer[..len])))
+    };
+    let mut buffer = [0u16; 1024];
+    // Safety: the buffer is valid for its whole length.
+    let len = unsafe { GetSystemDirectoryW(Some(&mut buffer)) };
+    let system = folder(&buffer, len);
+    // Safety: as above.
+    let len = unsafe { GetSystemWindowsDirectoryW(Some(&mut buffer)) };
+    let windows = folder(&buffer, len);
+    system.into_iter().chain(windows).collect()
 }
 
 /// SECRET-010: find the real `op` with no override of any kind.
@@ -818,7 +790,7 @@ impl Launcher for SystemLauncher {
         };
         let path_var = std::env::var_os("PATH");
         let file =
-            resolve_command(command, path_var.as_deref(), Path::is_file).ok_or_else(|| {
+            resolve_command(command, path_var.as_deref(), is_runnable_file).ok_or_else(|| {
                 SecretsError::Launch(format!(
                     "{} was not found as a .exe, .com, .bat or .cmd; the current directory is only \
                  searched for an explicit path such as .\\tool.exe",
