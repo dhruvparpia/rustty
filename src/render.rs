@@ -103,7 +103,7 @@ fn is_recreate_target(err: &windows::core::Error) -> bool {
 /// Cell geometry derived from the font, in DIPs.
 #[derive(Debug, Clone, Copy)]
 pub struct CellMetrics {
-    /// Cell width (monospace advance of `M`, rounded up).
+    /// Cell width: the monospace advance of `M`, rounded up for atlas text.
     pub cell_width: f32,
     /// Cell height (glyph box with leading, rounded up).
     pub cell_height: f32,
@@ -354,7 +354,7 @@ fn build_font_resources(
         }
         None => eprintln!("rustty: the bundled symbols font could not be loaded"),
     }
-    let metrics = measure_cells_with(dwrite, &formats[0], font.line_height)?;
+    let metrics = measure_cells_with(dwrite, &formats[0], font.line_height, font.ligatures)?;
     Ok((chosen.to_string(), formats, metrics))
 }
 
@@ -539,16 +539,20 @@ fn make_icon_format(dwrite: &IDWriteFactory, size: f32) -> Option<IDWriteTextFor
     None
 }
 
-/// Measure the cell box for `format`: width = advance of `M` (rounded up),
+/// Measure the cell box for `format`: width = advance of `M`,
 /// height = glyph box scaled by `line_height` (SPEC `line-height`).
 fn measure_cells_with(
     dwrite: &IDWriteFactory,
     format: &IDWriteTextFormat,
     line_height: f32,
+    shaped: bool,
 ) -> anyhow::Result<CellMetrics> {
     let width = layout_height(dwrite, format, "M")?.width;
     let glyph = layout_height(dwrite, format, "Mg")?;
-    let cell_width = width.ceil().max(1.0);
+    // Shaped text is drawn as runs at the font's own advance, so the grid has
+    // to match it or the gaps between words stretch. The atlas blits one tile
+    // per cell, and whole-pixel cells keep those tiles sharp.
+    let cell_width = if shaped { width } else { width.ceil() }.max(1.0);
     let cell_height = (glyph.height * line_height).ceil().max(1.0);
     Ok(CellMetrics {
         cell_width,
@@ -3206,5 +3210,31 @@ mod tests {
         // Break caught: losing system fallback for everything else.
         let family = mapped_family('\u{4E2D}', "Consolas").unwrap_or_default();
         assert!(!family.contains("Symbols Nerd Font"), "{family}");
+    }
+
+    #[test]
+    fn shaped_text_uses_the_fonts_own_advance() {
+        // Break caught: rounding the cell up makes each word narrower than
+        // the grid, so the gaps between words stretch ("Windows  PowerShell").
+        let font = crate::config::FontConfig {
+            family: "Consolas".to_string(),
+            ligatures: true,
+            ..crate::config::FontConfig::default()
+        };
+        let cell = super::measure_cells(96, &font).expect("metrics").cell_width;
+        assert_ne!(cell, cell.ceil(), "Consolas 11pt has a fractional advance");
+    }
+
+    #[test]
+    fn atlas_text_keeps_whole_pixel_cells() {
+        // Break caught: blitting atlas tiles at fractional positions, which
+        // blurs them. Ligatures off is the atlas path.
+        let font = crate::config::FontConfig {
+            family: "Consolas".to_string(),
+            ligatures: false,
+            ..crate::config::FontConfig::default()
+        };
+        let cell = super::measure_cells(96, &font).expect("metrics").cell_width;
+        assert_eq!(cell, cell.ceil());
     }
 }

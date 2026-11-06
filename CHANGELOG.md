@@ -45,6 +45,8 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Fixed
 
+- Words are evenly spaced. The grid now matches the font's own advance instead of rounding
+  it up, which stretched the gaps between words.
 - Block characters and Powerline separators are drawn as geometry, so rows and prompt
   segments join with no gaps at any line height.
 - Theme palettes now colour ANSI output, so each theme shows its own 16 colors. Text
