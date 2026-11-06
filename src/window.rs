@@ -175,6 +175,27 @@ const APP_NAME: &str = "rustty";
 
 /// Shell-output poll period in milliseconds.
 const POLL_MS: u32 = 33;
+/// Keeps COM open on the UI thread for as long as windows exist. The renderer's
+/// image factory needs it, and only activating a window happened to start it.
+struct ComApartment(bool);
+
+impl ComApartment {
+    fn open() -> Self {
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+        // Safety: called on this thread, and balanced in `drop` when it worked.
+        Self(unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok())
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.0 {
+            // Safety: balances the successful call in `open`, on the same thread.
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
 /// This process holds the instance mutex, so its layout is the one to keep.
 static PRIMARY_INSTANCE: AtomicBool = AtomicBool::new(false);
 
@@ -2184,7 +2205,26 @@ fn init_window(hwnd: HWND) {
         if let (Some(menu), Some(s)) = (menu.and_then(|r| r.ok()), state_mut(hwnd)) {
             s.menu = Some(menu);
         }
+        // A shortcut set to "Run minimized" turns this first show into a
+        // minimize, and Windows then remembers its parking spot as the normal
+        // size. Keep the size the window was created with.
+        let mut created = RECT::default();
+        let measured = unsafe { GetWindowRect(hwnd, &mut created) }.is_ok();
         let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
+        if measured && unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(hwnd) }.as_bool()
+        {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetWindowPlacement, SetWindowPlacement, WINDOWPLACEMENT,
+            };
+            let mut placement = WINDOWPLACEMENT {
+                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                ..Default::default()
+            };
+            if unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_ok() {
+                placement.rcNormalPosition = created;
+                let _ = unsafe { SetWindowPlacement(hwnd, &placement) };
+            }
+        }
     }
     let dpi = unsafe {
         let d = GetDpiForWindow(hwnd);
@@ -2745,10 +2785,7 @@ fn snapshot_session(s: &WindowState, hwnd: HWND) -> crate::session::Session {
     let mut rc = RECT::default();
     let window = if s.fullscreen.is_some() {
         None
-    } else if unsafe { GetWindowRect(hwnd, &mut rc) }.is_ok()
-        && rc.right > rc.left
-        && rc.bottom > rc.top
-    {
+    } else if normal_window_rect(hwnd, &mut rc) && rc.right > rc.left && rc.bottom > rc.top {
         Some(crate::session::WindowRect {
             x: rc.left,
             y: rc.top,
@@ -2763,6 +2800,24 @@ fn snapshot_session(s: &WindowState, hwnd: HWND) -> crate::session::Session {
         focused_tab: s.app.active_tab_index(),
         window,
     }
+}
+
+/// The window's rectangle when it is not minimized. A minimized window's own
+/// rectangle is only Windows' parking spot for it.
+fn normal_window_rect(hwnd: HWND, rect: &mut RECT) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowPlacement, IsIconic, WINDOWPLACEMENT};
+    if unsafe { IsIconic(hwnd) }.as_bool() {
+        let mut placement = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        if unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_ok() {
+            *rect = placement.rcNormalPosition;
+            return true;
+        }
+        return false;
+    }
+    unsafe { GetWindowRect(hwnd, rect) }.is_ok()
 }
 
 /// CONFIG-009: flip the cursor blink phase and repaint.
@@ -8149,6 +8204,7 @@ pub fn run(
     spawn: SpawnOptions,
     workspace: Option<&str>,
 ) -> anyhow::Result<()> {
+    let _com = ComApartment::open();
     // Held until this process exits, so a later launch knows a window is open.
     let instance = InstanceGuard::acquire(INSTANCE_MUTEX);
     PRIMARY_INSTANCE.store(instance.is_some(), Ordering::Release);

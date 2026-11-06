@@ -49,6 +49,8 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 - The sidebar now shows when Claude Code is waiting on you, with its actual question, read from its
   screen. Programs can also report their status directly through OSC 7501.
+- Fixed: a window started without activation, such as from a "Run minimized" shortcut, had no
+  renderer and could not draw.
 - Fixed: `CSI > 4 m`, which Claude Code sends at startup, turned on underline for all later text.
   A private marker now never runs as the plain command.
 - Worktree sessions, a project brain and a roadmap board: "New Session in Worktree" gives a session
