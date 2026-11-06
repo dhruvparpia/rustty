@@ -102,6 +102,22 @@ pub mod project_brain;
 pub mod rail;
 /// Terminal search over screen + scrollback (SPEC SEARCH-001..015).
 pub mod search;
+// The real `op` runner and the command launcher behind `rustty secrets`.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "SECRET-011: CreateProcessW with a wiped environment block is a raw Win32 FFI boundary"
+)]
+pub mod secret_exec;
+/// Per-project 1Password secrets: manifest, naming, token store and verb
+/// logic (SECRET-001..012). Portable; every `op` call goes through a trait.
+pub mod secrets;
+/// Locked, encrypted-at-rest secret buffers and DPAPI (SECRET-004..006).
+#[allow(
+    unsafe_code,
+    reason = "SECRET-004: VirtualLock, CryptProtectMemory and DPAPI are a raw Win32 FFI boundary"
+)]
+pub mod secure_mem;
 pub mod selection;
 pub mod session;
 pub mod shell;
