@@ -92,6 +92,12 @@ mod perf_bench;
 pub mod portable;
 /// Terminal search over screen + scrollback (SPEC SEARCH-001..015).
 pub mod search;
+/// Locked, encrypted-at-rest secret buffers and DPAPI (SECRET-004..006).
+#[allow(
+    unsafe_code,
+    reason = "SECRET-004: VirtualLock, CryptProtectMemory and DPAPI are a raw Win32 FFI boundary"
+)]
+pub mod secure_mem;
 pub mod selection;
 pub mod session;
 pub mod shell;
