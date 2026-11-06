@@ -6,6 +6,38 @@
 //! [`Modifiers`], and forwards the returned bytes straight to the shell.
 //! Keeping the encoding here makes it unit-testable without a window.
 
+/// Virtual-key code of the Alt key.
+pub const VK_MENU: u16 = 0x12;
+
+/// Detects a lone tap of Alt, which opens the window menu: Alt pressed and
+/// released with nothing else in between.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AltTap {
+    armed: bool,
+}
+
+impl AltTap {
+    /// A key went down. `ctrl` is whether Ctrl is held: AltGr reports as
+    /// Ctrl+Alt, and must not open a menu while typing.
+    pub const fn key_down(&mut self, vk: u16, ctrl: bool) {
+        self.armed = vk == VK_MENU && !ctrl;
+    }
+
+    /// A key went up. `true` when that completes a lone tap of Alt.
+    pub const fn key_up(&mut self, vk: u16) -> bool {
+        let tapped = vk == VK_MENU && self.armed;
+        if vk == VK_MENU {
+            self.armed = false;
+        }
+        tapped
+    }
+
+    /// Something else happened during the press, such as a mouse click.
+    pub const fn cancel(&mut self) {
+        self.armed = false;
+    }
+}
+
 /// Ctrl/Alt/Shift state for one key event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Modifiers {
@@ -287,5 +319,40 @@ mod tests {
     #[test]
     fn alt_chars_get_escape_prefix() {
         assert_eq!(encode_char('a', mods(false, true, false)), b"\x1ba");
+    }
+
+    #[test]
+    fn lone_alt_tap_is_detected() {
+        let mut tap = AltTap::default();
+        tap.key_down(VK_MENU, false);
+        assert!(tap.key_up(VK_MENU));
+        assert!(!tap.key_up(VK_MENU), "one tap opens the menu once");
+    }
+
+    #[test]
+    fn alt_with_another_key_is_not_a_tap() {
+        // Break caught: Alt+X or Alt+Tab popping the menu on release.
+        for other in [0x58, 0x09, 0x10] {
+            let mut tap = AltTap::default();
+            tap.key_down(VK_MENU, false);
+            tap.key_down(other, false);
+            assert!(!tap.key_up(VK_MENU), "vk {other:#x}");
+        }
+    }
+
+    #[test]
+    fn altgr_is_not_a_tap() {
+        // Break caught: typing on layouts where AltGr reports Ctrl+Alt.
+        let mut tap = AltTap::default();
+        tap.key_down(VK_MENU, true);
+        assert!(!tap.key_up(VK_MENU));
+    }
+
+    #[test]
+    fn mouse_click_during_alt_cancels() {
+        let mut tap = AltTap::default();
+        tap.key_down(VK_MENU, false);
+        tap.cancel();
+        assert!(!tap.key_up(VK_MENU));
     }
 }

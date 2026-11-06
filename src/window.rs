@@ -65,30 +65,31 @@ use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP,
     SetCurrentProcessExplicitAppUserModelID, ShellExecuteW,
 };
+use windows::Win32::UI::WindowsAndMessaging::WM_SYSKEYUP;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW,
-    DLGPROC, DLGTEMPLATE, DS_MODALFRAME, DefWindowProcW, DeleteMenu, DestroyMenu, DestroyWindow,
+    CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreatePopupMenu, CreateWindowExW, DLGPROC,
+    DLGTEMPLATE, DS_MODALFRAME, DefWindowProcW, DeleteMenu, DestroyMenu, DestroyWindow,
     DialogBoxIndirectParamW, DispatchMessageW, EnableMenuItem, EndDialog, GW_CHILD, GW_HWNDNEXT,
     GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClientRect, GetCursorPos, GetForegroundWindow,
-    GetMenu, GetMenuItemCount, GetMessageW, GetSubMenu, GetWindow, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextW, HMENU, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM, IDCANCEL,
-    IDOK, IDYES, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW, LoadIconW,
+    GetMenuItemCount, GetMessageW, GetSubMenu, GetWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowTextW, HMENU, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM, IDCANCEL, IDOK, IDYES,
+    IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW, LoadIconW,
     MB_DEFBUTTON2, MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_BYPOSITION,
     MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
     MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_HIDE,
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetMenu, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE,
-    WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_ENTERSIZEMOVE,
-    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR,
-    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INITDIALOG,
-    WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER,
-    WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND,
+    WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+    WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INITDIALOG, WM_INITMENUPOPUP, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     HTCAPTION, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
@@ -108,6 +109,7 @@ use crate::config::{
 use crate::diagnostics::{self, Resolved};
 use crate::discovery::{self, Found};
 use crate::keyboard::{self, Modifiers};
+use crate::keyboard::{AltTap, VK_MENU};
 use crate::palette::{Command, PaletteItem, PaletteState, builtin_shortcut, display_shortcut};
 use crate::pane::Pane;
 use crate::parser::{MouseProtocol, bracketed_paste_bytes, mouse_report_bytes};
@@ -352,7 +354,7 @@ fn append_menu_submenu(parent: HMENU, text: &str, submenu: HMENU) -> Result<()> 
 /// keyboard shortcut text; the app's existing keybindings execute them.
 fn build_menu(profiles: &[ProfileSpec], theme_names: &[String]) -> Result<HMENU> {
     unsafe {
-        let menu = CreateMenu()?;
+        let menu = CreatePopupMenu()?;
 
         let file = CreatePopupMenu()?;
         append_menu_item(file, "&New Tab\tCtrl+Shift+T", MENU_NEW_TAB)?;
@@ -628,11 +630,10 @@ fn profile_command(s: &WindowState, id: usize) -> Option<usize> {
 /// Update check marks and enabled state for the popup about to open.
 fn update_menu_checks(hwnd: HWND, wparam: WPARAM) {
     let popup = HMENU(wparam.0 as *mut c_void);
-    let menu = unsafe { GetMenu(hwnd) };
-    if menu.0.is_null() {
-        return;
-    }
     let Some(state) = state_ref(hwnd) else {
+        return;
+    };
+    let Some(menu) = state.menu else {
         return;
     };
     let tabs = state.app.tab_count();
@@ -1291,6 +1292,10 @@ struct WindowState {
     caption_hover: Option<caption::Hit>,
     /// Caption button held down.
     caption_pressed: Option<caption::Hit>,
+    /// The window menu, opened as a popup. `None` on the quick terminal.
+    menu: Option<HMENU>,
+    /// Watches for a lone tap of Alt.
+    alt_tap: AltTap,
     /// Issue #25: high half of a UTF-16 surrogate pair from `WM_CHAR`
     /// (VK_PACKET/IME deliver non-BMP characters as two messages).
     pending_surrogate: Option<u16>,
@@ -1726,7 +1731,9 @@ unsafe extern "system" fn wnd_proc(
                     && let Ok(menu) =
                         build_menu(&s.profiles, &menu_theme_names(s.theme_dir.as_deref()))
                 {
-                    let _ = unsafe { SetMenu(hwnd, Some(menu)) };
+                    if let Some(old) = s.menu.replace(menu) {
+                        let _ = unsafe { DestroyMenu(old) };
+                    }
                 }
                 let names: Vec<String> = s.profiles.iter().map(|p| p.name.clone()).collect();
                 rebuild_jumplist(&names);
@@ -1738,11 +1745,20 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_KEYDOWN => {
+            note_alt_tap_key(hwnd, (wparam.0 & 0xFFFF) as u16);
             handle_keydown(hwnd, (wparam.0 & 0xFFFF) as u16);
+            LRESULT(0)
+        }
+        WM_SYSKEYUP if (wparam.0 & 0xFFFF) as u16 == VK_MENU => {
+            let tapped = state_mut(hwnd).is_some_and(|s| s.alt_tap.key_up(VK_MENU));
+            if tapped {
+                show_window_menu(hwnd);
+            }
             LRESULT(0)
         }
         WM_SYSKEYDOWN => {
             let vk = (wparam.0 & 0xFFFF) as u16;
+            note_alt_tap_key(hwnd, vk);
             // Alt+Tab and friends must keep their system behaviour.
             if vk == 0x09 {
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
@@ -1787,6 +1803,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            if let Some(s) = state_mut(hwnd) {
+                s.alt_tap.cancel();
+            }
             handle_lbutton_down(hwnd, lparam);
             LRESULT(0)
         }
@@ -1922,6 +1941,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_KILLFOCUS => {
+            if let Some(s) = state_mut(hwnd) {
+                s.alt_tap.cancel();
+            }
             // Roadmap v0.2: the quick terminal vanishes when you click away.
             if state_ref(hwnd).is_some_and(|s| s.quick && s.cfg.quick_terminal.autohide) {
                 let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
@@ -2039,16 +2061,14 @@ fn init_window(hwnd: HWND) {
             );
         }
     }
-    // Native menu bar (MENU-001..005). A menu failure leaves the terminal
+    // Window menu (MENU-001..005), opened as a popup by tapping Alt. A menu failure leaves the terminal
     // usable, matching the no-fatal-UI-failure rule. The frameless quick
     // window has no menu, and it is not shown until the hotkey summons it.
     if !quick {
         let menu = state_ref(hwnd)
             .map(|s| build_menu(&s.profiles, &menu_theme_names(s.theme_dir.as_deref())));
-        if let Some(menu) = menu.and_then(|r| r.ok()) {
-            unsafe {
-                let _ = SetMenu(hwnd, Some(menu));
-            }
+        if let (Some(menu), Some(s)) = (menu.and_then(|r| r.ok()), state_mut(hwnd)) {
+            s.menu = Some(menu);
         }
         let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
     }
@@ -2286,6 +2306,8 @@ fn create_quick_window() {
         fullscreen: None,
         caption_hover: None,
         caption_pressed: None,
+        menu: None,
+        alt_tap: AltTap::default(),
         search: None,
         palette: None,
         hint: None,
@@ -2607,6 +2629,28 @@ fn sync_active_tab_geometry(hwnd: HWND) {
     let width = (rect.right - rect.left).max(0) as u32;
     let height = (rect.bottom - rect.top).max(0) as u32;
     resize_window(hwnd, width, height);
+}
+
+/// Tell the Alt-tap detector about a key press.
+fn note_alt_tap_key(hwnd: HWND, vk: u16) {
+    let ctrl = read_mods().ctrl;
+    if let Some(s) = state_mut(hwnd) {
+        s.alt_tap.key_down(vk, ctrl);
+    }
+}
+
+/// Open the window menu just under the left end of the title strip.
+fn show_window_menu(hwnd: HWND) {
+    let Some(menu) = state_ref(hwnd).and_then(|s| s.menu) else {
+        return;
+    };
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    let mut point = POINT {
+        x: 0,
+        y: (caption::STRIP_HEIGHT * scale) as i32,
+    };
+    let _ = unsafe { ClientToScreen(hwnd, &mut point) };
+    let _ = unsafe { TrackPopupMenu(menu, TPM_LEFTALIGN, point.x, point.y, None, hwnd, None) };
 }
 
 /// True for a window that draws its own title bar: not the quick terminal,
@@ -4070,11 +4114,43 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             command: Command::OpenPreferences,
         });
     }
+    items.extend(standard_rows(
+        &RowCtx {
+            pane_count,
+            has_commands,
+            last_finished,
+            has_bookmarks,
+            has_selection,
+            quick: s.quick,
+        },
+        |action| shortcut_for(s, action),
+    ));
+    items.extend(menu_only_rows(
+        s.ws_source.is_some(),
+        &crate::workspace::names(),
+    ));
+    items
+}
+
+/// What the standard palette rows depend on.
+#[derive(Default)]
+struct RowCtx {
+    pane_count: usize,
+    has_commands: bool,
+    last_finished: bool,
+    has_bookmarks: bool,
+    has_selection: bool,
+    quick: bool,
+}
+
+/// The rows that run a [`KeyAction`].
+fn standard_rows(ctx: &RowCtx, shortcut: impl Fn(KeyAction) -> Option<String>) -> Vec<PaletteItem> {
+    let mut items: Vec<PaletteItem> = Vec::new();
     let mut push = |label: &str, group: &'static str, action: KeyAction, disabled: Option<&str>| {
         items.push(PaletteItem {
             label: label.to_string(),
             group,
-            shortcut: shortcut_for(s, action),
+            shortcut: shortcut(action),
             disabled_reason: disabled.map(str::to_owned),
             command: Command::Action(action),
         });
@@ -4090,42 +4166,42 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
         "Show Bookmark List",
         "Shell",
         KeyAction::ShowBookmarks,
-        (!has_bookmarks).then_some("No bookmarks in this pane"),
+        (!ctx.has_bookmarks).then_some("No bookmarks in this pane"),
     );
     push(
         "Export Selection to File",
         "Shell",
         KeyAction::ExportSelection,
-        (!has_selection).then_some("No selection"),
+        (!ctx.has_selection).then_some("No selection"),
     );
     push(
         "Export Last Command Output to File",
         "Shell",
         KeyAction::ExportLastCommand,
-        (!last_finished).then_some("No finished command in this pane yet"),
+        (!ctx.last_finished).then_some("No finished command in this pane yet"),
     );
     push("Clear Screen", "Shell", KeyAction::ClearScreen, None);
     push(
         "Copy Last Command Output",
         "Shell",
         KeyAction::CopyLastCommand,
-        (!last_finished).then_some("No finished command in this pane yet"),
+        (!ctx.last_finished).then_some("No finished command in this pane yet"),
     );
     push(
         "Previous Command",
         "Shell",
         KeyAction::PrevCommand,
-        (!has_commands).then_some("No command boundaries in this pane yet"),
+        (!ctx.has_commands).then_some("No command boundaries in this pane yet"),
     );
     push(
         "Next Command",
         "Shell",
         KeyAction::NextCommand,
-        (!has_commands).then_some("No command boundaries in this pane yet"),
+        (!ctx.has_commands).then_some("No command boundaries in this pane yet"),
     );
     push("Split Right", "Splits", KeyAction::SplitRight, None);
     push("Split Below", "Splits", KeyAction::SplitDown, None);
-    let no_split = (pane_count < 2).then_some("This tab has one pane");
+    let no_split = (ctx.pane_count < 2).then_some("This tab has one pane");
     push("Focus Pane Up", "Splits", KeyAction::FocusUp, no_split);
     push("Focus Pane Down", "Splits", KeyAction::FocusDown, no_split);
     push("Focus Pane Left", "Splits", KeyAction::FocusLeft, no_split);
@@ -4181,11 +4257,91 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
         "Hide Quick Terminal",
         "Window",
         KeyAction::CloseQuick,
-        (!s.quick).then_some("This is not the quick terminal"),
+        (!ctx.quick).then_some("This is not the quick terminal"),
     );
     push("Reload Config", "Config", KeyAction::ReloadConfig, None);
     push("Quit", "Window", KeyAction::Quit, None);
     items
+}
+
+/// Rows for menu commands that have no [`KeyAction`]. The menu bar is gone, so
+/// everything it held has to be reachable from the palette.
+fn menu_only_rows(workspace_open: bool, workspaces: &[String]) -> Vec<PaletteItem> {
+    let row = |label: String, group: &'static str, id: usize, disabled: Option<&str>| PaletteItem {
+        label,
+        group,
+        shortcut: None,
+        disabled_reason: disabled.map(str::to_owned),
+        command: Command::MenuItem(id as u32),
+    };
+    let no_workspace = (!workspace_open).then_some("No saved workspace is open");
+    let mut items = vec![
+        row("Minimize Window".into(), "Window", MENU_MINIMIZE, None),
+        row(
+            "Maximize or Restore Window".into(),
+            "Window",
+            MENU_MAXIMIZE,
+            None,
+        ),
+        row("Close Window".into(), "Window", MENU_CLOSE_WINDOW, None),
+        row("About rustty".into(), "Window", MENU_ABOUT, None),
+        row(
+            "Save Workspace As...".into(),
+            "Workspaces",
+            MENU_WS_SAVE_AS,
+            None,
+        ),
+        row(
+            "Overwrite Workspace".into(),
+            "Workspaces",
+            MENU_WS_OVERWRITE,
+            no_workspace,
+        ),
+        row(
+            "Rename Workspace...".into(),
+            "Workspaces",
+            MENU_WS_RENAME,
+            no_workspace,
+        ),
+    ];
+    for (idx, name) in workspaces.iter().enumerate() {
+        items.push(row(
+            format!("Delete Workspace: {name}"),
+            "Workspaces",
+            MENU_WS_DEL_BASE + idx,
+            None,
+        ));
+    }
+    items
+}
+
+/// The palette command that does the same as a menu item.
+fn palette_command_for_menu(id: usize) -> Option<Command> {
+    let action = |action| Some(Command::Action(action));
+    match id {
+        MENU_NEW_TAB => action(KeyAction::NewTab),
+        MENU_CLOSE_TAB => action(KeyAction::CloseTab),
+        MENU_SPLIT_RIGHT => action(KeyAction::SplitRight),
+        MENU_SPLIT_DOWN => action(KeyAction::SplitDown),
+        MENU_QUIT => action(KeyAction::Quit),
+        MENU_COPY => action(KeyAction::Copy),
+        MENU_PASTE => action(KeyAction::Paste),
+        MENU_SEARCH => action(KeyAction::Search),
+        MENU_FULLSCREEN => action(KeyAction::Fullscreen),
+        MENU_PREV_COMMAND => action(KeyAction::PrevCommand),
+        MENU_NEXT_COMMAND => action(KeyAction::NextCommand),
+        MENU_COPY_LAST_CMD => action(KeyAction::CopyLastCommand),
+        MENU_NEXT_TAB => action(KeyAction::NextTab),
+        MENU_PREV_TAB => action(KeyAction::PrevTab),
+        MENU_TAB_LEFT => action(KeyAction::MoveTabLeft),
+        MENU_TAB_RIGHT => action(KeyAction::MoveTabRight),
+        MENU_RENAME_TAB => action(KeyAction::RenameTab),
+        MENU_PREFERENCES => Some(Command::OpenPreferences),
+        MENU_MINIMIZE | MENU_MAXIMIZE | MENU_CLOSE_WINDOW | MENU_ABOUT => {
+            Some(Command::MenuItem(id as u32))
+        }
+        _ => None,
+    }
 }
 
 /// The shortcut to display for `action`: a user binding wins, then the
@@ -4269,6 +4425,7 @@ fn execute_palette_current(hwnd: HWND) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
     match command {
         Command::Action(action) => run_key_action(hwnd, action),
+        Command::MenuItem(id) => handle_command(hwnd, WPARAM(id as usize)),
         Command::NewTabProfile(idx) => open_profile_tab(hwnd, idx),
         Command::AttachSession(alias) => open_session_view(hwnd, alias, false),
         Command::RunTask(id) => run_task(hwnd, id),
@@ -6985,6 +7142,8 @@ pub fn run(
         fullscreen: None,
         caption_hover: None,
         caption_pressed: None,
+        menu: None,
+        alt_tap: AltTap::default(),
         search: None,
         palette: None,
         hint: None,
@@ -7180,5 +7339,82 @@ mod profile_tests {
             alt: false,
         };
         assert_eq!(key_spec(0x21, mods), "ctrl+shift+pageup");
+    }
+
+    /// Every command id in a built menu, including submenus.
+    fn menu_ids(menu: HMENU, out: &mut Vec<usize>) {
+        let count = unsafe { GetMenuItemCount(Some(menu)) };
+        for pos in 0..count {
+            if let Some(sub) = submenu_of(menu, pos) {
+                menu_ids(sub, out);
+                continue;
+            }
+            let id = unsafe { windows::Win32::UI::WindowsAndMessaging::GetMenuItemID(menu, pos) };
+            // Separators report 0.
+            if id != 0 {
+                out.push(id as usize);
+            }
+        }
+    }
+
+    #[test]
+    fn every_menu_command_has_a_palette_action() {
+        // Break caught: a command that only exists in the Alt menu, now that
+        // the permanent menu bar is gone. Walks the real menu, so a new item
+        // cannot be forgotten.
+        let menu = build_menu(&[], &[]).expect("menu");
+        let mut ids = Vec::new();
+        menu_ids(menu, &mut ids);
+        assert!(ids.len() > 15, "walked {} items", ids.len());
+        let rows: Vec<Command> = standard_rows(&RowCtx::default(), |_| None)
+            .into_iter()
+            .chain(menu_only_rows(false, &[]))
+            .map(|row| row.command)
+            .collect();
+        for id in ids {
+            // The palette opening itself needs no row.
+            if id == MENU_PALETTE {
+                continue;
+            }
+            let command = palette_command_for_menu(id)
+                .unwrap_or_else(|| panic!("menu id {id:#x} has no palette command"));
+            // OpenPreferences has its own row, built outside these two lists.
+            assert!(
+                command == Command::OpenPreferences || rows.contains(&command),
+                "menu id {id:#x}: {command:?} has no palette row"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_menu_commands_have_palette_rows() {
+        // Break caught: saving or deleting a workspace needing the Alt menu.
+        let names = vec!["alpha".to_string(), "beta".to_string()];
+        let rows = menu_only_rows(true, &names);
+        for id in [
+            MENU_WS_SAVE_AS,
+            MENU_WS_OVERWRITE,
+            MENU_WS_RENAME,
+            MENU_WS_DEL_BASE,
+            MENU_WS_DEL_BASE + 1,
+        ] {
+            assert!(
+                rows.iter()
+                    .any(|row| row.command == Command::MenuItem(id as u32)),
+                "{id:#x}"
+            );
+        }
+        let closed = menu_only_rows(false, &[]);
+        let disabled = |id: usize| {
+            closed
+                .iter()
+                .find(|row| row.command == Command::MenuItem(id as u32))
+                .is_some_and(|row| row.disabled_reason.is_some())
+        };
+        assert!(
+            disabled(MENU_WS_OVERWRITE),
+            "no workspace open to overwrite"
+        );
+        assert!(disabled(MENU_WS_RENAME), "no workspace open to rename");
     }
 }

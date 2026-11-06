@@ -990,6 +990,7 @@ COLORTERM
 
 | ID | Requirement | Priority |
 |---|---|---|
+| MENU-000 | The menus below shall open as a popup when Alt is tapped alone, not as a permanent menu bar. Every menu command shall also be reachable from the command palette. | P1 |
 | MENU-001 | The terminal shall provide a File menu. | P1 |
 | MENU-002 | The terminal shall provide an Edit menu. | P1 |
 | MENU-003 | The terminal shall provide a View menu. | P1 |

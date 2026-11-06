@@ -54,6 +54,8 @@ pub enum Command {
     SwitchTheme(usize),
     /// Open existing Git worktree `n` as a tab at its root.
     OpenWorktree(usize),
+    /// Run a window menu command by id, for commands with no [`KeyAction`].
+    MenuItem(u32),
     /// Open the native Preferences config editor.
     OpenPreferences,
     /// Open the in-app settings overlay at setting `n` (issue #91).

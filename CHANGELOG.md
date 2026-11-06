@@ -26,6 +26,9 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Changed
 
+- The permanent menu bar is gone. Tap Alt to open the same menu as a popup; every menu
+  command is also in the command palette, including minimize, maximize, close window, about
+  and saving workspaces.
 - Tabs now sit in the title bar on one seamless surface, with rustty drawing the minimize,
   maximize and close buttons in theme colors. Dragging, resizing and Snap Layouts stay native.
 - The tab strip is quieter: taller, with no divider line, Windows UI font titles, the `+`
