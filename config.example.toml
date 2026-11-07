@@ -155,7 +155,8 @@ editor = "code --goto {file}:{line}:{column}"
 #
 # Actions:
 #   new-tab, close-tab, next-tab, prev-tab, move-tab-left, move-tab-right,
-#   rename-tab, split-right, split-down, focus-up, focus-down, focus-left,
+#   rename-tab, split-right, split-down, split-left, split-up, move-pane-left,
+#   move-pane-right, move-pane-up, move-pane-down, focus-up, focus-down, focus-left,
 #   focus-right, resize-up, resize-down, resize-left, resize-right,
 #   increase-font-size, decrease-font-size, reset-font-size, clear-screen,
 #   reload-config, next-profile, prev-profile, next-theme, prev-theme,

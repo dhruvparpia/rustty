@@ -57,6 +57,17 @@ impl Colors {
             raised: theme.background.mix(theme.foreground, 0.07),
         }
     }
+
+    /// What each banner color becomes under `new` (THEME-016).
+    #[must_use]
+    pub fn recolor_map(&self, new: &Self) -> Vec<(Color, Color)> {
+        vec![
+            (self.foreground, new.foreground),
+            (self.accent, new.accent),
+            (self.muted, new.muted),
+            (self.raised, new.raised),
+        ]
+    }
 }
 
 /// Everything the banner shows.
@@ -522,6 +533,29 @@ mod tests {
             tip: TIP,
             colors: colors(),
             frame: Frame::Closed,
+        }
+    }
+
+    #[test]
+    fn a_banner_recolored_for_a_new_theme_matches_one_drawn_in_it() {
+        // Break caught: the banner keeping pale text and dark key labels on a light
+        // theme, because it was written with the old theme's colors.
+        let (old, new) = (Theme::copper_dark(), Theme::solarized_light());
+        let drawn = |colors: Colors| {
+            let mut b = banner(100, 24);
+            b.colors = colors;
+            fed(&b)
+        };
+        let mut pane = drawn(Colors::from_theme(&old));
+        let map = Colors::from_theme(&old).recolor_map(&Colors::from_theme(&new));
+        pane.recolor(&map);
+        let fresh = drawn(Colors::from_theme(&new));
+        for row in 0..24 {
+            let (got, want) = (
+                pane.grid().row(row).unwrap(),
+                fresh.grid().row(row).unwrap(),
+            );
+            assert_eq!(got.cells, want.cells, "row {row}");
         }
     }
 

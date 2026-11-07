@@ -63,6 +63,53 @@ impl Rect {
     }
 }
 
+/// Where a dragged pane lands on the pane it is dropped on (SPLIT-017).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropZone {
+    /// The two panes trade places.
+    Swap,
+    /// The dragged pane goes beside the target on this side.
+    Side(Side),
+}
+
+/// Which zone a pointer is in, from its position across the target pane (`0.0`
+/// at the left or top, `1.0` at the right or bottom). The middle swaps; a band
+/// around the edge docks to the nearest side.
+#[must_use]
+pub fn drop_zone(across: f32, down: f32) -> DropZone {
+    const EDGE: f32 = 0.25;
+    let left = across;
+    let right = 1.0 - across;
+    let up = down;
+    let bottom = 1.0 - down;
+    let nearest = left.min(right).min(up).min(bottom);
+    if nearest >= EDGE {
+        DropZone::Swap
+    } else if nearest == left {
+        DropZone::Side(Side::Left)
+    } else if nearest == right {
+        DropZone::Side(Side::Right)
+    } else if nearest == up {
+        DropZone::Side(Side::Up)
+    } else {
+        DropZone::Side(Side::Down)
+    }
+}
+
+/// The part of a pane's `frame` its text uses (SPLIT-011): panes that share a tab
+/// give their top row to a title. A pane too short to spare a row keeps it.
+#[must_use]
+pub const fn content_box(frame: Rect, panes: usize) -> Rect {
+    if panes < 2 || frame.rows < 2 {
+        return frame;
+    }
+    Rect {
+        row: frame.row + 1,
+        rows: frame.rows - 1,
+        ..frame
+    }
+}
+
 /// Smallest split ratio the tree accepts, so neither child collapses.
 pub const MIN_RATIO: f32 = 0.1;
 /// Largest split ratio the tree accepts.
@@ -238,6 +285,90 @@ impl PaneTree {
             }
         }
         go(&mut self.root, target, dir, clamp_ratio(ratio), fresh)
+    }
+
+    /// Split the leaf `target` with `fresh` on `side` of it. `false` when `target`
+    /// is not a leaf of this tree.
+    pub fn split_side(
+        &mut self,
+        target: &Rc<RefCell<Pane>>,
+        side: Side,
+        ratio: f32,
+        fresh: Rc<RefCell<Pane>>,
+    ) -> bool {
+        fn go(
+            n: &mut Node,
+            target: &Rc<RefCell<Pane>>,
+            side: Side,
+            ratio: f32,
+            fresh: &Rc<RefCell<Pane>>,
+        ) -> bool {
+            match n {
+                Node::Leaf(p) if Rc::ptr_eq(p, target) => {
+                    let old = Rc::clone(p);
+                    *n = beside(Node::Leaf(old), Rc::clone(fresh), side, ratio);
+                    true
+                }
+                Node::VSplit { first, second, .. } | Node::HSplit { first, second, .. } => {
+                    go(first, target, side, ratio, fresh) || go(second, target, side, ratio, fresh)
+                }
+                Node::Leaf(_) => false,
+            }
+        }
+        go(&mut self.root, target, side, clamp_ratio(ratio), &fresh)
+    }
+
+    /// Exchange two leaves, leaving every split as it is. `false` unless they are
+    /// two different leaves of this tree.
+    pub fn swap(&mut self, a: &Rc<RefCell<Pane>>, b: &Rc<RefCell<Pane>>) -> bool {
+        fn go(n: &mut Node, a: &Rc<RefCell<Pane>>, b: &Rc<RefCell<Pane>>) {
+            match n {
+                Node::Leaf(p) if Rc::ptr_eq(p, a) => *p = Rc::clone(b),
+                Node::Leaf(p) if Rc::ptr_eq(p, b) => *p = Rc::clone(a),
+                Node::Leaf(_) => {}
+                Node::VSplit { first, second, .. } | Node::HSplit { first, second, .. } => {
+                    go(first, a, b);
+                    go(second, a, b);
+                }
+            }
+        }
+        if Rc::ptr_eq(a, b) || Self::find(&self.root, a).is_none() {
+            return false;
+        }
+        if Self::find(&self.root, b).is_none() {
+            return false;
+        }
+        go(&mut self.root, a, b);
+        true
+    }
+
+    /// Take the leaf `moved` out and put it on `side` of the leaf `target`, each
+    /// getting half of `target`'s old box. `false`, changing nothing, unless they
+    /// are two different leaves of this tree.
+    pub fn move_beside(
+        &mut self,
+        moved: &Rc<RefCell<Pane>>,
+        target: &Rc<RefCell<Pane>>,
+        side: Side,
+    ) -> bool {
+        if Rc::ptr_eq(moved, target)
+            || Self::find(&self.root, moved).is_none()
+            || Self::find(&self.root, target).is_none()
+        {
+            return false;
+        }
+        self.close(moved) && self.split_side(target, side, DEFAULT_RATIO, Rc::clone(moved))
+    }
+
+    /// Take the leaf `moved` out and give it the whole `side` of the tab. `false`,
+    /// changing nothing, when it is not a leaf here or is the only one.
+    pub fn dock(&mut self, moved: &Rc<RefCell<Pane>>, side: Side) -> bool {
+        if self.count() < 2 || Self::find(&self.root, moved).is_none() || !self.close(moved) {
+            return false;
+        }
+        let rest = std::mem::replace(&mut self.root, Node::Leaf(Rc::clone(moved)));
+        self.root = beside(rest, Rc::clone(moved), side, DEFAULT_RATIO);
+        true
     }
 
     /// Remove the leaf `target`; its sibling takes the parent's place.
@@ -452,6 +583,34 @@ impl PaneTree {
     }
 }
 
+/// A split holding `node` and the leaf `fresh`, with `fresh` on `side`.
+fn beside(node: Node, fresh: Rc<RefCell<Pane>>, side: Side, ratio: f32) -> Node {
+    let node = Box::new(node);
+    let fresh = Box::new(Node::Leaf(fresh));
+    match side {
+        Side::Left => Node::VSplit {
+            ratio,
+            first: fresh,
+            second: node,
+        },
+        Side::Right => Node::VSplit {
+            ratio,
+            first: node,
+            second: fresh,
+        },
+        Side::Up => Node::HSplit {
+            ratio,
+            first: fresh,
+            second: node,
+        },
+        Side::Down => Node::HSplit {
+            ratio,
+            first: node,
+            second: fresh,
+        },
+    }
+}
+
 /// Pane index adjacent to `idx` on `side` (SPLIT-008 keyboard pane focus),
 /// over a [`PaneTree::layout`] box list: the touching pane with the
 /// greatest overlap in that direction. `None` when no pane touches.
@@ -492,6 +651,152 @@ mod tests {
 
     fn pane() -> Rc<RefCell<Pane>> {
         Rc::new(RefCell::new(Pane::new()))
+    }
+
+    #[test]
+    fn a_title_row_goes_above_the_text_only_when_panes_share_a_tab() {
+        let frame = Rect {
+            col: 3,
+            row: 2,
+            cols: 40,
+            rows: 10,
+        };
+        assert_eq!(content_box(frame, 1), frame, "one pane needs no title");
+        assert_eq!(
+            content_box(frame, 2),
+            Rect {
+                row: 3,
+                rows: 9,
+                ..frame
+            }
+        );
+        let short = Rect { rows: 1, ..frame };
+        assert_eq!(content_box(short, 2), short, "text wins over the title");
+    }
+
+    #[test]
+    fn splitting_toward_a_side_puts_the_new_pane_there() {
+        for (side, first_is_new, across) in [
+            (Side::Left, true, true),
+            (Side::Right, false, true),
+            (Side::Up, true, false),
+            (Side::Down, false, false),
+        ] {
+            let (a, b) = (pane(), pane());
+            let mut tree = PaneTree::new(Rc::clone(&a));
+            assert!(tree.split_side(&a, side, 0.5, Rc::clone(&b)));
+            let order = tree.flatten();
+            let want = if first_is_new { [&b, &a] } else { [&a, &b] };
+            assert!(Rc::ptr_eq(&order[0], want[0]), "{side:?}");
+            assert!(Rc::ptr_eq(&order[1], want[1]), "{side:?}");
+            let boxes = tree.layout(80, 24);
+            assert_eq!(boxes[1].col > 0, across, "{side:?}");
+            assert_eq!(boxes[1].row > 0, !across, "{side:?}");
+        }
+    }
+
+    #[test]
+    fn swapping_exchanges_two_panes_and_keeps_the_shape() {
+        let (a, b, c) = (pane(), pane(), pane());
+        let mut tree = PaneTree::new(Rc::clone(&a));
+        tree.split(&a, Dir::Vertical, 0.3, Rc::clone(&b));
+        tree.split(&b, Dir::Horizontal, 0.5, Rc::clone(&c));
+        let shape = tree.layout(100, 40);
+        assert!(tree.swap(&a, &c));
+        assert_eq!(tree.layout(100, 40), shape);
+        let order = tree.flatten();
+        assert!(Rc::ptr_eq(&order[0], &c));
+        assert!(Rc::ptr_eq(&order[1], &b));
+        assert!(Rc::ptr_eq(&order[2], &a));
+    }
+
+    #[test]
+    fn swapping_needs_two_different_panes_from_this_tree() {
+        let (a, b, stranger) = (pane(), pane(), pane());
+        let mut tree = PaneTree::new(Rc::clone(&a));
+        tree.split(&a, Dir::Vertical, 0.5, Rc::clone(&b));
+        assert!(!tree.swap(&a, &a));
+        assert!(!tree.swap(&a, &stranger));
+        assert!(Rc::ptr_eq(&tree.flatten()[0], &a), "nothing moved");
+    }
+
+    #[test]
+    fn moving_a_pane_beside_another_rebuilds_around_it() {
+        // [a | b] with c under b: move c to a's left.
+        let (a, b, c) = (pane(), pane(), pane());
+        let mut tree = PaneTree::new(Rc::clone(&a));
+        tree.split(&a, Dir::Vertical, 0.5, Rc::clone(&b));
+        tree.split(&b, Dir::Horizontal, 0.5, Rc::clone(&c));
+        assert!(tree.move_beside(&c, &a, Side::Left));
+        assert_eq!(tree.count(), 3);
+        let order = tree.flatten();
+        assert!(Rc::ptr_eq(&order[0], &c));
+        assert!(Rc::ptr_eq(&order[1], &a));
+        assert!(Rc::ptr_eq(&order[2], &b));
+        let boxes = tree.layout(100, 40);
+        assert_eq!(boxes[2].rows, 40, "b took the whole height back");
+    }
+
+    #[test]
+    fn moving_a_pane_onto_itself_or_a_stranger_changes_nothing() {
+        let (a, b, stranger) = (pane(), pane(), pane());
+        let mut tree = PaneTree::new(Rc::clone(&a));
+        tree.split(&a, Dir::Vertical, 0.5, Rc::clone(&b));
+        assert!(!tree.move_beside(&a, &a, Side::Up));
+        assert!(!tree.move_beside(&a, &stranger, Side::Up));
+        assert!(!tree.move_beside(&stranger, &a, Side::Up));
+        assert_eq!(tree.count(), 2, "no pane was lost");
+    }
+
+    #[test]
+    fn docking_gives_a_pane_a_whole_edge_of_the_tab() {
+        // [a | b] with a docked up: a across the top, b below.
+        let (a, b) = (pane(), pane());
+        let mut tree = PaneTree::new(Rc::clone(&a));
+        tree.split(&a, Dir::Vertical, 0.5, Rc::clone(&b));
+        assert!(tree.dock(&a, Side::Up));
+        assert_eq!(
+            tree.layout(80, 20),
+            vec![
+                Rect {
+                    col: 0,
+                    row: 0,
+                    cols: 80,
+                    rows: 10
+                },
+                Rect {
+                    col: 0,
+                    row: 10,
+                    cols: 80,
+                    rows: 10
+                },
+            ]
+        );
+        assert!(Rc::ptr_eq(&tree.flatten()[0], &a));
+    }
+
+    #[test]
+    fn a_lone_pane_cannot_be_docked() {
+        let a = pane();
+        let mut tree = PaneTree::new(Rc::clone(&a));
+        assert!(!tree.dock(&a, Side::Up));
+        assert!(
+            Rc::ptr_eq(&tree.flatten()[0], &a),
+            "the pane is still there"
+        );
+    }
+
+    #[test]
+    fn the_middle_of_a_pane_swaps_and_its_edges_dock() {
+        assert_eq!(drop_zone(0.5, 0.5), DropZone::Swap);
+        assert_eq!(drop_zone(0.3, 0.7), DropZone::Swap);
+        assert_eq!(drop_zone(0.1, 0.5), DropZone::Side(Side::Left));
+        assert_eq!(drop_zone(0.9, 0.5), DropZone::Side(Side::Right));
+        assert_eq!(drop_zone(0.5, 0.1), DropZone::Side(Side::Up));
+        assert_eq!(drop_zone(0.5, 0.9), DropZone::Side(Side::Down));
+        // A corner goes to the nearer edge.
+        assert_eq!(drop_zone(0.05, 0.2), DropZone::Side(Side::Left));
+        assert_eq!(drop_zone(0.2, 0.05), DropZone::Side(Side::Up));
     }
 
     #[test]

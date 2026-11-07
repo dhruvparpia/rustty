@@ -60,7 +60,7 @@ use crate::pane::{Pane, StoredImage};
 use crate::rail;
 use crate::search::SearchState;
 use crate::selection::Selection;
-use crate::split::Rect;
+use crate::split::{DropZone, Rect, Side};
 use crate::tab::Tab;
 use crate::tabbar::{self, TAB_CHROME};
 use crate::theme::Theme;
@@ -616,6 +616,8 @@ pub struct Renderer {
     rail_placed: Vec<rail::Placed>,
     /// What the pointer is over in the sidebar.
     rail_hover: rail::Hit,
+    /// Where a dragged pane would land: the target's whole box and the zone.
+    pane_drop: Option<(Rect, DropZone)>,
     /// Sidebar list scroll offset.
     rail_scroll: f32,
     /// Brightness of a working session's dot.
@@ -738,18 +740,10 @@ struct PaneDamage {
     graphics_generation: u64,
 }
 
-/// Flatten index of the leaf whose layout box covers cell `(col, row)`
-/// of the active tab, `None` when the cell is outside every pane.
+/// Flatten index of the pane whose box covers cell `(col, row)` of the active
+/// tab, title row included, `None` when the cell is outside every pane.
 fn leaf_at(tab: &Tab, col: usize, row: usize) -> Option<usize> {
-    let mut found = None;
-    let mut idx = 0usize;
-    tab.for_each_pane_ref(&mut |_: &Pane, rect: Rect| {
-        if rect.contains(col, row) {
-            found = Some(idx);
-        }
-        idx += 1;
-    });
-    found
+    tab.frames().iter().position(|f| f.contains(col, row))
 }
 
 /// Cell the cursor block occupies, or `None` when it is not drawn
@@ -927,6 +921,7 @@ impl Renderer {
             board: None,
             rail_placed: Vec::new(),
             rail_hover: rail::Hit::None,
+            pane_drop: None,
             rail_scroll: 0.0,
             rail_pulse: 1.0,
             rail_small_format,
@@ -994,6 +989,15 @@ impl Renderer {
 
     /// Set the sessions sidebar's width: 0 hides it. Callers re-read
     /// [`Renderer::grid_size`] afterwards.
+    /// Show where a dragged pane would land, or nothing. A change repaints in full.
+    pub fn set_pane_drop(&mut self, drop: Option<(Rect, DropZone)>) {
+        if self.pane_drop != drop {
+            self.pane_drop = drop;
+            self.damage.painted = false;
+        }
+    }
+
+    /// Set the sessions sidebar width in DIPs.
     pub fn set_rail_width(&mut self, width: f32) {
         self.rail_width = width.max(0.0);
     }
@@ -2055,7 +2059,11 @@ impl Renderer {
         let px = unsafe { self.target.GetPixelSize() };
         let width = px_to_dips(px.width, self.dpi);
         let height = px_to_dips(px.height, self.dpi);
-        let full = force_full || !self.damage.painted || self.full_repaint_needed(app);
+        // The drop highlight is translucent, so it cannot be painted over itself.
+        let full = force_full
+            || self.pane_drop.is_some()
+            || !self.damage.painted
+            || self.full_repaint_needed(app);
         self.build_mask(app, full);
         // Glyph atlas (spec §20): queue every glyph this frame wants, render
         // the new tiles into the atlas bitmap, then paint the frame with
@@ -2206,6 +2214,7 @@ impl Renderer {
             if tab.pane_count() > 1 {
                 self.paint_split_borders(tab, theme);
                 self.paint_pane_titles(tab, theme);
+                self.paint_pane_drop(theme);
             }
             let focused = tab.focused_index().unwrap_or(usize::MAX);
             let mut idx = 0usize;
@@ -3282,8 +3291,7 @@ impl Renderer {
         let ch = self.metrics.cell_height;
         let focused = tab.focused_index().unwrap_or(usize::MAX);
         for pass_focus in [false, true] {
-            let mut idx = 0usize;
-            tab.for_each_pane_ref(&mut |_: &Pane, rect: Rect| {
+            for (idx, rect) in tab.frames().iter().enumerate() {
                 if (idx == focused) == pass_focus {
                     let pad = self.split_padding;
                     let x = self.grid_left() + rect.col as f32 * cw + pad;
@@ -3314,14 +3322,55 @@ impl Renderer {
                         self.fill_rect(x, y + pane_height - 1.0, x + w, y + pane_height, color);
                     }
                 }
-                idx += 1;
-            });
+            }
         }
     }
 
-    /// Paint a title chip in each pane's top-left corner (SPLIT-011): the
-    /// pane's OSC-set title, on panes that have one. Reuses the tab-bar
-    /// label buffers, so the hot path stays allocation-free (NFR-113).
+    /// Show where a dragged pane would land (SPLIT-017).
+    fn paint_pane_drop(&mut self, theme: &Theme) {
+        let Some((frame, zone)) = self.pane_drop else {
+            return;
+        };
+        let cw = self.metrics.cell_width;
+        let ch = self.metrics.cell_height;
+        let pad = self.split_padding;
+        let mut left = self.grid_left() + frame.col as f32 * cw + pad;
+        let mut top = self.grid_top() + frame.row as f32 * ch + pad;
+        let mut right = left + frame.cols as f32 * cw - 2.0 * pad;
+        let mut bottom = top + frame.rows as f32 * ch - pad;
+        match zone {
+            DropZone::Swap => {}
+            DropZone::Side(Side::Left) => right = (left + right) / 2.0,
+            DropZone::Side(Side::Right) => left = (left + right) / 2.0,
+            DropZone::Side(Side::Up) => bottom = (top + bottom) / 2.0,
+            DropZone::Side(Side::Down) => top = (top + bottom) / 2.0,
+        }
+        let Some(brush) = self.brush(theme.split_focus) else {
+            return;
+        };
+        let rect = D2D_RECT_F {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        // The cached brush is shared, so its opacity goes straight back.
+        unsafe {
+            brush.SetOpacity(0.3);
+            self.target.FillRectangle(&rect, &brush);
+            brush.SetOpacity(1.0);
+        }
+        let color = theme.split_focus;
+        self.fill_rect(left, top, right, top + 2.0, color);
+        self.fill_rect(left, bottom - 2.0, right, bottom, color);
+        self.fill_rect(left, top, left + 2.0, bottom, color);
+        self.fill_rect(right - 2.0, top, right, bottom, color);
+    }
+
+    /// Paint each pane's title row (SPLIT-011), which is also the handle for
+    /// dragging the pane (SPLIT-017). Text never sits under it: the pane's grid
+    /// starts on the row below. Reuses the tab-bar label buffers, so the hot path
+    /// stays allocation-free (NFR-113).
     fn paint_pane_titles(&mut self, tab: &Tab, theme: &Theme) {
         let cw = self.metrics.cell_width;
         let ch = self.metrics.cell_height;
@@ -3329,35 +3378,35 @@ impl Renderer {
         let mut units = std::mem::take(&mut self.utf16);
         let mut label = std::mem::take(&mut self.label);
         let mut idx = 0usize;
+        let frames = tab.frames();
         tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
-            let is_focus = idx == focused;
-            let Some(title) = pane.title() else {
-                idx += 1;
+            let this = idx;
+            idx += 1;
+            let is_focus = this == focused;
+            let Some(frame) = frames.get(this).copied() else {
                 return;
             };
-            let pad = self.split_padding;
-            let x = self.grid_left() + rect.col as f32 * cw + pad;
-            let y = self.grid_top() + rect.row as f32 * ch + pad;
-            let w = rect.cols as f32 * cw;
-            label.clear();
-            tabbar::fit_title_into(title, (w - 2.0).max(0.0) - TAB_CHROME, cw, &mut label);
-            if label.is_empty() {
-                idx += 1;
-                return;
+            if frame.row == rect.row {
+                return; // Too short to spare a title row.
             }
-            let chip_w = label.chars().count() as f32 * cw + TAB_CHROME;
+            let pad = self.split_padding;
+            let x = self.grid_left() + frame.col as f32 * cw + pad;
+            let y = self.grid_top() + frame.row as f32 * ch + pad;
+            let w = frame.cols as f32 * cw - 2.0 * pad;
             let bg = if is_focus {
                 theme.tab_active
             } else {
                 theme.tab_bar
             };
-            self.fill_rect(
-                x + 1.0,
-                y + 1.0,
-                x + 1.0 + chip_w,
-                y + 1.0 + self.metrics.text_height,
-                bg,
-            );
+            self.fill_rect(x + 1.0, y + 1.0, x + w - 1.0, y + ch, bg);
+            label.clear();
+            if let Some(title) = pane.title() {
+                tabbar::fit_title_into(title, (w - 2.0).max(0.0) - TAB_CHROME, cw, &mut label);
+            }
+            if label.is_empty() {
+                return;
+            }
+            let chip_w = label.chars().count() as f32 * cw + TAB_CHROME;
             units.clear();
             units.extend(label.encode_utf16());
             let rect_box = D2D_RECT_F {
@@ -3384,7 +3433,6 @@ impl Renderer {
                     );
                 }
             }
-            idx += 1;
         });
         units.clear();
         self.utf16 = units;

@@ -465,11 +465,14 @@ Splits are not MVP, but are required for Ghostty-like parity.
 | SPLIT-008 | Panes shall support keyboard pane focus movement. | P1 |
 | SPLIT-009 | Panes shall support keyboard pane resize. | P2 |
 | SPLIT-010 | Pane layout shall persist when a pane closes. | P2 |
-| SPLIT-011 | Pane titles shall be visible. | P2 |
+| SPLIT-011 | Pane titles shall be visible, on a row of their own: when a tab has more than one pane, each pane's top row holds its title and its text starts on the row below. A pane too short to spare a row shows no title. | P2 |
 | SPLIT-012 | Pane titles shall update from shell OSC title. | P2 |
 | SPLIT-013 | Pane titles shall update from shell integration working directory. | P2 |
 | SPLIT-014 | Split layout shall be themeable. | P2 |
 | SPLIT-015 | Pane borders shall be themeable. | P2 |
+| SPLIT-016 | A new pane shall be able to open on any side of the focused pane: right, below, left or above. | P2 |
+| SPLIT-017 | A pane shall be movable. Dragging its title row onto another pane swaps the two when dropped on the middle, and puts it on that side when dropped near an edge, with the landing area highlighted first. A plain click only focuses the pane, and Escape cancels the drag. "Move Pane" commands swap with the neighbour on that side, or with none, give the pane that whole edge of the tab. The moved pane keeps its shell, its id and the keyboard. | P2 |
+| SPLIT-018 | Resizing shall keep text on its row. Losing rows takes blank rows from the bottom and scrolls only as far as the cursor needs; gaining rows adds blank rows at the bottom. Text cut off by a narrower pane shall come back when it widens, unless the line has been written to since. | P1 |
 
 ---
 
@@ -777,6 +780,7 @@ The product must support common terminal/TUI applications.
 | THEME-013 | Themes shall be validated on load. | P0 |
 | THEME-014 | Invalid theme colors shall fall back safely. | P0 |
 | THEME-015 | Themes shall support 256-color palette remapping. | P1 |
+| THEME-016 | Switching theme shall change text already written, on screen and in the history, in every pane: colors from the old theme's palette, its default text and background, and the welcome banner become the new theme's. Colors a program chose exactly stay. | P1 |
 | SKIN-001 | RusTTY shall offer paired `copper-dark` and `copper-light` native skins with charcoal/warm-paper surfaces and restrained copper focus accents. Existing themes and explicit profile overrides remain selectable. | P1 |
 | SKIN-002 | UI foreground, secondary text, accent and separator colors shall be independently overrideable from terminal foreground/cursor/ANSI colors using `ui-foreground`, `ui-muted`, `ui-accent` and `ui-border`. Omitted keys shall derive compatible colors from the selected theme. | P1 |
 | SKIN-003 | Tabs, palette, search, bookmark and pane-title chrome shall use shared semantic UI colors. Active tabs and selected palette/bookmark rows shall have a visible positional indicator as well as a changed background. The `+` button follows the last tab, and tab titles use the Windows UI font. | P1 |
@@ -2541,7 +2545,7 @@ Goals:
 Requirements:
 
 ```text
-SPLIT-001..SPLIT-015
+SPLIT-001..SPLIT-018
 SEARCH-001..SEARCH-015
 THEME-007..THEME-014
 KEY-022..KEY-025

@@ -510,6 +510,17 @@ impl Parser {
         self.cursor_col = self.cursor_col.min(cols - 1);
     }
 
+    /// Change the pen and the saved cursor's pen for a new theme, so the rest of a
+    /// colored line arrives in the new color (THEME-016).
+    pub fn recolor(&mut self, map: &[(Color, Color)]) {
+        self.pen_fg = crate::grid::recolored(self.pen_fg, map);
+        self.pen_bg = crate::grid::recolored(self.pen_bg, map);
+        if let Some(saved) = &mut self.saved {
+            saved.fg = crate::grid::recolored(saved.fg, map);
+            saved.bg = crate::grid::recolored(saved.bg, map);
+        }
+    }
+
     /// Full terminal reset (`ESC c`): state back to power-on defaults.
     pub fn reset(&mut self) {
         let palette = self.palette;

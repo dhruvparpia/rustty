@@ -10,7 +10,7 @@
 
 use crate::color::Color;
 use crate::shell::{ShellError, SpawnOptions};
-use crate::split::{Dir, Rect, Side};
+use crate::split::{Dir, DropZone, Rect, Side};
 use crate::tab::Tab;
 
 /// Outcome of [`App::close_tab_pane`] (SPLIT-004/006 shell-death cascade):
@@ -162,6 +162,17 @@ impl App {
     pub fn set_palette(&mut self, palette: [Color; 16]) {
         self.palette = palette;
         self.apply_palette();
+    }
+
+    /// Change colors already written in every pane, for a new theme (THEME-016).
+    /// When nothing changes, as between tabs sharing a theme, no line is touched.
+    pub fn recolor(&mut self, map: &[(Color, Color)]) {
+        if map.iter().all(|(from, to)| from == to) {
+            return;
+        }
+        for tab in &mut self.tabs {
+            tab.for_each_pane(|pane, _| pane.recolor(map));
+        }
     }
 
     /// Push the current palette to every pane. Panes are few, and this only
@@ -370,6 +381,33 @@ impl App {
         self.apply_palette();
         self.sync_tab_titles();
         Some(idx)
+    }
+
+    /// Split the focused pane of the active tab with the new pane on `side`
+    /// (SPLIT-016). The new pane is focused and returns its flatten index; the
+    /// caller spawns its shell.
+    pub fn split_active_side(&mut self, side: Side) -> Option<usize> {
+        let tab = self.active_tab_mut()?;
+        let idx = tab.split_active_side(side)?;
+        self.apply_palette();
+        self.sync_tab_titles();
+        Some(idx)
+    }
+
+    /// Move the focused pane of the active tab toward `side` (SPLIT-017).
+    pub fn move_active_pane(&mut self, side: Side) -> bool {
+        self.active_tab_mut().is_some_and(|t| t.move_active(side))
+    }
+
+    /// Drop one pane of the active tab onto another (SPLIT-017).
+    pub fn move_pane(&mut self, moved: u64, target: u64, zone: DropZone) -> bool {
+        let done = self
+            .active_tab_mut()
+            .is_some_and(|t| t.move_pane(moved, target, zone));
+        if done {
+            self.sync_tab_titles();
+        }
+        done
     }
 
     /// Close the focused pane of the active tab (SPLIT-006). `true` when it
@@ -724,7 +762,7 @@ mod tests {
             tab.for_each_pane_ref(|pane, _| out.push((pane.grid().cols, pane.grid().rows)));
             out
         });
-        assert_eq!(sizes, Some(vec![(60, 30), (60, 30)]));
+        assert_eq!(sizes, Some(vec![(60, 29), (60, 29)]));
     }
 
     #[test]
@@ -807,6 +845,38 @@ mod tests {
         app.focus_pane(0);
         app.feed_active(b"x");
         assert!(app.take_dirty(), "an unfocused pane's output repaints");
+    }
+
+    #[test]
+    fn a_recolor_reaches_every_tab_and_pane() {
+        let (old, new) = (Color::rgb(1, 1, 1), Color::rgb(2, 2, 2));
+        let mut palette = [Color::rgb(9, 9, 9); 16];
+        palette[1] = old;
+        let mut app = App::new();
+        app.set_palette(palette);
+        app.feed_active(b"\x1b[31mfirst");
+        app.add_tab();
+        assert!(app.split_active(Dir::Vertical).is_some());
+        app.feed_active(b"\x1b[31msplit");
+        app.recolor(&[(old, new)]);
+        let first = app
+            .tab_at_mut(0)
+            .map(|t| t.pane().grid().row(0).unwrap().cells[0].fg);
+        assert_eq!(first, Some(Some(new)));
+        let split = app
+            .active_tab()
+            .map(|t| t.pane().grid().row(0).unwrap().cells[0].fg);
+        assert_eq!(split, Some(Some(new)));
+    }
+
+    #[test]
+    fn recoloring_to_the_same_colors_marks_nothing_to_repaint() {
+        // Switching between tabs that share a theme must not walk every line.
+        let same = Color::rgb(1, 1, 1);
+        let mut app = App::new();
+        let _ = app.take_dirty();
+        app.recolor(&[(same, same)]);
+        assert!(!app.take_dirty());
     }
 
     #[test]

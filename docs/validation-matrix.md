@@ -139,6 +139,7 @@ One real run: Claude Code 2.1.319 as boss in a scratch Git repository, launched 
 |---|---|
 | `Ctrl+Shift+Enter` | Splits right. Failed before the fix |
 | `Ctrl+Shift+-` | Splits below |
+| Dragging a pane's title, posted as mouse messages | Middle swaps, edge docks, click only focuses, Escape cancels. Not yet tried with a physical mouse |
 | `rustty <folder>` with a saved session | Saved tab kept, folder's tab in front. Failed before the fix |
 | Every other shortcut through this path | Not run. Most built-in shortcuts have never been pressed as keys by a test |
 | A person's real keyboard | Not run |

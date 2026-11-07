@@ -20,7 +20,9 @@ use std::rc::Rc;
 use crate::color::Color;
 use crate::pane::Pane;
 use crate::shell::{ShellError, ShellState, SpawnOptions};
-use crate::split::{DEFAULT_RATIO, Dir, PaneTree, RATIO_STEP, Rect, Side, neighbor};
+use crate::split::{
+    DEFAULT_RATIO, Dir, DropZone, PaneTree, RATIO_STEP, Rect, Side, content_box, neighbor,
+};
 
 /// A terminal tab: a pane tree, the focused leaf, and the tab-bar title.
 #[derive(Debug)]
@@ -33,7 +35,10 @@ pub struct Tab {
     panes: Vec<Rc<RefCell<Pane>>>,
     /// Focused leaf (SPLIT-005: a new split focuses the new pane).
     active: Rc<RefCell<Pane>>,
-    /// Cached layout of `tree` at `cols` x `rows`, in flatten order.
+    /// Each pane's whole box at `cols` x `rows`, in flatten order, its title row
+    /// included. The boxes tile the tab.
+    frames: Vec<Rect>,
+    /// The part of each frame the pane's text uses, in flatten order.
     layout: Vec<Rect>,
     cols: usize,
     rows: usize,
@@ -62,12 +67,14 @@ impl Tab {
         let pane = Rc::new(RefCell::new(Pane::with_size(cols, rows, scrollback)));
         let tree = PaneTree::new(Rc::clone(&pane));
         let panes = tree.flatten();
-        let layout = tree.layout(cols, rows);
+        let frames = tree.layout(cols, rows);
+        let layout = frames.clone();
         Self {
             id: crate::automation::next_id(),
             tree,
             panes,
             active: pane,
+            frames,
             layout,
             cols,
             rows,
@@ -270,10 +277,26 @@ impl Tab {
             .and_then(|i| self.layout.get(i).copied())
     }
 
-    /// The cached layout, in flatten order (renderer, hit-test).
+    /// The box each pane's text fills, in flatten order (renderer, hit-test).
     #[must_use]
     pub fn layout(&self) -> &[Rect] {
         &self.layout
+    }
+
+    /// Each pane's whole box, title row included, in flatten order. These tile the
+    /// tab, so borders and neighbours are worked out from them.
+    #[must_use]
+    pub fn frames(&self) -> &[Rect] {
+        &self.frames
+    }
+
+    /// Flatten index of the pane whose title row holds the cell `(col, row)`.
+    #[must_use]
+    pub fn header_at(&self, col: usize, row: usize) -> Option<usize> {
+        self.frames
+            .iter()
+            .zip(&self.layout)
+            .position(|(frame, text)| frame.contains(col, row) && !text.contains(col, row))
     }
 
     // ---- split operations (SPEC §9/§10) --------------------------------
@@ -297,6 +320,87 @@ impl Tab {
         // SPLIT-005: both halves take their new boxes right away.
         let _ = self.apply_layout();
         self.focused_index()
+    }
+
+    /// Split the focused pane with the new pane on `side` (SPLIT-016). The new
+    /// pane is focused and sized to its box; the caller spawns its shell.
+    pub fn split_active_side(&mut self, side: Side) -> Option<usize> {
+        let fresh = Rc::new(RefCell::new(Pane::with_size(1, 1, self.scrollback)));
+        if !self
+            .tree
+            .split_side(&self.active, side, DEFAULT_RATIO, Rc::clone(&fresh))
+        {
+            return None;
+        }
+        self.active = fresh;
+        self.relayout();
+        let _ = self.apply_layout();
+        self.focused_index()
+    }
+
+    /// Move the focused pane toward `side` (SPLIT-017): it trades places with the
+    /// neighbour there, or with none, takes that whole edge of the tab. `false`
+    /// when it already has that edge to itself.
+    pub fn move_active(&mut self, side: Side) -> bool {
+        let Some(idx) = self.focused_index() else {
+            return false;
+        };
+        let active = Rc::clone(&self.active);
+        let moved = match neighbor(&self.frames, idx, side) {
+            Some(other) => {
+                let other = Rc::clone(&self.panes[other]);
+                self.tree.swap(&active, &other)
+            }
+            None if self.owns_edge(idx, side) => false,
+            None => self.tree.dock(&active, side),
+        };
+        if moved {
+            self.after_move();
+        }
+        moved
+    }
+
+    /// Drop the pane with id `moved` onto the pane with id `target` (SPLIT-017).
+    /// The moved pane is focused. `false`, changing nothing, unless they are two
+    /// different panes of this tab.
+    pub fn move_pane(&mut self, moved: u64, target: u64, zone: DropZone) -> bool {
+        let (Some(from), Some(to)) = (self.pane_index_of(moved), self.pane_index_of(target)) else {
+            return false;
+        };
+        let (from, to) = (Rc::clone(&self.panes[from]), Rc::clone(&self.panes[to]));
+        let done = match zone {
+            DropZone::Swap => self.tree.swap(&from, &to),
+            DropZone::Side(side) => self.tree.move_beside(&from, &to, side),
+        };
+        if done {
+            self.active = from;
+            self.after_move();
+        }
+        done
+    }
+
+    /// Whether pane `idx` already spans the whole of `side` of the tab.
+    fn owns_edge(&self, idx: usize, side: Side) -> bool {
+        let Some(f) = self.frames.get(idx) else {
+            return true;
+        };
+        match side {
+            Side::Left => f.col == 0 && f.rows == self.rows,
+            Side::Right => f.col + f.cols == self.cols && f.rows == self.rows,
+            Side::Up => f.row == 0 && f.cols == self.cols,
+            Side::Down => f.row + f.rows == self.rows && f.cols == self.cols,
+        }
+    }
+
+    /// Give every pane its new box. Panes can trade places without changing size,
+    /// so each is also marked for repainting.
+    fn after_move(&mut self) {
+        self.relayout();
+        let _ = self.apply_layout();
+        self.for_each_pane(|pane, _| {
+            pane.grid_mut().mark_all_dirty();
+            pane.mark_dirty();
+        });
     }
 
     /// Split the pane at flatten index `idx` and leave focus where it is:
@@ -361,7 +465,7 @@ impl Tab {
     /// pane focus). `false` when there is no touching neighbour.
     pub fn focus_neighbor(&mut self, side: Side) -> bool {
         let idx = self.focused_index();
-        match idx.and_then(|i| neighbor(&self.layout, i, side)) {
+        match idx.and_then(|i| neighbor(&self.frames, i, side)) {
             Some(target) => self.focus_index(target),
             None => false,
         }
@@ -414,7 +518,11 @@ impl Tab {
     /// Recompute the cached panes and layout from the tree.
     fn relayout(&mut self) {
         self.panes = self.tree.flatten();
-        self.layout = self.tree.layout(self.cols, self.rows);
+        self.frames = self.tree.layout(self.cols, self.rows);
+        let panes = self.panes.len();
+        self.layout.clear();
+        self.layout
+            .extend(self.frames.iter().map(|frame| content_box(*frame, panes)));
     }
 
     /// Resize every pane to its layout box; panes already at their box are
@@ -471,12 +579,17 @@ impl Tab {
             Rc::new(RefCell::new(Pane::with_size(cols, rows, scrollback)))
         });
         let panes = tree.flatten();
-        let layout = tree.layout(cols, rows);
+        let frames = tree.layout(cols, rows);
+        let layout = frames
+            .iter()
+            .map(|frame| content_box(*frame, panes.len()))
+            .collect();
         Self {
             id: crate::automation::next_id(),
             active: panes[0].clone(), // from_shape always leaves at least one leaf
             tree,
             panes,
+            frames,
             layout,
             cols,
             rows,
@@ -553,6 +666,7 @@ impl Default for Tab {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::split::DropZone;
 
     #[test]
     fn ids_survive_split_resize_and_closing_a_neighbour() {
@@ -646,9 +760,9 @@ mod tests {
         assert_eq!(idx, 1);
         assert_eq!(tab.pane_count(), 2);
         assert_eq!(tab.focused_index(), Some(1), "SPLIT-005: new pane focused");
-        assert_eq!((tab.pane().grid().cols, tab.pane().grid().rows), (40, 24));
+        assert_eq!((tab.pane().grid().cols, tab.pane().grid().rows), (40, 23));
         let left = tab.pane_at(0).expect("left pane");
-        assert_eq!((left.grid().cols, left.grid().rows), (40, 24));
+        assert_eq!((left.grid().cols, left.grid().rows), (40, 23));
     }
 
     #[test]
@@ -656,8 +770,8 @@ mod tests {
         let mut tab = Tab::with_size(80, 24, 1000);
         tab.split_active(Dir::Horizontal).expect("split");
         let top = tab.pane_at(0).expect("top pane");
-        assert_eq!((top.grid().cols, top.grid().rows), (80, 12));
-        assert_eq!((tab.pane().grid().cols, tab.pane().grid().rows), (80, 12));
+        assert_eq!((top.grid().cols, top.grid().rows), (80, 11));
+        assert_eq!((tab.pane().grid().cols, tab.pane().grid().rows), (80, 11));
     }
 
     #[test]
@@ -702,6 +816,149 @@ mod tests {
     }
 
     #[test]
+    fn split_panes_keep_a_title_row_above_their_text() {
+        // Break caught: the title was drawn over row 0, hiding the first line of
+        // every pane, so `Windows PowerShell` vanished from a new split.
+        let mut tab = Tab::with_size(80, 24, 100);
+        let whole = Rect {
+            col: 0,
+            row: 0,
+            cols: 80,
+            rows: 24,
+        };
+        assert_eq!(tab.layout(), &[whole], "one pane has no title row");
+        assert_eq!(tab.header_at(3, 0), None);
+        tab.split_active(Dir::Vertical).expect("split");
+        assert_eq!(tab.frames()[0], Rect { cols: 40, ..whole });
+        assert_eq!(
+            tab.layout()[0],
+            Rect {
+                row: 1,
+                cols: 40,
+                rows: 23,
+                ..whole
+            }
+        );
+        assert_eq!(
+            tab.pane().grid().rows,
+            23,
+            "the shell is told the real size"
+        );
+        assert_eq!(tab.header_at(3, 0), Some(0));
+        assert_eq!(tab.header_at(50, 0), Some(1));
+        assert_eq!(tab.header_at(3, 1), None, "row 1 is text");
+        tab.close_pane(1);
+        assert_eq!(tab.layout(), &[whole], "the row goes when the split does");
+        assert_eq!(tab.pane().grid().rows, 24);
+    }
+
+    #[test]
+    fn panes_above_and_below_are_still_neighbours() {
+        // The title row must not open a gap in keyboard focus movement.
+        let mut tab = Tab::with_size(80, 24, 100);
+        tab.split_active(Dir::Horizontal).expect("split");
+        assert_eq!(tab.focused_index(), Some(1));
+        assert!(tab.focus_neighbor(Side::Up));
+        assert_eq!(tab.focused_index(), Some(0));
+        assert!(tab.focus_neighbor(Side::Down));
+        assert_eq!(tab.focused_index(), Some(1));
+    }
+
+    #[test]
+    fn split_toward_a_side_focuses_the_new_pane_there() {
+        let mut tab = Tab::with_size(80, 24, 100);
+        let old = tab.pane().id();
+        assert_eq!(tab.split_active_side(Side::Left), Some(0));
+        assert_ne!(tab.pane().id(), old);
+        assert_eq!(tab.pane_index_of(old), Some(1));
+    }
+
+    #[test]
+    fn moving_toward_a_neighbour_swaps_with_it_and_keeps_focus() {
+        let mut tab = Tab::with_size(80, 24, 100);
+        let left = tab.pane().id();
+        tab.split_active(Dir::Vertical).expect("split");
+        let right = tab.pane().id();
+        assert!(tab.move_active(Side::Left));
+        assert_eq!(tab.pane_index_of(right), Some(0));
+        assert_eq!(tab.pane_index_of(left), Some(1));
+        assert_eq!(tab.pane().id(), right, "the moved pane keeps the keyboard");
+    }
+
+    #[test]
+    fn moving_with_no_neighbour_takes_that_whole_edge() {
+        // Side by side, then up: the only way from a row of panes to a stack.
+        let mut tab = Tab::with_size(80, 24, 100);
+        tab.split_active(Dir::Vertical).expect("split");
+        let right = tab.pane().id();
+        assert!(tab.move_active(Side::Up));
+        assert_eq!(tab.pane_index_of(right), Some(0));
+        assert_eq!(tab.frames()[0].cols, 80, "across the whole tab");
+        assert_eq!(tab.pane().grid().cols, 80);
+        assert_eq!(tab.pane().grid().rows, 11);
+    }
+
+    #[test]
+    fn moving_at_the_edge_it_already_owns_does_nothing() {
+        let mut tab = Tab::with_size(80, 24, 100);
+        tab.split_active(Dir::Vertical).expect("split");
+        let before = tab.frames().to_vec();
+        assert!(!tab.move_active(Side::Right));
+        assert_eq!(tab.frames(), before.as_slice());
+    }
+
+    #[test]
+    fn a_lone_pane_has_nowhere_to_move() {
+        let mut tab = Tab::with_size(80, 24, 100);
+        assert!(!tab.move_active(Side::Left));
+    }
+
+    #[test]
+    fn dropping_a_pane_moves_it_and_focuses_it() {
+        let mut tab = Tab::with_size(90, 24, 100);
+        let a = tab.pane().id();
+        tab.split_active(Dir::Vertical).expect("split");
+        let b = tab.pane().id();
+        tab.split_active(Dir::Horizontal).expect("split");
+        let c = tab.pane().id();
+        // Drop a below c.
+        assert!(tab.move_pane(a, c, DropZone::Side(Side::Down)));
+        assert_eq!(tab.pane().id(), a);
+        assert_eq!(tab.pane_index_of(b), Some(0));
+        assert_eq!(tab.pane_index_of(c), Some(1));
+        assert_eq!(tab.pane_index_of(a), Some(2));
+        assert_eq!(tab.frames()[0].cols, 90, "b has the top row to itself");
+        // Drop b on the middle of a: they trade places.
+        assert!(tab.move_pane(b, a, DropZone::Swap));
+        assert_eq!(tab.pane_index_of(a), Some(0));
+        assert_eq!(tab.pane_index_of(b), Some(2));
+    }
+
+    #[test]
+    fn dropping_on_itself_or_an_unknown_pane_changes_nothing() {
+        let mut tab = Tab::with_size(80, 24, 100);
+        let a = tab.pane().id();
+        tab.split_active(Dir::Vertical).expect("split");
+        assert!(!tab.move_pane(a, a, DropZone::Swap));
+        assert!(!tab.move_pane(a, u64::MAX, DropZone::Swap));
+        assert!(!tab.move_pane(u64::MAX, a, DropZone::Swap));
+        assert_eq!(tab.pane_count(), 2);
+    }
+
+    #[test]
+    fn a_swap_of_equal_panes_still_repaints() {
+        // Break caught: equal boxes mean no resize, so nothing told the renderer
+        // the panes had changed places and the old pictures stayed up.
+        let mut tab = Tab::with_size(80, 24, 100);
+        tab.split_active(Dir::Vertical).expect("split");
+        tab.for_each_pane(|pane, _| {
+            let _ = pane.grid_mut().take_dirty_rows();
+        });
+        assert!(tab.move_active(Side::Left));
+        tab.for_each_pane(|pane, _| assert!(pane.grid().all_dirty()));
+    }
+
+    #[test]
     fn adjust_ratio_resizes_the_focused_pane() {
         let mut tab = Tab::with_size(80, 24, 1000);
         tab.split_active(Dir::Vertical).expect("split");
@@ -721,8 +978,8 @@ mod tests {
         let _ = tab.resize(100, 30);
         assert_eq!(tab.layout()[0].cols, 50, "SPLIT-010: ratio kept");
         let left = tab.pane_at(0).expect("left pane");
-        assert_eq!((left.grid().cols, left.grid().rows), (50, 30));
-        assert_eq!((tab.pane().grid().cols, tab.pane().grid().rows), (50, 30));
+        assert_eq!((left.grid().cols, left.grid().rows), (50, 29));
+        assert_eq!((tab.pane().grid().cols, tab.pane().grid().rows), (50, 29));
     }
 
     #[test]
@@ -731,7 +988,7 @@ mod tests {
         tab.split_active(Dir::Horizontal).expect("split");
         let mut boxes = Vec::new();
         tab.for_each_pane(|_, rect| boxes.push((rect.col, rect.row, rect.rows)));
-        assert_eq!(boxes, vec![(0, 0, 10), (0, 10, 10)]);
+        assert_eq!(boxes, vec![(0, 1, 9), (0, 11, 9)]);
     }
 
     #[test]

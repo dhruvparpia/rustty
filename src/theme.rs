@@ -130,7 +130,9 @@ impl Theme {
                 Color::from_hex(0x268BD2),
                 Color::from_hex(0xD33682),
                 Color::from_hex(0x2AA198),
-                Color::from_hex(0xEEE8D5),
+                // Solarized's own white and bright white are this theme's background
+                // tones, and shells type in them. These are its readable grays.
+                Color::from_hex(0x657B83),
                 Color::from_hex(0x002B36),
                 Color::from_hex(0xCB4B16),
                 Color::from_hex(0x859900),
@@ -138,7 +140,7 @@ impl Theme {
                 Color::from_hex(0x268BD2),
                 Color::from_hex(0xD33682),
                 Color::from_hex(0x2AA198),
-                Color::from_hex(0xFDF6E3),
+                Color::from_hex(0x586E75),
             ],
         }
     }
@@ -375,11 +377,26 @@ impl Theme {
                 border: Some(Color::from_hex(0xB9B1A6)),
             },
             palette: [
-                0x292D32, 0xA53236, 0x3E652C, 0x785817, 0x245E91, 0x754589, 0x1D6867, 0xD2CCC3,
-                0x69635C, 0xAF3539, 0x426D30, 0x805C14, 0x28679E, 0x814A94, 0x207171, 0xFFFCF8,
+                // White and bright white are dark here: shells type in them, and on a
+                // light background the usual pale values cannot be read.
+                0x292D32, 0xA53236, 0x3E652C, 0x785817, 0x245E91, 0x754589, 0x1D6867, 0x5F5A53,
+                0x69635C, 0xAF3539, 0x426D30, 0x805C14, 0x28679E, 0x814A94, 0x207171, 0x292D32,
             ]
             .map(Color::from_hex),
         }
+    }
+
+    /// What each color written under this theme becomes under `new` (THEME-016).
+    /// The theme's own text and background come first, so they win when a palette
+    /// entry happens to share their color.
+    #[must_use]
+    pub fn recolor_map(&self, new: &Self) -> Vec<(Color, Color)> {
+        let mut map = vec![
+            (self.foreground, new.foreground),
+            (self.background, new.background),
+        ];
+        map.extend(self.palette.iter().copied().zip(new.palette));
+        map
     }
 
     /// Resolve UI colors without changing the terminal's ANSI palette or cursor.
@@ -719,6 +736,32 @@ mod tests {
 
     fn table(text: &str) -> ThemeFile {
         toml::from_str(text).unwrap_or_else(|e| panic!("bad theme table: {e}"))
+    }
+
+    #[test]
+    fn white_text_stays_readable_on_light_themes() {
+        // Break caught: PowerShell types in bright white, which Solarized Light drew
+        // in its own background color, so what you typed disappeared.
+        for theme in [Theme::solarized_light(), Theme::copper_light()] {
+            for ansi in [7, 15] {
+                let ratio = contrast(theme.palette[ansi], theme.background);
+                assert!(ratio >= 3.0, "{} {ansi}: {ratio:.2}", theme.name);
+            }
+        }
+    }
+
+    #[test]
+    fn a_recolor_map_covers_the_palette_and_the_default_colors() {
+        let (old, new) = (Theme::copper_dark(), Theme::solarized_light());
+        let map = old.recolor_map(&new);
+        for ansi in 0..16 {
+            assert!(
+                map.contains(&(old.palette[ansi], new.palette[ansi])),
+                "{ansi}"
+            );
+        }
+        assert_eq!(map[0], (old.foreground, new.foreground));
+        assert_eq!(map[1], (old.background, new.background));
     }
 
     fn contrast(a: Color, b: Color) -> f64 {

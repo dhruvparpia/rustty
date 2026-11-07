@@ -4,12 +4,17 @@ All notable changes to `rusttyterm` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] - unreleased feature work
+## [0.7.0] - 2026-11-07
 
 Everything built on top of 0.6.0: the sessions sidebar, restart safety, worktrees, automation, per-project secrets, King Crab and skinned dialogs.
 
 ### Added
 
+- Movable panes: drag a pane by its title onto another pane. The middle swaps them and an edge puts
+  it on that side, with the landing area highlighted first; Escape cancels. "Move Pane Left", "Right",
+  "Up" and "Down" do the same from the View menu and the palette, and can be bound to keys.
+- "Split Left" and "Split Above" join "Split Right" and "Split Below", so a new pane can open on any
+  side.
 - Local automation API (AUTO-001..015): `rustty ctl <verb>` and `rustty mcp` control a running
   window over a per-window pipe, so a script or a coding agent can start sessions, read their
   output, type into them and see whether they need attention. Reading needs
@@ -74,6 +79,17 @@ Everything built on top of 0.6.0: the sessions sidebar, restart safety, worktree
 
 ### Fixed
 
+- Switching theme now changes text already on screen, in every tab and in the history, including
+  the welcome banner. It used to keep the old theme's colors, so dark-theme text was close to
+  invisible on a light theme. Colors a program chose exactly stay as they are.
+- White and bright white are now readable in Solarized Light and Copper Light. PowerShell types in
+  bright white, which was close to the background on both, so what you typed nearly disappeared.
+- Resizing a window or pane no longer garbles its text. Losing a row scrolled the text up here while
+  the console repainted it on its old row, so lines appeared twice and the cursor sat on the wrong one.
+- Text cut off by a narrower pane comes back when it widens, including the welcome banner and
+  scrollback.
+- A split pane's title no longer covers its first line of text. Panes that share a tab now give their
+  top row to the title, so they are one row shorter.
 - A normal launch no longer crashes. After a GUI launch released its console, printing any
   diagnostic could panic, or land in whatever now held that handle number. A portable install
   hit this on every start through the jump list error.
@@ -83,9 +99,8 @@ Everything built on top of 0.6.0: the sessions sidebar, restart safety, worktree
   it up, which stretched the gaps between words.
 - Block characters and Powerline separators are drawn as geometry, so rows and prompt
   segments join with no gaps at any line height.
-- Theme palettes now colour ANSI output, so each theme shows its own 16 colors. Text
-  already on screen keeps its colors after a theme switch, and a session host's snapshot
-  of existing text uses the default palette.
+- Theme palettes now colour ANSI output, so each theme shows its own 16 colors. A session
+  host's snapshot of existing text uses the default palette.
 
 ## [0.6.0] - never released; its changes ship in 0.7.0
 
