@@ -144,6 +144,10 @@ pub struct Line {
     pub cells: Vec<Cell>,
     /// Damage flag, cleared by [`Grid::take_dirty_rows`]
     pub is_dirty: bool,
+    /// Cells a narrower window cut off the end, restored when it widens. ConPTY
+    /// repaints what a shell wrote, but not the welcome banner or scrollback, so
+    /// without this they would stay cut. A write to the line forgets them.
+    clipped: Option<Box<[Cell]>>,
 }
 
 impl Line {
@@ -152,6 +156,28 @@ impl Line {
         Self {
             cells: vec![Cell::blank(); cols],
             is_dirty: false,
+            clipped: None,
+        }
+    }
+
+    /// Make the line `cols` wide, keeping what falls off the end to restore later.
+    fn fit_width(&mut self, cols: usize) {
+        let len = self.cells.len();
+        if cols < len {
+            let mut cut = self.cells.split_off(cols);
+            if self.clipped.is_some() || cut.iter().any(|cell| *cell != Cell::blank()) {
+                cut.extend(self.clipped.take().map_or(Vec::new(), <[Cell]>::into_vec));
+                self.clipped = Some(cut.into_boxed_slice());
+            }
+        } else if cols > len {
+            if let Some(cut) = self.clipped.take() {
+                let mut back = cut.into_vec();
+                if back.len() > cols - len {
+                    self.clipped = Some(back.split_off(cols - len).into_boxed_slice());
+                }
+                self.cells.append(&mut back);
+            }
+            self.cells.resize(cols, Cell::blank());
         }
     }
 }
@@ -356,6 +382,7 @@ impl Grid {
             self.append_line(Line::blank(self.cols));
         }
         let slot = self.slot(virtual_index);
+        self.lines[slot].clipped = None;
         let Some(dest) = self.lines[slot].cells.get_mut(col) else {
             return;
         };
@@ -594,6 +621,7 @@ impl Grid {
             return None;
         }
         let slot = self.slot(v);
+        self.lines[slot].clipped = None;
         self.lines[slot].cells.get_mut(col)
     }
 
@@ -630,6 +658,7 @@ impl Grid {
         }
         let slot = self.slot(virtual_index);
         self.lines[slot].is_dirty = true;
+        self.lines[slot].clipped = None;
         Some(&mut self.lines[slot])
     }
 
@@ -662,9 +691,7 @@ impl Grid {
         // shorter cell vector than `self.cols`, and column-indexed writes
         // then run out of bounds.
         lines.extend(content.into_iter().skip(start).map(|mut line| {
-            let mut cells = std::mem::take(&mut line.cells);
-            cells.resize(cols, Cell::blank());
-            line.cells = cells;
+            line.fit_width(cols);
             line.is_dirty = true;
             line
         }));
@@ -1125,6 +1152,113 @@ mod tests {
             per_resize < std::time::Duration::from_millis(10),
             "resize took {per_resize:?}"
         );
+    }
+
+    /// A grid holding text no shell knows about, as the welcome banner is.
+    fn clipped_grid() -> Grid {
+        let mut grid = Grid::with_size(20, 4, 10);
+        grid.write_line(0, make_line("abcdefghijklmnopqrst", 20));
+        grid
+    }
+
+    #[test]
+    fn narrowing_and_widening_brings_the_text_back() {
+        // Break caught: a split or a smaller window deleted the end of every line
+        // ConPTY does not repaint, so the welcome banner stayed cut for good.
+        let mut grid = clipped_grid();
+        grid.resize(8, 4);
+        assert_eq!(row_text(&grid, 0), "abcdefgh");
+        grid.resize(20, 4);
+        assert_eq!(row_text(&grid, 0), "abcdefghijklmnopqrst");
+    }
+
+    #[test]
+    fn repeated_narrowing_keeps_every_cut_in_order() {
+        let mut grid = clipped_grid();
+        grid.resize(12, 4);
+        grid.resize(5, 4);
+        grid.resize(9, 4);
+        assert_eq!(row_text(&grid, 0), "abcdefghi");
+        assert_eq!(grid.row(0).unwrap().cells.len(), 9);
+        grid.resize(30, 4);
+        assert_eq!(row_text(&grid, 0), "abcdefghijklmnopqrst");
+        assert_eq!(grid.row(0).unwrap().cells.len(), 30);
+    }
+
+    #[test]
+    fn a_colored_blank_past_the_edge_comes_back_too() {
+        // The banner's key chips have a background and no text.
+        let mut grid = Grid::with_size(10, 2, 0);
+        let chip = Cell {
+            bg: Some(Color::rgb(1, 2, 3)),
+            ..Cell::blank()
+        };
+        grid.write_cell(0, 9, chip.clone());
+        grid.resize(4, 2);
+        grid.resize(10, 2);
+        assert_eq!(grid.row(0).unwrap().cells[9], chip);
+    }
+
+    #[test]
+    fn writing_to_a_line_forgets_what_was_cut_from_it() {
+        // Break caught: old text reappearing beside what a program wrote since.
+        let mut grid = clipped_grid();
+        grid.resize(8, 4);
+        grid.write_cell(0, 0, Cell::blank());
+        grid.resize(20, 4);
+        assert_eq!(row_text(&grid, 0), " bcdefgh");
+    }
+
+    #[test]
+    fn editing_a_line_in_place_forgets_what_was_cut_from_it() {
+        // Erase-to-end-of-line and insert/delete reach the line through this.
+        let mut grid = clipped_grid();
+        grid.resize(8, 4);
+        grid.live_row_mut(0).unwrap().cells[0] = Cell::blank();
+        grid.resize(20, 4);
+        assert_eq!(row_text(&grid, 0), " bcdefgh");
+    }
+
+    #[test]
+    fn a_live_cell_write_forgets_what_was_cut_from_it() {
+        let mut grid = clipped_grid();
+        grid.resize(8, 4);
+        *grid.live_cell_mut(0, 0).unwrap() = Cell::blank();
+        grid.resize(20, 4);
+        assert_eq!(row_text(&grid, 0), " bcdefgh");
+    }
+
+    #[test]
+    fn erasing_a_line_forgets_what_was_cut_from_it() {
+        let mut grid = clipped_grid();
+        grid.resize(8, 4);
+        grid.erase_rows(0, 0);
+        grid.resize(20, 4);
+        assert_eq!(row_text(&grid, 0), "");
+    }
+
+    #[test]
+    fn repainting_chrome_keeps_what_was_cut() {
+        // The crab animates through this path after the pane has been narrowed.
+        let mut grid = clipped_grid();
+        let abs = grid.abs_of_view(0).unwrap();
+        grid.resize(8, 4);
+        grid.cell_abs_mut(abs, 0).unwrap().char = 'Z';
+        grid.resize(20, 4);
+        assert_eq!(row_text(&grid, 0), "Zbcdefghijklmnopqrst");
+    }
+
+    #[test]
+    fn scrollback_comes_back_when_widened() {
+        let mut grid = Grid::with_size(20, 2, 10);
+        grid.append_line(make_line("abcdefghijklmnopqrst", 20));
+        grid.append_line(make_line("two", 20));
+        grid.append_line(make_line("three", 20));
+        let abs = grid.evicted + grid.total - 3;
+        grid.resize(8, 2);
+        assert_eq!(grid.line_text_abs(abs).unwrap(), "abcdefgh");
+        grid.resize(20, 2);
+        assert_eq!(grid.line_text_abs(abs).unwrap(), "abcdefghijklmnopqrst");
     }
 
     #[test]
