@@ -10,7 +10,7 @@
 
 use crate::color::Color;
 use crate::shell::{ShellError, SpawnOptions};
-use crate::split::{Dir, Rect, Side};
+use crate::split::{Dir, DropZone, Rect, Side};
 use crate::tab::Tab;
 
 /// Outcome of [`App::close_tab_pane`] (SPLIT-004/006 shell-death cascade):
@@ -372,6 +372,33 @@ impl App {
         Some(idx)
     }
 
+    /// Split the focused pane of the active tab with the new pane on `side`
+    /// (SPLIT-016). The new pane is focused and returns its flatten index; the
+    /// caller spawns its shell.
+    pub fn split_active_side(&mut self, side: Side) -> Option<usize> {
+        let tab = self.active_tab_mut()?;
+        let idx = tab.split_active_side(side)?;
+        self.apply_palette();
+        self.sync_tab_titles();
+        Some(idx)
+    }
+
+    /// Move the focused pane of the active tab toward `side` (SPLIT-017).
+    pub fn move_active_pane(&mut self, side: Side) -> bool {
+        self.active_tab_mut().is_some_and(|t| t.move_active(side))
+    }
+
+    /// Drop one pane of the active tab onto another (SPLIT-017).
+    pub fn move_pane(&mut self, moved: u64, target: u64, zone: DropZone) -> bool {
+        let done = self
+            .active_tab_mut()
+            .is_some_and(|t| t.move_pane(moved, target, zone));
+        if done {
+            self.sync_tab_titles();
+        }
+        done
+    }
+
     /// Close the focused pane of the active tab (SPLIT-006). `true` when it
     /// was the tab's last pane, so the caller closes the tab.
     pub fn close_active_pane(&mut self) -> bool {
@@ -724,7 +751,7 @@ mod tests {
             tab.for_each_pane_ref(|pane, _| out.push((pane.grid().cols, pane.grid().rows)));
             out
         });
-        assert_eq!(sizes, Some(vec![(60, 30), (60, 30)]));
+        assert_eq!(sizes, Some(vec![(60, 29), (60, 29)]));
     }
 
     #[test]

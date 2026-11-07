@@ -78,11 +78,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
     GetClientRect, GetCursorPos, GetForegroundWindow, GetMenuItemCount, GetMessageW, GetSubMenu,
     GetWindowLongPtrW, GetWindowRect, GetWindowTextW, HMENU, HTCLIENT, HWND_TOPMOST, IDC_ARROW,
-    IDC_IBEAM, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW, LoadIconW,
-    MB_ICONASTERISK, MF_BYCOMMAND, MF_BYPOSITION, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, PostMessageW, PostQuitMessage,
-    RegisterClassW, SIZE_MINIMIZED, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
+    IDC_IBEAM, IDC_SIZEALL, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW,
+    LoadIconW, MB_ICONASTERISK, MF_BYCOMMAND, MF_BYPOSITION, MF_CHECKED, MF_ENABLED, MF_GRAYED,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, PostMessageW,
+    PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+    SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
     ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
     WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE,
@@ -131,7 +131,7 @@ use crate::render::{
 use crate::search::SearchState;
 use crate::selection::{Pos, Selection};
 use crate::shell::{ShellFamily, SpawnOptions, quote_for_drop, shell_family};
-use crate::split::{Dir, Rect, Side};
+use crate::split::{Dir, DropZone, Rect, Side, drop_zone};
 use crate::tabbar::TAB_BAR_HEIGHT;
 use crate::theme::{self, Theme};
 use crate::welcome;
@@ -298,6 +298,12 @@ const MENU_TOGGLE_BOOKMARK: usize = 0xE865;
 const MENU_SHOW_BOOKMARKS: usize = 0xE866;
 const MENU_EXPORT_SELECTION: usize = 0xE867;
 const MENU_EXPORT_LAST: usize = 0xE868;
+const MENU_SPLIT_LEFT: usize = 0xE869;
+const MENU_SPLIT_UP: usize = 0xE86A;
+const MENU_MOVE_PANE_LEFT: usize = 0xE86B;
+const MENU_MOVE_PANE_RIGHT: usize = 0xE86C;
+const MENU_MOVE_PANE_UP: usize = 0xE86D;
+const MENU_MOVE_PANE_DOWN: usize = 0xE86E;
 /// Workspaces submenu: "Open <name>" items (WORKSPACE-003), one per
 /// template, capped by the store's own 64-template limit.
 const MENU_WS_OPEN_BASE: usize = 0xF200;
@@ -443,6 +449,13 @@ fn build_menu(profiles: &[ProfileSpec], theme_names: &[String]) -> Result<HMENU>
         append_menu_separator(view)?;
         append_menu_item(view, "Split &Right\tCtrl+Shift+Enter", MENU_SPLIT_RIGHT)?;
         append_menu_item(view, "Split Be&low\tCtrl+Shift+-", MENU_SPLIT_DOWN)?;
+        append_menu_item(view, "Split Lef&t", MENU_SPLIT_LEFT)?;
+        append_menu_item(view, "Split &Above", MENU_SPLIT_UP)?;
+        append_menu_separator(view)?;
+        append_menu_item(view, "Move Pane Left", MENU_MOVE_PANE_LEFT)?;
+        append_menu_item(view, "Move Pane Right", MENU_MOVE_PANE_RIGHT)?;
+        append_menu_item(view, "Move Pane Up", MENU_MOVE_PANE_UP)?;
+        append_menu_item(view, "Move Pane Down", MENU_MOVE_PANE_DOWN)?;
         append_menu_separator(view)?;
         append_menu_item(view, "Full &Screen\tF11", MENU_FULLSCREEN)?;
         append_menu_item(view, "Sessions Side&bar\tCtrl+Shift+S", MENU_SESSION_RAIL)?;
@@ -770,6 +783,12 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         MENU_CLOSE_TAB => close_pane_or_tab(hwnd),
         MENU_SPLIT_RIGHT => split_pane(hwnd, Dir::Vertical),
         MENU_SPLIT_DOWN => split_pane(hwnd, Dir::Horizontal),
+        MENU_SPLIT_LEFT => split_pane_side(hwnd, Side::Left),
+        MENU_SPLIT_UP => split_pane_side(hwnd, Side::Up),
+        MENU_MOVE_PANE_LEFT => move_pane_side(hwnd, Side::Left),
+        MENU_MOVE_PANE_RIGHT => move_pane_side(hwnd, Side::Right),
+        MENU_MOVE_PANE_UP => move_pane_side(hwnd, Side::Up),
+        MENU_MOVE_PANE_DOWN => move_pane_side(hwnd, Side::Down),
         MENU_SEARCH => toggle_search(hwnd),
         MENU_TOGGLE_BOOKMARK => toggle_bookmark(hwnd),
         MENU_SHOW_BOOKMARKS => toggle_bookmarks_overlay(hwnd),
@@ -1178,6 +1197,8 @@ struct WindowState {
     renaming: Option<(usize, String)>,
     /// Tab index being dragged to reorder (TAB-016).
     tab_drag: Option<usize>,
+    /// A pane being dragged by its title row (SPLIT-017).
+    pane_drag: Option<PaneDrag>,
     /// Cursor blink phase: the timer flips it every `BLINK_MS`.
     blink_on: bool,
     renderer: Option<Renderer>,
@@ -2358,6 +2379,7 @@ fn create_quick_window() {
         cfg,
         renaming: None,
         tab_drag: None,
+        pane_drag: None,
         blink_on: true,
         theme_dir: theme_dir_from_config(),
         renderer: None,
@@ -3802,6 +3824,14 @@ fn sync_tab_bar(hwnd: HWND) {
 /// WM_KEYDOWN/WM_SYSKEYDOWN: app bindings first, then VT encoding.
 fn handle_keydown(hwnd: HWND, vk: u16) {
     let mods = read_mods();
+    // Escape puts a dragged pane back and goes no further.
+    if vk == 0x1B && state_ref(hwnd).is_some_and(|s| s.pane_drag.is_some()) {
+        cancel_pane_drag(hwnd);
+        if let Some(s) = state_mut(hwnd) {
+            s.suppress_char = true;
+        }
+        return;
+    }
     // `[keybindings]` first: a user binding overrides the built-in shortcut
     // (KEY-022..025, CONFIG-008).
     let action = state_ref(hwnd).and_then(|s| s.cfg.keymap().get(&key_spec(vk, mods)).copied());
@@ -5241,7 +5271,28 @@ fn standard_rows(ctx: &RowCtx, shortcut: impl Fn(KeyAction) -> Option<String>) -
     );
     push("Split Right", "Splits", KeyAction::SplitRight, None);
     push("Split Below", "Splits", KeyAction::SplitDown, None);
+    push("Split Left", "Splits", KeyAction::SplitLeft, None);
+    push("Split Above", "Splits", KeyAction::SplitUp, None);
     let no_split = (ctx.pane_count < 2).then_some("This tab has one pane");
+    push(
+        "Move Pane Left",
+        "Splits",
+        KeyAction::MovePaneLeft,
+        no_split,
+    );
+    push(
+        "Move Pane Right",
+        "Splits",
+        KeyAction::MovePaneRight,
+        no_split,
+    );
+    push("Move Pane Up", "Splits", KeyAction::MovePaneUp, no_split);
+    push(
+        "Move Pane Down",
+        "Splits",
+        KeyAction::MovePaneDown,
+        no_split,
+    );
     push("Focus Pane Up", "Splits", KeyAction::FocusUp, no_split);
     push("Focus Pane Down", "Splits", KeyAction::FocusDown, no_split);
     push("Focus Pane Left", "Splits", KeyAction::FocusLeft, no_split);
@@ -5384,6 +5435,12 @@ fn palette_command_for_menu(id: usize) -> Option<Command> {
         MENU_CLOSE_TAB => action(KeyAction::CloseTab),
         MENU_SPLIT_RIGHT => action(KeyAction::SplitRight),
         MENU_SPLIT_DOWN => action(KeyAction::SplitDown),
+        MENU_SPLIT_LEFT => action(KeyAction::SplitLeft),
+        MENU_SPLIT_UP => action(KeyAction::SplitUp),
+        MENU_MOVE_PANE_LEFT => action(KeyAction::MovePaneLeft),
+        MENU_MOVE_PANE_RIGHT => action(KeyAction::MovePaneRight),
+        MENU_MOVE_PANE_UP => action(KeyAction::MovePaneUp),
+        MENU_MOVE_PANE_DOWN => action(KeyAction::MovePaneDown),
         MENU_QUIT => action(KeyAction::Quit),
         MENU_COPY => action(KeyAction::Copy),
         MENU_PASTE => action(KeyAction::Paste),
@@ -5875,22 +5932,8 @@ fn handle_drop(hwnd: HWND, hdrop: HDROP) {
 /// `None` for the tab bar. Clamped to the grid bounds so drags past the
 /// edges extend the selection (WIN-004, SPLIT-004 hit-testing).
 fn cell_at(s: &WindowState, x: f32, y: f32, height: f32) -> Option<(usize, usize, usize)> {
-    let top = s.grid_top();
-    let bottom = top + (height - s.total_chrome() - 2.0 * s.pad_y()).max(0.0);
-    if y < top || y >= bottom {
-        return None;
-    }
+    let (col, row) = tab_cell(s, x, y, height)?;
     let tab = s.app.active_tab()?;
-    if x < s.rail_w || s.board.is_some() {
-        return None;
-    }
-    let col = ((x - s.rail_w - s.pad_x()) / s.metrics.cell_width)
-        .floor()
-        .max(0.0) as usize;
-    let row = ((y - top) / s.metrics.cell_height).floor().max(0.0) as usize;
-    let (cols, rows) = (tab.cols(), tab.rows());
-    let col = col.min(cols.saturating_sub(1));
-    let row = row.min(rows.saturating_sub(1));
     let idx = tab.layout().iter().position(|r| r.contains(col, row))?;
     let rect = tab.layout()[idx];
     Some((idx, row - rect.row, col - rect.col))
@@ -6160,6 +6203,8 @@ fn handle_context_menu(hwnd: HWND, lparam: LPARAM) {
         let _ = append_menu_item(menu, "Export Last Command Output", MENU_EXPORT_LAST);
         let _ = append_menu_item(menu, "Split Right	Ctrl+Shift+Enter", MENU_SPLIT_RIGHT);
         let _ = append_menu_item(menu, "Split Below	Ctrl+Shift+-", MENU_SPLIT_DOWN);
+        let _ = append_menu_item(menu, "Split Left", MENU_SPLIT_LEFT);
+        let _ = append_menu_item(menu, "Split Above", MENU_SPLIT_UP);
         let _ = append_menu_separator(menu);
         let _ = append_menu_item(menu, "New Tab	Ctrl+Shift+T", MENU_NEW_TAB);
         let _ = append_menu_item(menu, "Close Tab	Ctrl+Shift+W", MENU_CLOSE_TAB);
@@ -6323,6 +6368,9 @@ fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
         return;
     }
     let height = client_height_dips(hwnd);
+    if begin_pane_drag(hwnd, x, y, height) {
+        return;
+    }
     let anchor = state_ref(hwnd).and_then(|s| {
         let (idx, row, col) = cell_at(s, x, y, height)?;
         let abs = abs_row_in_pane(s, idx, row);
@@ -6437,6 +6485,10 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     const MK_RBUTTON: usize = 0x02;
     let (x, y) = cursor_dips(hwnd, lparam);
     let height = client_height_dips(hwnd);
+    if state_ref(hwnd).is_some_and(|s| s.pane_drag.is_some()) {
+        pane_drag_move(hwnd, wparam.0 & MK_LBUTTON != 0, x, y, height);
+        return;
+    }
     let dragging = wparam.0 & MK_LBUTTON != 0 && state_ref(hwnd).is_some_and(|s| s.grid_pressed);
     let hover = if !dragging && over_rail(hwnd, x) {
         state_ref(hwnd)
@@ -6572,6 +6624,9 @@ fn handle_lbutton_up(hwnd: HWND, lparam: LPARAM) {
         board_release(hwnd, x, y);
         return;
     }
+    if finish_pane_drag(hwnd) {
+        return;
+    }
     if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
         && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
     {
@@ -6619,15 +6674,26 @@ fn set_cursor_for_position(wparam: WPARAM) {
     }
     let _ = unsafe { ScreenToClient(target, &mut pt) };
     let dpi = unsafe { GetDpiForWindow(target) }.max(96) as f32;
+    let x = px_to_dips(pt.x.max(0) as u32, dpi);
     let y = px_to_dips(pt.y.max(0) as u32, dpi);
-    if over_rail(target, px_to_dips(pt.x.max(0) as u32, dpi)) {
+    if over_rail(target, x) {
         if let Ok(cursor) = unsafe { LoadCursorW(None, IDC_ARROW) } {
             let _ = unsafe { SetCursor(Some(cursor)) };
         }
         return;
     }
-    let over_bar = state_ref(target).is_some_and(|s| s.over_tab_bar(y, client_height_dips(target)));
-    let idc = if over_bar { IDC_ARROW } else { IDC_IBEAM };
+    let height = client_height_dips(target);
+    let over_bar = state_ref(target).is_some_and(|s| s.over_tab_bar(y, height));
+    let over_title = state_ref(target).is_some_and(|s| {
+        tab_cell(s, x, y, height)
+            .and_then(|(col, row)| s.app.active_tab()?.header_at(col, row))
+            .is_some()
+    });
+    let idc = if over_bar || over_title {
+        IDC_ARROW
+    } else {
+        IDC_IBEAM
+    };
     if let Ok(cursor) = unsafe { LoadCursorW(None, idc) } {
         let _ = unsafe { SetCursor(Some(cursor)) };
     }
@@ -6917,10 +6983,173 @@ fn drain_and_cleanup(hwnd: HWND) {
 /// spawn the tab's shell profile into the new pane at its box size
 /// (SPLIT-007).
 fn split_pane(hwnd: HWND, dir: Dir) {
-    let split = state_mut(hwnd).is_some_and(|s| s.app.split_active(dir).is_some());
-    if !split {
+    if state_mut(hwnd).is_some_and(|s| s.app.split_active(dir).is_some()) {
+        finish_split(hwnd);
+    }
+}
+
+/// Split the focused pane with the new pane on `side` (SPLIT-016).
+fn split_pane_side(hwnd: HWND, side: Side) {
+    if state_mut(hwnd).is_some_and(|s| s.app.split_active_side(side).is_some()) {
+        finish_split(hwnd);
+    }
+}
+
+/// Move the focused pane toward `side` (SPLIT-017).
+fn move_pane_side(hwnd: HWND, side: Side) {
+    if state_mut(hwnd).is_some_and(|s| s.app.move_active_pane(side)) {
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    }
+}
+
+/// A pane being dragged by its title row (SPLIT-017).
+#[derive(Debug, Clone, Copy)]
+struct PaneDrag {
+    /// Stable id of the dragged pane.
+    pane: u64,
+    /// Where the button went down, in client DIPs.
+    press: (f32, f32),
+    /// The pointer has left the press point, so this is a drag and not a click.
+    moved: bool,
+    /// The pane and zone a drop would land on right now.
+    target: Option<(u64, DropZone)>,
+}
+
+/// Cell of the active tab under a client-area DIP position, `None` outside it.
+fn tab_cell(s: &WindowState, x: f32, y: f32, height: f32) -> Option<(usize, usize)> {
+    let top = s.grid_top();
+    let bottom = top + (height - s.total_chrome() - 2.0 * s.pad_y()).max(0.0);
+    if y < top || y >= bottom {
+        return None;
+    }
+    let tab = s.app.active_tab()?;
+    if x < s.rail_w || s.board.is_some() {
+        return None;
+    }
+    let col = ((x - s.rail_w - s.pad_x()) / s.metrics.cell_width)
+        .floor()
+        .max(0.0) as usize;
+    let row = ((y - top) / s.metrics.cell_height).floor().max(0.0) as usize;
+    Some((
+        col.min(tab.cols().saturating_sub(1)),
+        row.min(tab.rows().saturating_sub(1)),
+    ))
+}
+
+/// Press on a pane's title row: focus it and arm a drag. `false` when the press
+/// was somewhere else.
+fn begin_pane_drag(hwnd: HWND, x: f32, y: f32, height: f32) -> bool {
+    let Some(s) = state_mut(hwnd) else {
+        return false;
+    };
+    let hit = tab_cell(s, x, y, height).and_then(|(col, row)| {
+        let tab = s.app.active_tab()?;
+        let idx = tab.header_at(col, row)?;
+        let id = tab.pane_at(idx)?.id();
+        Some((idx, id))
+    });
+    let Some((idx, pane)) = hit else {
+        return false;
+    };
+    s.app.focus_pane(idx);
+    s.pane_drag = Some(PaneDrag {
+        pane,
+        press: (x, y),
+        moved: false,
+        target: None,
+    });
+    unsafe { SetCapture(hwnd) };
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    true
+}
+
+/// The pane a drop at this position would land on: its box, id and zone. A pane
+/// cannot be dropped on itself.
+fn pane_drop_at(
+    s: &WindowState,
+    moved: u64,
+    x: f32,
+    y: f32,
+    height: f32,
+) -> Option<(Rect, u64, DropZone)> {
+    let (col, row) = tab_cell(s, x, y, height)?;
+    let tab = s.app.active_tab()?;
+    let idx = tab.frames().iter().position(|f| f.contains(col, row))?;
+    let frame = tab.frames()[idx];
+    let id = tab.pane_at(idx)?.id();
+    if id == moved {
+        return None;
+    }
+    let (cw, ch) = (s.metrics.cell_width, s.metrics.cell_height);
+    let left = s.rail_w + s.pad_x() + frame.col as f32 * cw;
+    let top = s.grid_top() + frame.row as f32 * ch;
+    let across = (x - left) / (frame.cols as f32 * cw).max(1.0);
+    let down = (y - top) / (frame.rows as f32 * ch).max(1.0);
+    Some((frame, id, drop_zone(across, down)))
+}
+
+/// Pointer moved during a pane drag: follow it with the drop highlight.
+fn pane_drag_move(hwnd: HWND, left_down: bool, x: f32, y: f32, height: f32) {
+    // The button came up where we could not see it, such as after losing capture.
+    if !left_down {
+        cancel_pane_drag(hwnd);
         return;
     }
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(mut drag) = s.pane_drag else { return };
+    let threshold = s.metrics.cell_width / 2.0;
+    drag.moved |= (x - drag.press.0).abs() + (y - drag.press.1).abs() > threshold;
+    if !drag.moved {
+        return;
+    }
+    let found = pane_drop_at(s, drag.pane, x, y, height);
+    drag.target = found.map(|(_, id, zone)| (id, zone));
+    s.pane_drag = Some(drag);
+    if let Some(r) = &mut s.renderer {
+        r.set_pane_drop(found.map(|(frame, _, zone)| (frame, zone)));
+    }
+    // Windows sends no WM_SETCURSOR to a window holding the capture.
+    if let Ok(cursor) = unsafe { LoadCursorW(None, IDC_SIZEALL) } {
+        let _ = unsafe { SetCursor(Some(cursor)) };
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Forget the drag and put the highlight, the capture and the button state back.
+fn end_pane_drag(hwnd: HWND) -> Option<PaneDrag> {
+    let s = state_mut(hwnd)?;
+    let drag = s.pane_drag.take()?;
+    s.grid_pressed = false;
+    if let Some(r) = &mut s.renderer {
+        r.set_pane_drop(None);
+    }
+    let _ = unsafe { ReleaseCapture() };
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    Some(drag)
+}
+
+/// Escape, or a lost button: the pane stays where it was.
+fn cancel_pane_drag(hwnd: HWND) {
+    let _ = end_pane_drag(hwnd);
+}
+
+/// Button up: drop the pane if it was dragged onto a target. `false` when no pane
+/// drag was under way.
+fn finish_pane_drag(hwnd: HWND) -> bool {
+    let Some(drag) = end_pane_drag(hwnd) else {
+        return false;
+    };
+    if let Some((target, zone)) = drag.target
+        && state_mut(hwnd).is_some_and(|s| s.app.move_pane(drag.pane, target, zone))
+        && let Some(s) = state_ref(hwnd)
+    {
+        set_title(hwnd, &s.app);
+    }
+    true
+}
+
+/// A split just happened: rebuild the tab bar and start the new pane's shell.
+fn finish_split(hwnd: HWND) {
     // The new pane takes half the tab: rebuild the tab bar strip (it may
     // appear with the pane's tab count), then spawn at the pane's box.
     sync_tab_bar(hwnd);
@@ -7603,6 +7832,12 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
         KeyAction::Search => toggle_search(hwnd),
         KeyAction::SplitRight => split_pane(hwnd, Dir::Vertical),
         KeyAction::SplitDown => split_pane(hwnd, Dir::Horizontal),
+        KeyAction::SplitLeft => split_pane_side(hwnd, Side::Left),
+        KeyAction::SplitUp => split_pane_side(hwnd, Side::Up),
+        KeyAction::MovePaneLeft => move_pane_side(hwnd, Side::Left),
+        KeyAction::MovePaneRight => move_pane_side(hwnd, Side::Right),
+        KeyAction::MovePaneUp => move_pane_side(hwnd, Side::Up),
+        KeyAction::MovePaneDown => move_pane_side(hwnd, Side::Down),
         KeyAction::Fullscreen => toggle_fullscreen(hwnd),
         KeyAction::Quit => {
             let _ = unsafe { DestroyWindow(hwnd) };
@@ -8299,6 +8534,7 @@ pub fn run(
         cfg: cfg.clone(),
         renaming: None,
         tab_drag: None,
+        pane_drag: None,
         blink_on: true,
         theme_dir: theme_dir_from_config(),
         renderer: None,

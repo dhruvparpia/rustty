@@ -520,6 +520,18 @@ pub enum KeyAction {
     SplitRight,
     /// Split active pane below.
     SplitDown,
+    /// Split active pane, new pane on the left.
+    SplitLeft,
+    /// Split active pane, new pane above.
+    SplitUp,
+    /// Move the active pane left.
+    MovePaneLeft,
+    /// Move the active pane right.
+    MovePaneRight,
+    /// Move the active pane up.
+    MovePaneUp,
+    /// Move the active pane down.
+    MovePaneDown,
     /// Toggle fullscreen.
     Fullscreen,
     /// Quit.
@@ -612,6 +624,12 @@ impl KeyAction {
             "search" | "toggle-search" => Self::Search,
             "split-right" | "split-right-pane" => Self::SplitRight,
             "split-down" | "split-below" => Self::SplitDown,
+            "split-left" => Self::SplitLeft,
+            "split-up" | "split-above" => Self::SplitUp,
+            "move-pane-left" => Self::MovePaneLeft,
+            "move-pane-right" => Self::MovePaneRight,
+            "move-pane-up" => Self::MovePaneUp,
+            "move-pane-down" => Self::MovePaneDown,
             "fullscreen" | "toggle-fullscreen" => Self::Fullscreen,
             "quit" => Self::Quit,
             "focus-up" => Self::FocusUp,

@@ -10,6 +10,11 @@ Everything built on top of 0.6.0: the sessions sidebar, restart safety, worktree
 
 ### Added
 
+- Movable panes: drag a pane by its title onto another pane. The middle swaps them and an edge puts
+  it on that side, with the landing area highlighted first; Escape cancels. "Move Pane Left", "Right",
+  "Up" and "Down" do the same from the View menu and the palette, and can be bound to keys.
+- "Split Left" and "Split Above" join "Split Right" and "Split Below", so a new pane can open on any
+  side.
 - Local automation API (AUTO-001..015): `rustty ctl <verb>` and `rustty mcp` control a running
   window over a per-window pipe, so a script or a coding agent can start sessions, read their
   output, type into them and see whether they need attention. Reading needs
@@ -74,6 +79,12 @@ Everything built on top of 0.6.0: the sessions sidebar, restart safety, worktree
 
 ### Fixed
 
+- Resizing a window or pane no longer garbles its text. Losing a row scrolled the text up here while
+  the console repainted it on its old row, so lines appeared twice and the cursor sat on the wrong one.
+- Text cut off by a narrower pane comes back when it widens, including the welcome banner and
+  scrollback.
+- A split pane's title no longer covers its first line of text. Panes that share a tab now give their
+  top row to the title, so they are one row shorter.
 - A normal launch no longer crashes. After a GUI launch released its console, printing any
   diagnostic could panic, or land in whatever now held that handle number. A portable install
   hit this on every start through the jump list error.

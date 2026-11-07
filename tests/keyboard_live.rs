@@ -2,6 +2,9 @@
 //! matched a key code Windows never sends, so it never split anything, and tests
 //! that went through the menu could not see that. This test shares a keyboard state
 //! with the window alone, so the person's own keyboard focus is left alone.
+//!
+//! Panes dragged by their title rows are here too, posted as mouse messages to the
+//! window, so the person's pointer is left alone as well.
 #![cfg(windows)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![allow(
@@ -13,11 +16,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardState, SetKeyboardState};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, GetWindowThreadProcessId, PostMessageW, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
+    FindWindowExW, GetClientRect, GetWindowThreadProcessId, PostMessageW, WM_CHAR, WM_KEYDOWN,
+    WM_KEYUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -26,6 +31,14 @@ const VK_MINUS: usize = 0xBD;
 const VK_SHIFT: usize = 0x10;
 const VK_CONTROL: usize = 0x11;
 const VK_LCONTROL: usize = 0xA2;
+const VK_ESCAPE: usize = 0x1B;
+const WM_MOUSEMOVE: u32 = 0x200;
+const WM_LBUTTONDOWN: u32 = 0x201;
+const WM_LBUTTONUP: u32 = 0x202;
+/// Inside a title row: the grid starts about 47 DIPs down and a row is about 21.
+const TITLE_Y: f32 = 57.0;
+/// Inside the sidebar's right edge, which is about 256 DIPs wide.
+const RAIL_W: f32 = 256.0;
 
 struct Window {
     child: Child,
@@ -83,6 +96,43 @@ impl Window {
             std::thread::sleep(Duration::from_millis(100));
         }
         panic!("never saw {what}: {last}");
+    }
+
+    /// Post a mouse message at client position `(x, y)` in DIPs.
+    fn mouse(&self, message: u32, held: bool, x: f32, y: f32) {
+        // SAFETY: plain window queries and a posted message; a stale handle just fails.
+        unsafe {
+            let scale = GetDpiForWindow(self.hwnd) as f32 / 96.0;
+            let (x, y) = ((x * scale) as isize, (y * scale) as isize);
+            PostMessageW(
+                Some(self.hwnd),
+                message,
+                WPARAM(usize::from(held)),
+                LPARAM((y << 16) | x),
+            )
+            .expect("post");
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    /// The middle of the left and right panes of a side-by-side split, in DIPs.
+    fn pane_columns(&self) -> (f32, f32) {
+        let mut client = RECT::default();
+        // SAFETY: `client` is a valid out-pointer; a stale handle just fails.
+        let scale = unsafe {
+            GetClientRect(self.hwnd, &raw mut client).expect("client rect");
+            GetDpiForWindow(self.hwnd) as f32 / 96.0
+        };
+        let width = client.right as f32 / scale - RAIL_W;
+        (RAIL_W + width * 0.25, RAIL_W + width * 0.75)
+    }
+
+    /// Split side by side, and return the pane ids left to right.
+    fn side_by_side(&self) -> (u64, u64) {
+        self.ctrl_shift(VK_RETURN, Some('\n'));
+        self.wait_for("two panes", |list| panes(list) == 2);
+        let ids = pane_ids(&self.list());
+        (ids[0], ids[1])
     }
 
     /// Press a key with Ctrl and Shift held, as far as this window can tell.
@@ -146,6 +196,22 @@ fn find_window(pid: u32) -> HWND {
     panic!("no window");
 }
 
+fn pane_ids(list: &serde_json::Value) -> Vec<u64> {
+    list["tabs"][0]["panes"]
+        .as_array()
+        .map_or_else(Vec::new, |panes| {
+            panes.iter().filter_map(|p| p["id"].as_u64()).collect()
+        })
+}
+
+fn active_pane(list: &serde_json::Value) -> Option<u64> {
+    list["tabs"][0]["panes"]
+        .as_array()?
+        .iter()
+        .find(|p| p["active"] == true)?["id"]
+        .as_u64()
+}
+
 fn panes(list: &serde_json::Value) -> usize {
     list["tabs"][0]["panes"].as_array().map_or(0, Vec::len)
 }
@@ -165,6 +231,78 @@ fn ctrl_shift_minus_splits_below() {
     let window = Window::open("below", &[], |_| {});
     window.ctrl_shift(VK_MINUS, None);
     window.wait_for("two panes", |list| panes(list) == 2);
+}
+
+#[test]
+#[ignore = "needs a desktop session: cargo test --test keyboard_live -- --ignored"]
+fn dragging_a_title_onto_the_middle_of_a_pane_swaps_them() {
+    let window = Window::open("swap", &[], |_| {});
+    let (left, right) = window.side_by_side();
+    let (left_x, right_x) = window.pane_columns();
+    window.mouse(WM_LBUTTONDOWN, true, right_x, TITLE_Y);
+    window.mouse(WM_MOUSEMOVE, true, left_x, 250.0);
+    window.mouse(WM_LBUTTONUP, false, left_x, 250.0);
+    window.wait_for("the panes swapped", |list| pane_ids(list) == [right, left]);
+    assert_eq!(
+        active_pane(&window.list()),
+        Some(right),
+        "it keeps the keyboard"
+    );
+}
+
+#[test]
+#[ignore = "needs a desktop session: cargo test --test keyboard_live -- --ignored"]
+fn dragging_a_title_onto_the_edge_of_a_pane_puts_it_there() {
+    let window = Window::open("edge", &[], |_| {});
+    let (left, right) = window.side_by_side();
+    let (left_x, right_x) = window.pane_columns();
+    // Just below the left pane's title row: the top edge of that pane.
+    window.mouse(WM_LBUTTONDOWN, true, right_x, TITLE_Y);
+    window.mouse(WM_MOUSEMOVE, true, left_x, TITLE_Y + 25.0);
+    window.mouse(WM_LBUTTONUP, false, left_x, TITLE_Y + 25.0);
+    window.wait_for("the pane above the other", |list| {
+        pane_ids(list) == [right, left]
+    });
+    // Stacked, not swapped: the moved pane now spans the top, so its title is also
+    // above the old right column. After a swap that title would be the other pane's.
+    window.mouse(WM_LBUTTONDOWN, true, right_x, TITLE_Y);
+    window.mouse(WM_LBUTTONUP, false, right_x, TITLE_Y);
+    window.wait_for("the moved pane across the whole top", |list| {
+        active_pane(list) == Some(right)
+    });
+}
+
+#[test]
+#[ignore = "needs a desktop session: cargo test --test keyboard_live -- --ignored"]
+fn clicking_a_title_focuses_the_pane_and_moves_nothing() {
+    let window = Window::open("click", &[], |_| {});
+    let (left, right) = window.side_by_side();
+    let (left_x, _) = window.pane_columns();
+    assert_eq!(active_pane(&window.list()), Some(right));
+    window.mouse(WM_LBUTTONDOWN, true, left_x, TITLE_Y);
+    window.mouse(WM_LBUTTONUP, false, left_x, TITLE_Y);
+    window.wait_for("the left pane focused", |list| {
+        active_pane(list) == Some(left)
+    });
+    assert_eq!(pane_ids(&window.list()), [left, right]);
+}
+
+#[test]
+#[ignore = "needs a desktop session: cargo test --test keyboard_live -- --ignored"]
+fn escape_puts_a_dragged_pane_back() {
+    let window = Window::open("escape", &[], |_| {});
+    let (left, right) = window.side_by_side();
+    let (left_x, right_x) = window.pane_columns();
+    window.mouse(WM_LBUTTONDOWN, true, right_x, TITLE_Y);
+    window.mouse(WM_MOUSEMOVE, true, left_x, 250.0);
+    // SAFETY: a posted message; a stale handle just fails.
+    unsafe {
+        PostMessageW(Some(window.hwnd), WM_KEYDOWN, WPARAM(VK_ESCAPE), LPARAM(0)).expect("post");
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    window.mouse(WM_LBUTTONUP, false, left_x, 250.0);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(pane_ids(&window.list()), [left, right]);
 }
 
 #[test]
