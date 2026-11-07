@@ -281,9 +281,10 @@ impl ImageStore {
             .filter_map(move |p| grid.view_of_abs(p.top_abs).map(|row| (p, row)))
     }
 
-    /// Cursor row `view_row` (+ row offset `y`) as an absolute grid row.
-    fn anchor(grid: &Grid, view_row: usize, y: i32) -> usize {
-        grid.abs_of_view(view_row)
+    /// Live cursor row `cursor_row` (+ row offset `y`) as an absolute grid
+    /// row, independent of where the viewport is scrolled.
+    fn anchor(grid: &Grid, cursor_row: usize, y: i32) -> usize {
+        grid.live_abs(cursor_row)
             .unwrap_or_else(|| grid.last_abs() + 1)
             .saturating_add_signed(i64::from(y) as isize)
     }
@@ -721,7 +722,7 @@ impl Pane {
                         self.graphics.clear_all();
                         // Commands whose block lived in the cleared history
                         // are no longer showable (SHELLINT-021).
-                        self.commands.note_eviction(self.grid.first_abs());
+                        self.retire_evicted_commands();
                     }
                     // DSR/DA replies go back to the shell only for a local
                     // shell. A host-owned session already answers terminal
@@ -745,7 +746,7 @@ impl Pane {
         self.graphics.prune_transient(&self.grid);
 
         // Scrollback lines evicted during this feed retire their commands.
-        self.commands.note_eviction(self.grid.first_abs());
+        self.retire_evicted_commands();
 
         if printed && self.follow {
             let above = self.grid.scroll_offset();
@@ -754,6 +755,15 @@ impl Pane {
             }
         }
         self.parser.fit(&self.grid);
+    }
+
+    /// Drop commands whose block left the main grid. Command anchors are
+    /// main-grid line ids; the alt grid numbers its lines independently, so
+    /// its evictions say nothing about them.
+    fn retire_evicted_commands(&mut self) {
+        if !self.in_alt {
+            self.commands.note_eviction(self.grid.first_abs());
+        }
     }
 
     /// Whether the viewport follows new output at the live edge (issue #42).
@@ -1163,7 +1173,11 @@ mod tests {
         pane.update_follow();
         assert!(!pane.follow(), "scrolled away pauses following");
         pane.feed(b"more output\r\n");
-        assert_eq!(pane.grid().scroll_offset(), 2, "reading position holds");
+        assert_eq!(
+            pane.grid().line_text(0).as_deref(),
+            Some("l1"),
+            "reading position holds"
+        );
     }
 
     #[test]
@@ -1210,5 +1224,202 @@ mod tests {
             store.apply(GraphicsAction::Query(Some(1)), 0, 0, &grid),
             Some(GRAPHICS_QUERY_OK.to_vec())
         );
+    }
+
+    /// Six labelled lines on a 3-row screen, viewport scrolled back two
+    /// lines: the view shows `l2..l4` and the live screen `l4..l6`.
+    fn scrolled_back_pane() -> Pane {
+        let mut pane = Pane::with_size(10, 3, 100);
+        pane.feed(b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6");
+        pane.grid_mut().scroll_up(2);
+        pane.update_follow();
+        pane
+    }
+
+    #[test]
+    fn line_edits_while_scrolled_back_hit_the_live_screen() {
+        // Break caught: erase/ICH/DCH/ECH resolving through the scrolled
+        // viewport, which destroys history and leaves the live row stale.
+        let cases: [(&str, &[u8], &str); 4] = [
+            ("EL", b"\x1b[1;1H\x1b[2K", ""),
+            ("DCH", b"\x1b[1;1H\x1b[P", "4"),
+            ("ICH", b"\x1b[1;1H\x1b[@", " l4"),
+            ("ECH", b"\x1b[1;1H\x1b[X", " 4"),
+        ];
+        for (name, seq, live_row) in cases {
+            let mut pane = scrolled_back_pane();
+            pane.feed(seq);
+            assert_eq!(
+                pane.grid().line_text_abs(1).as_deref(),
+                Some("l2"),
+                "{name} must not touch the history row on screen"
+            );
+            assert_eq!(
+                pane.grid().line_text_abs(3).as_deref(),
+                Some(live_row),
+                "{name} must edit the live row"
+            );
+        }
+    }
+
+    #[test]
+    fn line_edits_bump_the_search_revision_only_when_text_changes() {
+        // Break caught: search highlights going stale after an edit, or
+        // ordinary `text CSI K` output restarting search scans (issue #107).
+        let cases: [(&str, &[u8], bool); 6] = [
+            ("EL over text", b"\x1b[1;1H\x1b[K", true),
+            ("EL past text", b"\x1b[1;4H\x1b[K", false),
+            ("DCH over text", b"\x1b[1;1H\x1b[P", true),
+            ("DCH on blank row", b"\x1b[2;1H\x1b[P", false),
+            ("ICH over text", b"\x1b[1;1H\x1b[@", true),
+            ("ECH on blank row", b"\x1b[2;1H\x1b[X", false),
+        ];
+        for (name, seq, bumps) in cases {
+            let mut pane = Pane::with_size(10, 3, 100);
+            pane.feed(b"abc");
+            let before = pane.grid().content_rev();
+            pane.feed(seq);
+            assert_eq!(pane.grid().content_rev() != before, bumps, "{name}");
+        }
+    }
+
+    #[test]
+    fn scrolled_back_view_keeps_its_text_when_output_evicts_history() {
+        // Break caught: the view advancing with each appended line, or
+        // sliding when the full buffer evicts its oldest line.
+        let mut pane = Pane::with_size(10, 3, 10);
+        for i in 0..20 {
+            pane.feed(format!("line{i}\r\n").as_bytes());
+        }
+        pane.grid_mut().scroll_up(5);
+        pane.update_follow();
+        assert_eq!(pane.grid().line_text(0).as_deref(), Some("line13"));
+        for i in 20..23 {
+            pane.feed(format!("line{i}\r\n").as_bytes());
+        }
+        assert_eq!(pane.grid().line_text(0).as_deref(), Some("line13"));
+    }
+
+    #[test]
+    fn scrolled_back_view_stops_at_the_oldest_line_once_its_text_is_evicted() {
+        // Break caught: the offset running past the buffer once the line
+        // being read is gone.
+        let mut pane = Pane::with_size(10, 3, 10);
+        for i in 0..20 {
+            pane.feed(format!("line{i}\r\n").as_bytes());
+        }
+        pane.grid_mut().scroll_up(5);
+        pane.update_follow();
+        for i in 20..33 {
+            pane.feed(format!("line{i}\r\n").as_bytes());
+        }
+        assert_eq!(pane.grid().scroll_offset(), 10);
+        assert_eq!(pane.grid().line_text(0).as_deref(), Some("line21"));
+    }
+
+    #[test]
+    fn alt_screen_output_keeps_main_screen_commands() {
+        // Break caught: alt-grid line ids retiring commands that the main
+        // grid still holds.
+        let mut pane = Pane::with_size(10, 3, 100);
+        pane.feed(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07out\r\n\x1b]133;D:0\x07");
+        assert_eq!(pane.commands().len(), 1);
+        pane.feed(b"\x1b[?1049h");
+        for _ in 0..200 {
+            pane.feed(b"x\r\n");
+        }
+        pane.feed(b"\x1b[?1049l");
+        assert_eq!(pane.commands().len(), 1);
+    }
+
+    #[test]
+    fn clear_scrollback_inside_alt_screen_keeps_main_screen_commands() {
+        // Break caught: ED 3 in a full-screen app retiring main-grid commands.
+        let mut pane = Pane::with_size(10, 3, 100);
+        pane.feed(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07out\r\n\x1b]133;D:0\x07");
+        pane.feed(b"\x1b[?1049h");
+        for _ in 0..200 {
+            pane.feed(b"x\r\n");
+        }
+        pane.feed(b"\x1b[3J\x1b[?1049l");
+        assert_eq!(pane.commands().len(), 1);
+    }
+
+    #[test]
+    fn main_screen_eviction_still_retires_commands() {
+        // Break caught: guarding retirement so broadly that evicted main
+        // history keeps commands forever (SHELLINT-021).
+        let mut pane = Pane::with_size(10, 3, 5);
+        pane.feed(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07out\r\n\x1b]133;D:0\x07");
+        assert_eq!(pane.commands().len(), 1);
+        for _ in 0..50 {
+            pane.feed(b"x\r\n");
+        }
+        assert_eq!(pane.commands().len(), 0);
+    }
+
+    #[test]
+    fn reset_then_text_in_one_chunk_scrolls_normally() {
+        // Break caught: parsing past `ESC c` with the scroll region unset,
+        // which makes every following line overwrite the last row.
+        let mut pane = Pane::with_size(10, 3, 100);
+        pane.feed(b"\x1bca\r\nb\r\nc\r\nd\r\ne");
+        let rows: Vec<_> = (0..3).map(|r| pane.grid().line_text(r)).collect();
+        assert_eq!(
+            rows,
+            [
+                Some("c".to_string()),
+                Some("d".to_string()),
+                Some("e".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn compound_alt_screen_mode_places_following_text_on_the_alt_screen() {
+        // Break caught: a later mode in the same CSI hiding the grid switch,
+        // so the chunk's text lands on the main screen (issue #1).
+        let mut pane = Pane::with_size(10, 3, 100);
+        pane.feed(b"main");
+        pane.feed(b"\x1b[?1049;25hALT");
+        assert_eq!(pane.grid().line_text(0).as_deref(), Some("ALT"));
+        pane.feed(b"\x1b[?1049l");
+        assert_eq!(pane.grid().line_text(0).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn full_screen_region_follows_a_later_grow() {
+        // Break caught: `CSI r` pinning the region at the old height, so
+        // output never reaches the new rows or the history (issue #3).
+        let cases: [(&str, &[u8]); 2] =
+            [("CSI r", b"\x1b[r"), ("explicit full height", b"\x1b[1;3r")];
+        for (name, seq) in cases {
+            let mut pane = Pane::with_size(10, 3, 100);
+            pane.feed(seq);
+            let _ = pane.resize(10, 5);
+            pane.feed(b"\x1b[5;1H\r\nX");
+            assert_eq!(pane.parser().cursor_row, 4, "{name}");
+            assert_eq!(pane.grid().line_text(4).as_deref(), Some("X"), "{name}");
+        }
+    }
+
+    #[test]
+    fn partial_region_stays_put_across_a_grow() {
+        // Break caught: treating every DECSTBM as following the bottom.
+        let mut pane = Pane::with_size(10, 3, 100);
+        pane.feed(b"\x1b[1;2r");
+        let _ = pane.resize(10, 5);
+        pane.feed(b"x");
+        assert_eq!(pane.parser().scroll_bottom, 1);
+    }
+
+    #[test]
+    fn image_placed_while_scrolled_back_anchors_to_the_live_cursor() {
+        // Break caught: the anchor resolving the cursor row through the
+        // scrolled viewport, pinning the image to a history line.
+        let mut pane = scrolled_back_pane();
+        pane.feed(b"\x1b_Ga=t,i=7;YQ==\x1b\\");
+        pane.feed(b"\x1b[1;1H\x1b_Ga=p,i=7\x1b\\");
+        assert_eq!(pane.graphics().placements()[0].top_abs, 3);
     }
 }

@@ -48,6 +48,11 @@ impl Cell {
             combining: None,
         }
     }
+
+    /// Whether the cell shows text, as opposed to a plain blank.
+    pub(crate) fn has_text(&self) -> bool {
+        self.char != ' ' || self.continuation || self.combining.is_some()
+    }
 }
 
 impl Default for Cell {
@@ -299,6 +304,13 @@ impl Grid {
         };
         self.lines[idx] = line;
         self.lines[idx].is_dirty = true;
+        // SCROLL-009: a scrolled-back view keeps showing the same text. Both
+        // growth and eviction move that text one line further from the live
+        // edge; the clamp stops at the oldest line once the text is evicted.
+        if self.scroll_offset > 0 {
+            self.scroll_offset += 1;
+            self.clamp_scroll();
+        }
         // Issue #13: eviction (or the buffer top crossing the viewport top)
         // shifts every visible row onto the next buffer line, so the new
         // line's own dirty flag is not enough. Mark the viewport fully
@@ -318,11 +330,7 @@ impl Grid {
             self.append_line(Line::blank(self.cols));
         }
         let slot = self.slot(virtual_index);
-        let had_content = existed
-            && self.lines[slot]
-                .cells
-                .iter()
-                .any(|c| c.char != ' ' || c.continuation || c.combining.is_some());
+        let had_content = existed && self.lines[slot].cells.iter().any(Cell::has_text);
         self.lines[slot] = line;
         if had_content {
             self.content_revision += 1;
@@ -459,6 +467,12 @@ impl Grid {
         Some(v - top)
     }
 
+    /// Record that a [`Grid::live_row_mut`] edit changed existing text, so
+    /// search results over it are refreshed (issue #73).
+    pub fn note_text_changed(&mut self) {
+        self.content_revision += 1;
+    }
+
     /// Current content revision (existing output overwritten).
     #[must_use]
     pub fn content_rev(&self) -> u64 {
@@ -588,13 +602,15 @@ impl Grid {
         true
     }
 
-    /// Mutable viewport line at `row`. `None` when the row is empty.
+    /// Mutable live-screen line at `row`, marked dirty. Terminal output
+    /// edits the live screen, never the scrollback the viewport happens to
+    /// show (issue #2). `None` when the row is empty.
     #[must_use]
-    pub fn row_mut(&mut self, row: usize) -> Option<&mut Line> {
+    pub fn live_row_mut(&mut self, row: usize) -> Option<&mut Line> {
         if row >= self.rows {
             return None;
         }
-        let virtual_index = self.top() + row;
+        let virtual_index = self.live_top() + row;
         if virtual_index >= self.total {
             return None;
         }
@@ -1075,7 +1091,11 @@ mod tests {
         }
     }
 
+    // Wall-clock, so not for shared CI runners or debug builds, where it
+    // measured 11-14 ms. `resize_does_not_materialise_dead_slots` is the
+    // deterministic regression gate for issue #15.
     #[test]
+    #[ignore = "wall-clock perf check: cargo test --release --lib -- --ignored"]
     fn resize_at_100k_scrollback_stays_fast() {
         // Issue #15 measured a 27.8 ms median resize at this capacity before
         // the fix; the loose bound is load headroom, not the target.
@@ -1246,8 +1266,8 @@ mod tests {
         grid.write_line(2, make_line("hello", grid.cols));
         assert_eq!(row_text(&grid, 2), "hello");
         assert!(grid.row(24).is_none());
-        assert!(grid.row_mut(24).is_none());
-        assert!(grid.row_mut(0).is_some());
+        assert!(grid.live_row_mut(24).is_none());
+        assert!(grid.live_row_mut(0).is_some());
     }
 
     #[test]

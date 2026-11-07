@@ -26,6 +26,16 @@ Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. F
 
 ### Fixed
 
+- Reading scrollback: the view now keeps its text while output arrives, and line
+  edits (erase, insert, delete) apply to the live screen, never the history on screen.
+  Images placed while scrolled back anchor to the live cursor.
+- Finished commands survive full-screen apps: alt-screen output and `CSI 3J` no
+  longer retire main-screen command records.
+- `ESC c` and compound modes such as `CSI ?1049;25h` give the same result however the
+  output is chunked.
+- A full-screen `DECSTBM` such as `CSI r` no longer pins the scroll region across a
+  window grow, and line feed and cursor down below a region move down instead of up.
+- Search results refresh when a line edit changes existing text.
 - Tab icons and close controls are painted separately from Unicode titles.
 - Windows task-host adapter is gated to Windows so portable core checks compile.
 - Task runs now bootstrap the host when absent, use host-side task identity (`taskId`), launch transitive dependencies topologically, and idempotently return the same live run on concurrent create (#102–#105).

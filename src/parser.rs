@@ -159,9 +159,9 @@ pub struct Parser {
     pub scroll_top: usize,
     /// `usize::MAX` until the first grid contact; [`Parser::fit`] clamps it.
     pub scroll_bottom: usize,
-    /// Issue #3: no `DECSTBM` has run, so the scroll region's bottom edge
+    /// Issue #3: the region spans the whole screen, so its bottom edge
     /// follows the screen bottom across resize (grow restores full-height
-    /// scrolling).
+    /// scrolling). Only a partial `DECSTBM` region stays pinned.
     pub region_follows_bottom: bool,
     /// #22: bytes of a UTF-8 sequence still expected inside a string state
     /// (OSC / DCS), where a 0x9C continuation byte is data, not ST.
@@ -245,6 +245,7 @@ impl Parser {
         let mut events = Vec::new();
         let mut printed = false;
         for (i, &b) in bytes.iter().enumerate() {
+            let seen_events = events.len();
             // Mid-multibyte-UTF-8, continuation bytes 0x80..=0xBF are
             // *not* C1 controls (0x9F is a legal continuation byte, e.g.
             // U+1F600), so they bypass the state machine entirely.
@@ -450,14 +451,16 @@ impl Parser {
                     _ => self.state = State::Escape,
                 },
             }
-            if matches!(
-                events.last(),
-                Some(
+            // One byte can emit several events (`ESC c`, `CSI ?1049;25h`), so
+            // the grid switch need not be the last of them.
+            if events.iter().skip(seen_events).any(|event| {
+                matches!(
+                    event,
                     ParserEvent::EnterAltScreen
                         | ParserEvent::ExitAltScreen
                         | ParserEvent::ClearScrollback
                 )
-            ) {
+            }) {
                 self.fit(grid);
                 return AdvanceOutcome {
                     events,
@@ -701,10 +704,11 @@ impl Parser {
     fn line_feed_quiet(&mut self, grid: &mut Grid) {
         self.wrap_pending = false;
         self.last_base_col = None;
-        if self.cursor_row >= self.scroll_bottom {
+        // Only the region's bottom row scrolls. Outside the region the cursor
+        // just moves down, stopping at the last row of the screen.
+        if self.cursor_row == self.scroll_bottom {
             grid.scroll_region_up(self.scroll_top, self.scroll_bottom);
-            self.cursor_row = self.scroll_bottom;
-        } else {
+        } else if self.cursor_row + 1 < grid.rows {
             self.cursor_row += 1;
         }
     }
@@ -822,11 +826,15 @@ impl Parser {
     }
 
     fn erase_cells(&mut self, grid: &mut Grid, row: usize, from: usize, to: usize) {
-        if let Some(line) = grid.row_mut(row) {
+        if let Some(line) = grid.live_row_mut(row) {
             let last = to.min(line.cells.len().saturating_sub(1));
             if from <= last {
+                let changed = line.cells[from..=last].iter().any(Cell::has_text);
                 for cell in &mut line.cells[from..=last] {
                     *cell = Cell::blank();
+                }
+                if changed {
+                    grid.note_text_changed();
                 }
             }
         }
@@ -899,8 +907,14 @@ impl Parser {
                 // #5: CUD moves the cursor down; at the region bottom it
                 // stops. Only a line feed scrolls (xterm/WSLg semantics:
                 // "Cursor Down at the bottom of the scroll region must
-                // scroll, Cursor Down in the middle must not").
-                self.cursor_row = (self.cursor_row + n).min(self.scroll_bottom);
+                // scroll, Cursor Down in the middle must not"). Starting
+                // below the region, it stops at the last row instead.
+                let limit = if self.cursor_row <= self.scroll_bottom {
+                    self.scroll_bottom
+                } else {
+                    rows - 1
+                };
+                self.cursor_row = (self.cursor_row + n).min(limit);
                 self.wrap_pending = false;
             }
             b'C' => {
@@ -989,10 +1003,13 @@ impl Parser {
                 *printed = true;
             }
             b'@' | b'P' | b'X' => {
-                if let Some(line) = grid.row_mut(self.cursor_row) {
+                if let Some(line) = grid.live_row_mut(self.cursor_row) {
                     let len = line.cells.len();
                     let col = self.cursor_col.min(len.saturating_sub(1));
                     let count = n.min(len - col);
+                    // ECH blanks its range; ICH and DCH also shift the rest.
+                    let end = if final_byte == b'X' { col + count } else { len };
+                    let changed = line.cells[col..end].iter().any(Cell::has_text);
                     match final_byte {
                         b'@' => {
                             for _ in 0..count {
@@ -1009,6 +1026,9 @@ impl Parser {
                                 *cell = Cell::blank();
                             }
                         }
+                    }
+                    if changed {
+                        grid.note_text_changed();
                     }
                 }
                 *printed = true;
@@ -1044,7 +1064,9 @@ impl Parser {
                     self.scroll_top = 0;
                     self.scroll_bottom = rows - 1;
                 }
-                self.region_follows_bottom = false;
+                // A full-screen region (`CSI r` above all) is no custom
+                // region: it keeps following the screen across resize.
+                self.region_follows_bottom = self.scroll_top == 0 && self.scroll_bottom == rows - 1;
                 self.cursor_row = 0;
                 self.cursor_col = 0;
                 self.wrap_pending = false;

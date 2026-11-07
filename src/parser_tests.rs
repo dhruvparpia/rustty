@@ -712,4 +712,57 @@ mod tests {
         feed(&mut p, &mut g, "abe\u{301}");
         assert_eq!(g.line_text_abs(0).as_deref(), Some("abe\u{301}"));
     }
+
+    #[test]
+    fn line_feed_below_the_region_moves_down_without_scrolling() {
+        // Break caught: LF treating any row past the region bottom as the
+        // region bottom, scrolling the region and pulling the cursor up.
+        let mut p = Parser::new();
+        let mut g = grid();
+        fill(&mut p, &mut g);
+        feed(&mut p, &mut g, "\x1b[1;2r\x1b[4;1H\n");
+        assert_eq!(p.cursor_row, 4);
+        assert_eq!(rows(&g), ["r0", "r1", "r2", "r3", "r4"]);
+    }
+
+    #[test]
+    fn line_feed_on_the_last_row_below_the_region_stays_put() {
+        // Break caught: moving past the screen or scrolling at the last row.
+        let mut p = Parser::new();
+        let mut g = grid();
+        fill(&mut p, &mut g);
+        feed(&mut p, &mut g, "\x1b[1;2r\x1b[5;1H\n");
+        assert_eq!(p.cursor_row, 4);
+        assert_eq!(rows(&g), ["r0", "r1", "r2", "r3", "r4"]);
+    }
+
+    #[test]
+    fn line_feed_at_the_region_bottom_still_scrolls_only_the_region() {
+        // Break caught: the below-region fix losing the normal scroll case.
+        let mut p = Parser::new();
+        let mut g = grid();
+        fill(&mut p, &mut g);
+        feed(&mut p, &mut g, "\x1b[1;2r\x1b[2;1H\n");
+        assert_eq!(p.cursor_row, 1);
+        assert_eq!(rows(&g), ["r1", "", "r2", "r3", "r4"]);
+    }
+
+    #[test]
+    fn cursor_down_below_the_region_stops_at_the_last_row() {
+        // Break caught: CUD clamping to the region bottom from below it,
+        // which moves the cursor up.
+        let mut p = Parser::new();
+        let mut g = grid();
+        feed(&mut p, &mut g, "\x1b[1;2r\x1b[4;1H\x1b[5B");
+        assert_eq!(p.cursor_row, 4);
+    }
+
+    #[test]
+    fn cursor_down_inside_the_region_stops_at_the_region_bottom() {
+        // Break caught: the below-region fix dropping the normal clamp.
+        let mut p = Parser::new();
+        let mut g = grid();
+        feed(&mut p, &mut g, "\x1b[1;2r\x1b[1;1H\x1b[5B");
+        assert_eq!(p.cursor_row, 1);
+    }
 }
