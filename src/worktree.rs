@@ -362,11 +362,11 @@ branch refs/heads/web
         assert_eq!(git(&dir, &["status", "--porcelain"]), "");
         // And from inside a worktree it still lands in the main checkout.
         let second = create(&path, "second").expect("from a worktree");
-        assert!(
-            second.starts_with(dir.canonicalize().unwrap_or(dir.clone()))
-                || second.starts_with(&dir),
-            "{second:?}"
-        );
+        // Git answers with the long path; the temp folder can be an 8.3 short name,
+        // as it is on CI, so only compare the two after resolving both.
+        let main = dir.canonicalize().expect("main checkout");
+        let landed = second.canonicalize().expect("second worktree");
+        assert!(landed.starts_with(&main), "{landed:?} is not in {main:?}");
         let _ = git(
             &dir,
             &["worktree", "remove", "--force", &path.to_string_lossy()],
