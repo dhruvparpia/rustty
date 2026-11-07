@@ -450,7 +450,9 @@ fn a_connection_that_never_initializes_is_dropped() {
     rig.pump_until(|rig| rig.server.client_count() == MAX_CLIENTS);
     rig.server.set_initialize_deadline(Duration::from_millis(1));
     rig.pump_until(|rig| rig.server.client_count() == 0);
-    // A slot is free again, and this one gets served.
+    // A slot is free again, and this one gets served. It gets a normal deadline:
+    // on a busy machine 1 ms can pass before its first message is read.
+    rig.server.set_initialize_deadline(INITIALIZE_DEADLINE);
     let handle = std::thread::spawn(move || {
         let mut next = open(&entry).expect("connect");
         hello(&mut next);

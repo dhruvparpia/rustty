@@ -864,10 +864,20 @@ fn set_theme(hwnd: HWND, idx: usize) {
         for problem in problems {
             eprintln!("rustty: {problem}");
         }
-        s.app.set_palette(theme.palette);
-        s.theme = theme;
+        adopt_theme(s, theme);
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Switch to `theme`, taking text already written with it (THEME-016).
+fn adopt_theme(s: &mut WindowState, theme: Theme) {
+    let mut map = s.theme.recolor_map(&theme);
+    map.extend(
+        welcome::Colors::from_theme(&s.theme).recolor_map(&welcome::Colors::from_theme(&theme)),
+    );
+    s.app.set_palette(theme.palette);
+    s.app.recolor(&map);
+    s.theme = theme;
 }
 
 fn open_worktree(hwnd: HWND, idx: usize) {
@@ -7540,8 +7550,7 @@ fn reload_config(s: &mut WindowState, hwnd: HWND) {
     }
     let font = cfg.font();
     let font_changed = font != s.font;
-    s.app.set_palette(new_theme.palette);
-    s.theme = new_theme;
+    adopt_theme(s, new_theme);
     // Only a change to the file overrides what Ctrl+Shift+S chose.
     if cfg.session_rail != s.cfg.session_rail {
         s.rail_enabled = cfg.session_rail;
@@ -7669,8 +7678,7 @@ fn apply_profile_theme(s: &mut WindowState, spec: &ProfileSpec) {
     for problem in &problems {
         eprintln!("rustty: {problem}");
     }
-    s.app.set_palette(theme.palette);
-    s.theme = theme;
+    adopt_theme(s, theme);
 }
 
 /// The `themes/` directory beside the config file, if the config has a path.
@@ -8059,8 +8067,7 @@ fn cycle_theme(hwnd: HWND, delta: i32) {
     };
     let n = theme::PRESETS.len() as i32;
     let idx = (active_theme_index(s) as i32 + delta).rem_euclid(n) as usize;
-    s.theme = Theme::preset(theme::PRESETS[idx]).unwrap_or_default();
-    s.app.set_palette(s.theme.palette);
+    adopt_theme(s, Theme::preset(theme::PRESETS[idx]).unwrap_or_default());
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 

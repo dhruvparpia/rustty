@@ -187,6 +187,16 @@ impl Line {
     }
 }
 
+/// `color` after a theme change: the first match in `map`, or as it was.
+pub(crate) fn recolored(color: Option<Color>, map: &[(Color, Color)]) -> Option<Color> {
+    let old = color?;
+    Some(
+        map.iter()
+            .find(|(from, _)| *from == old)
+            .map_or(old, |(_, to)| *to),
+    )
+}
+
 /// Circular screen buffer with a scrolling viewport.
 ///
 /// The buffer holds at most `rows + scrollback` lines. The virtual line
@@ -755,6 +765,22 @@ impl Grid {
         moved_up
     }
 
+    /// Change colors already written, everywhere in this grid: each cell's color
+    /// takes the first match in `map`, once (THEME-016). A color not in the map is
+    /// one a program chose, and stays.
+    pub fn recolor(&mut self, map: &[(Color, Color)]) {
+        for v in 0..self.total {
+            let slot = self.slot(v);
+            let line = &mut self.lines[slot];
+            let cut = line.clipped.iter_mut().flat_map(|cut| cut.iter_mut());
+            for cell in line.cells.iter_mut().chain(cut) {
+                cell.fg = recolored(cell.fg, map);
+                cell.bg = recolored(cell.bg, map);
+            }
+        }
+        self.mark_all_dirty();
+    }
+
     /// Change the scrollback depth and re-allocate the buffer
     pub fn set_scrollback(&mut self, scrollback: usize) {
         self.scrollback = scrollback;
@@ -1259,6 +1285,75 @@ mod tests {
             per_resize < std::time::Duration::from_millis(10),
             "resize took {per_resize:?}"
         );
+    }
+
+    #[test]
+    fn recoloring_reaches_the_screen_the_history_and_cut_text() {
+        let (old, new) = (Color::rgb(1, 1, 1), Color::rgb(2, 2, 2));
+        let painted = Cell {
+            char: 'x',
+            fg: Some(old),
+            bg: Some(old),
+            ..Cell::blank()
+        };
+        let mut grid = Grid::with_size(10, 2, 10);
+        grid.write_cell(0, 9, painted.clone());
+        grid.append_line(Line::blank(10));
+        grid.append_line(Line::blank(10));
+        grid.write_cell(1, 0, painted);
+        let history = grid.evicted + grid.total - 4;
+        grid.resize_around(5, 2, 1);
+        grid.recolor(&[(old, new)]);
+        assert_eq!(grid.row(1).unwrap().cells[0].fg, Some(new));
+        assert_eq!(grid.row(1).unwrap().cells[0].bg, Some(new));
+        grid.resize_around(10, 2, 1);
+        assert_eq!(grid.line_abs(history).unwrap().cells[9].fg, Some(new));
+        assert!(grid.all_dirty());
+    }
+
+    #[test]
+    fn recoloring_leaves_other_colors_and_default_text_alone() {
+        let (old, new) = (Color::rgb(1, 1, 1), Color::rgb(2, 2, 2));
+        let chosen = Color::rgb(9, 8, 7);
+        let mut grid = Grid::with_size(4, 1, 0);
+        grid.write_cell(
+            0,
+            0,
+            Cell {
+                char: 'x',
+                fg: Some(chosen),
+                ..Cell::blank()
+            },
+        );
+        grid.write_cell(
+            0,
+            1,
+            Cell {
+                char: 'y',
+                ..Cell::blank()
+            },
+        );
+        grid.recolor(&[(old, new)]);
+        assert_eq!(grid.row(0).unwrap().cells[0].fg, Some(chosen));
+        assert_eq!(grid.row(0).unwrap().cells[1].fg, None);
+    }
+
+    #[test]
+    fn recoloring_changes_each_cell_once() {
+        // A swap must not swap back partway through the list.
+        let (a, b) = (Color::rgb(1, 1, 1), Color::rgb(2, 2, 2));
+        let mut grid = Grid::with_size(1, 1, 0);
+        grid.write_cell(
+            0,
+            0,
+            Cell {
+                char: 'x',
+                fg: Some(a),
+                ..Cell::blank()
+            },
+        );
+        grid.recolor(&[(a, b), (b, a)]);
+        assert_eq!(grid.row(0).unwrap().cells[0].fg, Some(b));
     }
 
     /// A grid holding text no shell knows about, as the welcome banner is.

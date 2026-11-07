@@ -780,6 +780,7 @@ The product must support common terminal/TUI applications.
 | THEME-013 | Themes shall be validated on load. | P0 |
 | THEME-014 | Invalid theme colors shall fall back safely. | P0 |
 | THEME-015 | Themes shall support 256-color palette remapping. | P1 |
+| THEME-016 | Switching theme shall change text already written, on screen and in the history, in every pane: colors from the old theme's palette, its default text and background, and the welcome banner become the new theme's. Colors a program chose exactly stay. | P1 |
 | SKIN-001 | RusTTY shall offer paired `copper-dark` and `copper-light` native skins with charcoal/warm-paper surfaces and restrained copper focus accents. Existing themes and explicit profile overrides remain selectable. | P1 |
 | SKIN-002 | UI foreground, secondary text, accent and separator colors shall be independently overrideable from terminal foreground/cursor/ANSI colors using `ui-foreground`, `ui-muted`, `ui-accent` and `ui-border`. Omitted keys shall derive compatible colors from the selected theme. | P1 |
 | SKIN-003 | Tabs, palette, search, bookmark and pane-title chrome shall use shared semantic UI colors. Active tabs and selected palette/bookmark rows shall have a visible positional indicator as well as a changed background. The `+` button follows the last tab, and tab titles use the Windows UI font. | P1 |

@@ -79,6 +79,11 @@ Everything built on top of 0.6.0: the sessions sidebar, restart safety, worktree
 
 ### Fixed
 
+- Switching theme now changes text already on screen, in every tab and in the history, including
+  the welcome banner. It used to keep the old theme's colors, so dark-theme text was close to
+  invisible on a light theme. Colors a program chose exactly stay as they are.
+- White and bright white are now readable in Solarized Light and Copper Light. PowerShell types in
+  bright white, which was close to the background on both, so what you typed nearly disappeared.
 - Resizing a window or pane no longer garbles its text. Losing a row scrolled the text up here while
   the console repainted it on its old row, so lines appeared twice and the cursor sat on the wrong one.
 - Text cut off by a narrower pane comes back when it widens, including the welcome banner and
@@ -94,9 +99,8 @@ Everything built on top of 0.6.0: the sessions sidebar, restart safety, worktree
   it up, which stretched the gaps between words.
 - Block characters and Powerline separators are drawn as geometry, so rows and prompt
   segments join with no gaps at any line height.
-- Theme palettes now colour ANSI output, so each theme shows its own 16 colors. Text
-  already on screen keeps its colors after a theme switch, and a session host's snapshot
-  of existing text uses the default palette.
+- Theme palettes now colour ANSI output, so each theme shows its own 16 colors. A session
+  host's snapshot of existing text uses the default palette.
 
 ## [0.6.0] - never released; its changes ship in 0.7.0
 

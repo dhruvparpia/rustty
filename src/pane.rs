@@ -879,10 +879,20 @@ impl Pane {
         self.dirty = true;
     }
 
-    /// Colors for ANSI-16 output from now on. Text already on screen keeps
-    /// the colors it was written with.
+    /// Colors for ANSI-16 output from now on. [`Pane::recolor`] changes text
+    /// already written.
     pub const fn set_palette(&mut self, palette: [crate::color::Color; 16]) {
         self.parser.palette = palette;
+    }
+
+    /// Change colors already written, for a new theme (THEME-016).
+    pub fn recolor(&mut self, map: &[(crate::color::Color, crate::color::Color)]) {
+        self.grid.recolor(map);
+        if let Some(main) = &mut self.main_grid {
+            main.recolor(map);
+        }
+        self.parser.recolor(map);
+        self.dirty = true;
     }
 
     /// Whether the viewport follows new output at the live edge (issue #42).
@@ -1334,6 +1344,7 @@ impl Default for Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Color;
 
     #[test]
     fn panes_get_distinct_ids_that_only_go_up() {
@@ -1982,6 +1993,35 @@ mod tests {
         let _ = pane.resize(50, 6);
         pane.feed(b"repaint");
         assert_eq!(pane.output_age(), None);
+    }
+
+    #[test]
+    fn a_new_theme_recolors_text_and_what_is_written_next() {
+        // Break caught: dark-theme text staying pale on a light theme, and the rest
+        // of a colored line still arriving in the old color.
+        let (old, new) = (Color::rgb(1, 1, 1), Color::rgb(2, 2, 2));
+        let mut palette = [Color::rgb(9, 9, 9); 16];
+        palette[1] = old;
+        let mut pane = Pane::with_size(40, 5, 100);
+        pane.set_palette(palette);
+        pane.feed(b"\x1b[31mred");
+        pane.recolor(&[(old, new)]);
+        assert_eq!(pane.grid().row(0).unwrap().cells[0].fg, Some(new));
+        pane.feed(b"more");
+        assert_eq!(pane.grid().row(0).unwrap().cells[3].fg, Some(new));
+    }
+
+    #[test]
+    fn a_new_theme_recolors_the_screen_behind_a_full_screen_program() {
+        let (old, new) = (Color::rgb(1, 1, 1), Color::rgb(2, 2, 2));
+        let mut palette = [Color::rgb(9, 9, 9); 16];
+        palette[1] = old;
+        let mut pane = Pane::with_size(40, 5, 100);
+        pane.set_palette(palette);
+        pane.feed(b"\x1b[31mred\x1b[0m\x1b[?1049h");
+        pane.recolor(&[(old, new)]);
+        pane.feed(b"\x1b[?1049l");
+        assert_eq!(pane.grid().row(0).unwrap().cells[0].fg, Some(new));
     }
 
     #[test]

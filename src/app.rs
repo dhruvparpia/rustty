@@ -164,6 +164,17 @@ impl App {
         self.apply_palette();
     }
 
+    /// Change colors already written in every pane, for a new theme (THEME-016).
+    /// When nothing changes, as between tabs sharing a theme, no line is touched.
+    pub fn recolor(&mut self, map: &[(Color, Color)]) {
+        if map.iter().all(|(from, to)| from == to) {
+            return;
+        }
+        for tab in &mut self.tabs {
+            tab.for_each_pane(|pane, _| pane.recolor(map));
+        }
+    }
+
     /// Push the current palette to every pane. Panes are few, and this only
     /// runs when a tab or pane opens or the theme changes.
     fn apply_palette(&mut self) {
@@ -834,6 +845,38 @@ mod tests {
         app.focus_pane(0);
         app.feed_active(b"x");
         assert!(app.take_dirty(), "an unfocused pane's output repaints");
+    }
+
+    #[test]
+    fn a_recolor_reaches_every_tab_and_pane() {
+        let (old, new) = (Color::rgb(1, 1, 1), Color::rgb(2, 2, 2));
+        let mut palette = [Color::rgb(9, 9, 9); 16];
+        palette[1] = old;
+        let mut app = App::new();
+        app.set_palette(palette);
+        app.feed_active(b"\x1b[31mfirst");
+        app.add_tab();
+        assert!(app.split_active(Dir::Vertical).is_some());
+        app.feed_active(b"\x1b[31msplit");
+        app.recolor(&[(old, new)]);
+        let first = app
+            .tab_at_mut(0)
+            .map(|t| t.pane().grid().row(0).unwrap().cells[0].fg);
+        assert_eq!(first, Some(Some(new)));
+        let split = app
+            .active_tab()
+            .map(|t| t.pane().grid().row(0).unwrap().cells[0].fg);
+        assert_eq!(split, Some(Some(new)));
+    }
+
+    #[test]
+    fn recoloring_to_the_same_colors_marks_nothing_to_repaint() {
+        // Switching between tabs that share a theme must not walk every line.
+        let same = Color::rgb(1, 1, 1);
+        let mut app = App::new();
+        let _ = app.take_dirty();
+        app.recolor(&[(same, same)]);
+        assert!(!app.take_dirty());
     }
 
     #[test]
