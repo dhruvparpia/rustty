@@ -18,8 +18,10 @@
 //!   included — closes them; no leaks.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::mem::size_of;
+use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 
 use windows::Win32::Foundation::{
@@ -41,6 +43,67 @@ use windows::Win32::System::Threading::{
     STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 use windows::core::{HRESULT, Owned, PCWSTR, PWSTR};
+
+use crate::program_search::{find_in_dirs, has_path_part, is_batch, is_runnable_file, search_dirs};
+use crate::secret_exec::{batch_command_line, system_program, windows_folders};
+
+/// The longest command line `CreateProcessW` takes, in UTF-16 units with its NUL.
+pub const MAX_COMMAND_LINE: usize = 32_767;
+
+/// What `CreateProcessW` is told to start. There is always either a file named here
+/// or a path on the command line, so it never does a search of its own, which would
+/// look in the current folder first (SHELL-030).
+struct Launch {
+    /// `lpApplicationName`, NUL-terminated, for a batch file's `cmd.exe`.
+    application: Option<Vec<u16>>,
+    /// `lpCommandLine`, NUL-terminated.
+    line: Vec<u16>,
+}
+
+/// Work out what starting `program` means. A name with a path part is used as it
+/// always was. A bare name is searched for on absolute folders only, and if it isn't
+/// there the answer is not found: it never falls back to `CreateProcessW`'s search.
+fn plan_launch(program: &str, args: &[String]) -> Result<Launch, io::Error> {
+    let name = OsStr::new(program);
+    if has_path_part(name) {
+        return Ok(Launch {
+            application: None,
+            line: wide_command_line(program, args),
+        });
+    }
+    let path_var = std::env::var_os("PATH");
+    let dirs = search_dirs(&windows_folders(), path_var.as_deref());
+    let Some(file) = find_in_dirs(name, &dirs, is_runnable_file) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "{program} was not found on PATH. The current folder is not searched: use a \
+                 path such as .\\{program} to run one from there"
+            ),
+        ));
+    };
+    if is_batch(&file) {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let line = batch_command_line(&file, &args)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        let cmd = system_program("cmd.exe")?;
+        return Ok(Launch {
+            application: Some(cmd.as_os_str().encode_wide().chain(Some(0)).collect()),
+            line,
+        });
+    }
+    // A path that isn't valid text can't go through `wide_command_line` unchanged.
+    let Some(file) = file.to_str() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the path found for {program} is not valid Unicode"),
+        ));
+    };
+    Ok(Launch {
+        application: None,
+        line: wide_command_line(file, args),
+    })
+}
 
 /// An owned raw HANDLE safe to move onto a worker thread.
 ///
@@ -65,6 +128,10 @@ impl SendHandle {
 // process thread, and this type is the sole owner, so moving it between threads is
 // sound (the reader thread and the UI thread never share the same handle object).
 unsafe impl Send for SendHandle {}
+// Safety: only `raw` and `wait_exit_code` read it through a shared reference. The
+// handle value never changes, and waiting on or querying one process handle from
+// two threads is allowed. It is closed only when the last owner drops it.
+unsafe impl Sync for SendHandle {}
 
 /// The ConPTY input side, owned by one worker thread.
 ///
@@ -119,6 +186,20 @@ impl ConPty {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "terminal size must be 1..=i16::MAX in each dimension",
+            ));
+        }
+        let Launch {
+            application,
+            line: mut cmdline,
+        } = plan_launch(program, args)?;
+        // Refused here, whole. Cutting it short would run something else.
+        if cmdline.len() > MAX_COMMAND_LINE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the command line is {} characters, over the {MAX_COMMAND_LINE} Windows allows",
+                    cmdline.len()
+                ),
             ));
         }
         let size = COORD {
@@ -207,7 +288,6 @@ impl ConPty {
                 return Err(io_error(&e));
             }
 
-            let mut cmdline = wide_command_line(program, args);
             // SHELL-019/021: working directory and environment overrides for
             // this pane. The block starts from the inherited environment
             // (SHELL-022: nothing is injected on top of what the user set).
@@ -240,8 +320,11 @@ impl ConPty {
                 } else {
                     Default::default()
                 };
+            let application_ptr = application
+                .as_ref()
+                .map_or(std::ptr::null(), |app| app.as_ptr());
             let spawned = CreateProcessW(
-                PWSTR::null(),
+                PCWSTR::from_raw(application_ptr),
                 Some(PWSTR(cmdline.as_mut_ptr())),
                 None,
                 None,
@@ -385,6 +468,13 @@ impl Drop for ConPty {
 
 /// Block until the child process exits, then return its exit code.
 ///
+/// The process id behind `process` (RESTORE-002): 0 when Windows will not say.
+#[must_use]
+pub fn process_id(process: &SendHandle) -> u32 {
+    // Safety: the handle stays open for the length of the call.
+    unsafe { windows::Win32::System::Threading::GetProcessId(*process.0) }
+}
+
 /// Run this on the reader thread after the output pipe reports EOF
 /// (TTY-025: report the exit code to the pane). `STILL_ACTIVE` (259) is
 /// filtered out so a half-dead handle yields `None`, never a bogus code.
@@ -508,6 +598,12 @@ fn quote_arg(arg: &str) -> String {
     out.to_string()
 }
 
+/// How long this command line would be, in UTF-16 units with its NUL.
+#[must_use]
+pub fn command_line_units(program: &str, args: &[String]) -> usize {
+    wide_command_line(program, args).len()
+}
+
 fn wide_command_line(program: &str, args: &[String]) -> Vec<u16> {
     let mut s = quote_arg(program);
     for arg in args {
@@ -521,9 +617,26 @@ fn wide_command_line(program: &str, args: &[String]) -> Vec<u16> {
 /// the profile's overrides applied (case-insensitive, Windows convention),
 /// as `KEY=VALUE\0` pairs terminated by an extra NUL.
 fn wide_environment(env: &BTreeMap<String, String>) -> Vec<u16> {
+    environment_text(std::env::vars(), env)
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// The block's text. The automation variables are never inherited (AUTO-007):
+/// they name one session's window and grant, so a window or host started from
+/// inside a boss session must not pass them on to every shell it opens. A
+/// session that should have them gets them explicitly, in `env`.
+fn environment_text(
+    inherited: impl Iterator<Item = (String, String)>,
+    env: &BTreeMap<String, String>,
+) -> String {
     let mut block = String::new();
-    for (key, value) in std::env::vars() {
-        if !env.iter().any(|(k, _)| k.eq_ignore_ascii_case(&key)) {
+    for (key, value) in inherited {
+        let private = [crate::automation::ENV_WINDOW, crate::automation::ENV_TOKEN]
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&key));
+        if !private && !env.iter().any(|(k, _)| k.eq_ignore_ascii_case(&key)) {
             block.push_str(&key);
             block.push('=');
             block.push_str(&value);
@@ -536,7 +649,7 @@ fn wide_environment(env: &BTreeMap<String, String>) -> Vec<u16> {
         block.push_str(value);
         block.push('\0');
     }
-    block.encode_utf16().chain(std::iter::once(0)).collect()
+    block
 }
 
 fn io_error(e: &windows::core::Error) -> io::Error {
@@ -546,6 +659,101 @@ fn io_error(e: &windows::core::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a program's C runtime will read back from this command line.
+    fn parsed_back(program: &str, args: &[String]) -> Vec<String> {
+        let line = wide_command_line(program, args);
+        let mut count = 0;
+        // Safety: `line` is NUL-terminated, and the array `CommandLineToArgvW`
+        // returns is read within `count` and then freed with `LocalFree`.
+        unsafe {
+            let argv = windows::Win32::UI::Shell::CommandLineToArgvW(
+                PCWSTR::from_raw(line.as_ptr()),
+                &mut count,
+            );
+            assert!(!argv.is_null());
+            let parts = std::slice::from_raw_parts(argv, usize::try_from(count).unwrap())
+                .iter()
+                .map(|arg| arg.to_string().unwrap())
+                .collect();
+            let _ = windows::Win32::Foundation::LocalFree(Some(
+                windows::Win32::Foundation::HLOCAL(argv.cast()),
+            ));
+            parts
+        }
+    }
+
+    #[test]
+    fn arguments_with_quotes_and_newlines_arrive_unchanged() {
+        // Break caught: a boss getting a corrupted configuration or brief.
+        let args: Vec<String> = [
+            r#"{"mcpServers":{"rustty":{"command":"C:\\Tools\\rust ty\\rustty.exe"}}}"#,
+            "first line\nsecond \"quoted\" line\r\nthird\ttabbed",
+            "ends in a backslash\\",
+            r#"ends in a quote and backslashes\\""#,
+            r#"\\server\"share"#,
+            "",
+            "no-spaces\nbut a newline",
+            "plain",
+        ]
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect();
+        let program = r"C:\Program Files\x\claude.exe";
+        let back = parsed_back(program, &args);
+        assert_eq!(back[0], program);
+        assert_eq!(&back[1..], args.as_slice());
+    }
+
+    #[test]
+    fn the_real_boss_command_arrives_unchanged() {
+        let exe = r"C:\Tools\rust ty\rustty.exe";
+        let args = crate::boss::command(exe, r"C:\src\my project");
+        let (program, rest) = args.split_first().unwrap();
+        let back = parsed_back(program, rest);
+        assert_eq!(&back[1..], rest);
+        // The configuration still parses, and still starts this rustty.
+        let at = rest.iter().position(|a| a == "--mcp-config").unwrap() + 1;
+        let config: serde_json::Value = serde_json::from_str(&back[at + 1]).unwrap();
+        assert_eq!(config["mcpServers"]["rustty"]["command"], exe);
+    }
+
+    #[test]
+    fn a_command_line_over_the_limit_is_refused_whole() {
+        // Break caught: CreateProcessW being handed something it would refuse with
+        // a bare error, or a caller cutting it short to fit.
+        let args = vec!["x".repeat(MAX_COMMAND_LINE)];
+        let env = BTreeMap::new();
+        let Err(error) = ConPty::spawn("cmd.exe", &args, 80, 24, None, &env, None) else {
+            panic!("a command line over the limit started");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("32767"), "{error}");
+    }
+
+    #[test]
+    fn automation_variables_are_never_inherited() {
+        // Break caught: a window started from a boss session handing that
+        // session's token to every shell it opens, and a host session naming
+        // a window it has nothing to do with.
+        let inherited = vec![
+            ("PATH".to_string(), "p".to_string()),
+            ("RUSTTY_AUTOMATION_TOKEN".to_string(), "leak".to_string()),
+            ("rustty_window".to_string(), "9".to_string()),
+        ];
+        let mut env = BTreeMap::new();
+        let block = environment_text(inherited.clone().into_iter(), &env);
+        assert!(block.contains("PATH=p"));
+        assert!(!block.contains("leak"));
+        assert!(!block.to_ascii_uppercase().contains("RUSTTY_WINDOW"));
+        // What this session was explicitly given still goes through.
+        env.insert("RUSTTY_WINDOW".to_string(), "5".to_string());
+        env.insert("RUSTTY_AUTOMATION_TOKEN".to_string(), "mine".to_string());
+        let block = environment_text(inherited.into_iter(), &env);
+        assert!(block.contains("RUSTTY_WINDOW=5"));
+        assert!(block.contains("RUSTTY_AUTOMATION_TOKEN=mine"));
+        assert!(!block.contains("leak"));
+    }
 
     /// SHELL-021: the profile's environment replaces the inherited value
     /// (case-insensitively) and the block stays double-NUL terminated.

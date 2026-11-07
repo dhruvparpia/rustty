@@ -14,6 +14,25 @@ use rustty::theme;
 #[cfg(windows)]
 fn main() -> ExitCode {
     let cli = rustty::cli::parse(std::env::args_os().skip(1));
+    // SECRET-008: `process::exit` because `secrets run` returns the command's
+    // full 32-bit exit code, which `ExitCode` cannot carry.
+    if let Some(parsed) = &cli.secrets {
+        rustty::cli::attach_parent_console();
+        std::process::exit(rustty::secrets::run_cli(parsed));
+    }
+    // AUTO-012/013: these reach a running window and never open one. `mcp` speaks
+    // over its standard streams, so it must not touch the console attachment.
+    if let Some(args) = &cli.ctl {
+        rustty::cli::attach_parent_console();
+        return ExitCode::from(rustty::automation::ctl::main(args));
+    }
+    if cli.mcp {
+        return ExitCode::from(rustty::automation::mcp::main());
+    }
+    if let Some(args) = &cli.worktree {
+        rustty::cli::attach_parent_console();
+        return ExitCode::from(rustty::worktree::run_cli(args, &mut std::io::stdout()));
+    }
     let is_session_verb = cli.list_sessions
         || cli.new_session
         || cli.session_info.is_some()
@@ -330,6 +349,18 @@ fn session_verb(cli: &rustty::cli::Cli) -> ExitCode {
 #[cfg(not(windows))]
 fn main() -> ExitCode {
     let cli = rustty::cli::parse(std::env::args_os().skip(1));
+    if let Some(parsed) = &cli.secrets {
+        std::process::exit(rustty::secrets::run_cli(parsed));
+    }
+    if let Some(args) = &cli.ctl {
+        return ExitCode::from(rustty::automation::ctl::main(args));
+    }
+    if cli.mcp {
+        return ExitCode::from(rustty::automation::mcp::main());
+    }
+    if let Some(args) = &cli.worktree {
+        return ExitCode::from(rustty::worktree::run_cli(args, &mut std::io::stdout()));
+    }
     for unknown in &cli.unknown {
         eprintln!("rustty: ignoring unknown argument {unknown:?}");
     }

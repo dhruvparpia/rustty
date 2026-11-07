@@ -25,6 +25,8 @@ use crate::split::{DEFAULT_RATIO, Dir, PaneTree, RATIO_STEP, Rect, Side, neighbo
 /// A terminal tab: a pane tree, the focused leaf, and the tab-bar title.
 #[derive(Debug)]
 pub struct Tab {
+    /// Stable identity (AUTO-001): assigned at creation, never reused.
+    id: u64,
     tree: PaneTree,
     /// Tree leaves in flatten order, kept in step with `layout` (index `i`
     /// of `panes` owns `layout[i]`).
@@ -62,6 +64,7 @@ impl Tab {
         let panes = tree.flatten();
         let layout = tree.layout(cols, rows);
         Self {
+            id: crate::automation::next_id(),
             tree,
             panes,
             active: pane,
@@ -75,6 +78,25 @@ impl Tab {
             color: None,
             confirm_close: true,
         }
+    }
+
+    /// Stable identity (AUTO-001): assigned at creation, never reused.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Flatten index of the pane with this id, `None` when it is not here.
+    #[must_use]
+    pub fn pane_index_of(&self, id: u64) -> Option<usize> {
+        self.panes.iter().position(|pane| pane.borrow().id() == id)
+    }
+
+    /// Each pane's dot path from the tab root, in flatten order (the human
+    /// alias of the automation ADR §1).
+    #[must_use]
+    pub fn pane_paths(&self) -> Vec<String> {
+        self.tree.paths()
     }
 
     /// The tab's display title.
@@ -152,6 +174,12 @@ impl Tab {
     #[must_use]
     pub fn pane(&self) -> Ref<'_, Pane> {
         self.active.borrow()
+    }
+
+    /// A handle to the focused pane that does not keep it alive.
+    #[must_use]
+    pub fn focused_pane_weak(&self) -> std::rc::Weak<RefCell<Pane>> {
+        Rc::downgrade(&self.active)
     }
 
     /// The focused pane, mutably.
@@ -269,6 +297,23 @@ impl Tab {
         // SPLIT-005: both halves take their new boxes right away.
         let _ = self.apply_layout();
         self.focused_index()
+    }
+
+    /// Split the pane at flatten index `idx` and leave focus where it is:
+    /// automation splitting a pane must not move the person's typing to another
+    /// shell. Returns the new pane's flatten index; the caller spawns its shell.
+    pub fn split_keep_focus(&mut self, idx: usize, dir: Dir) -> Option<usize> {
+        let target = Rc::clone(self.panes.get(idx)?);
+        let fresh = Rc::new(RefCell::new(Pane::with_size(1, 1, self.scrollback)));
+        if !self
+            .tree
+            .split(&target, dir, DEFAULT_RATIO, Rc::clone(&fresh))
+        {
+            return None;
+        }
+        self.relayout();
+        let _ = self.apply_layout();
+        self.panes.iter().position(|pane| Rc::ptr_eq(pane, &fresh))
     }
 
     /// Close the focused pane (SPLIT-006): its sibling takes its box and
@@ -428,6 +473,7 @@ impl Tab {
         let panes = tree.flatten();
         let layout = tree.layout(cols, rows);
         Self {
+            id: crate::automation::next_id(),
             active: panes[0].clone(), // from_shape always leaves at least one leaf
             tree,
             panes,
@@ -507,6 +553,54 @@ impl Default for Tab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ids_survive_split_resize_and_closing_a_neighbour() {
+        // Break caught (#56): an id moving to another pane when the layout changes.
+        let mut tab = Tab::with_size(80, 24, 100);
+        let tab_id = tab.id();
+        let first = tab.pane().id();
+        assert_ne!(tab_id, first, "tabs and panes share one counter");
+        tab.split_active(Dir::Vertical);
+        let second = tab.pane().id();
+        assert_ne!(first, second);
+        let _ = tab.resize(100, 30);
+        assert_eq!(tab.pane_index_of(first), Some(0));
+        assert_eq!(tab.pane_index_of(second), Some(1));
+        tab.close_pane(0);
+        assert_eq!(tab.id(), tab_id);
+        assert_eq!(tab.pane_index_of(first), None);
+        assert_eq!(tab.pane_index_of(second), Some(0));
+        assert_eq!(tab.pane().id(), second);
+    }
+
+    #[test]
+    fn splitting_another_pane_leaves_focus_where_it_was() {
+        // Break caught: a boss splitting a pane moving the owner's keystrokes
+        // to a different shell.
+        let mut tab = Tab::with_size(80, 24, 100);
+        let first = tab.pane().id();
+        tab.split_active(Dir::Vertical);
+        let focused = tab.pane().id();
+        let fresh = tab.split_keep_focus(0, Dir::Horizontal).expect("split");
+        assert_eq!(tab.pane().id(), focused);
+        assert_eq!(tab.pane_count(), 3);
+        let fresh_id = tab.pane_at(fresh).map(|p| p.id()).expect("pane");
+        assert!(fresh_id != first && fresh_id != focused);
+        assert_eq!(tab.split_keep_focus(9, Dir::Vertical), None);
+        assert_eq!(tab.pane_count(), 3);
+    }
+
+    #[test]
+    fn pane_paths_follow_the_tree() {
+        // ADR §1: panes keep a dot path from the tab root.
+        let mut tab = Tab::with_size(80, 24, 100);
+        assert_eq!(tab.pane_paths(), vec![".0"]);
+        tab.split_active(Dir::Vertical);
+        assert_eq!(tab.pane_paths(), vec![".0", ".1"]);
+        tab.split_active(Dir::Horizontal);
+        assert_eq!(tab.pane_paths(), vec![".0", ".1.0", ".1.1"]);
+    }
 
     #[test]
     fn default_title() {

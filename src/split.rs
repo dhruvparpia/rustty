@@ -128,6 +128,25 @@ impl PaneTree {
         Self::count_node(&self.root)
     }
 
+    /// Each leaf's dot path from the root, in flatten order: `.0` for a lone
+    /// pane, then one component per split on the way down (`.1.0`).
+    #[must_use]
+    pub fn paths(&self) -> Vec<String> {
+        fn go(n: &Node, path: &str, out: &mut Vec<String>) {
+            match n {
+                Node::Leaf(_) if path.is_empty() => out.push(".0".to_string()),
+                Node::Leaf(_) => out.push(path.to_string()),
+                Node::VSplit { first, second, .. } | Node::HSplit { first, second, .. } => {
+                    go(first, &format!("{path}.0"), out);
+                    go(second, &format!("{path}.1"), out);
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(self.count());
+        go(&self.root, "", &mut out);
+        out
+    }
+
     /// All panes in flatten order (left-to-right, top-to-bottom).
     #[must_use]
     pub fn flatten(&self) -> Vec<Rc<RefCell<Pane>>> {
@@ -353,7 +372,8 @@ impl PaneTree {
         fn go(n: &Node) -> crate::session::Shape {
             match n {
                 Node::Leaf(p) => crate::session::Shape::Leaf {
-                    cwd: p.borrow().cwd().map(str::to_owned),
+                    cwd: p.borrow().saved_cwd().map(str::to_owned),
+                    agent: p.borrow().saved_agent().map(str::to_owned),
                 },
                 Node::VSplit {
                     ratio,
@@ -394,7 +414,7 @@ impl PaneTree {
             make_leaf: &mut dyn FnMut(Option<&str>) -> Rc<RefCell<Pane>>,
         ) -> Node {
             match s {
-                crate::session::Shape::Leaf { cwd } => Node::Leaf(make_leaf(cwd.as_deref())),
+                crate::session::Shape::Leaf { cwd, .. } => Node::Leaf(make_leaf(cwd.as_deref())),
                 crate::session::Shape::Split { dir, ratio, a, b } if depth > 0 => {
                     let first = Box::new(go(a, depth - 1, make_leaf));
                     let second = Box::new(go(b, depth - 1, make_leaf));

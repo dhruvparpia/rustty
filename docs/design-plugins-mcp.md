@@ -1,8 +1,12 @@
 # Plugin system / MCP — design phase only
 
 Roadmap v0.5 ("Plugin system / MCP — design phase only"). This is a design
-document, not a contract: nothing here is implemented and no key is in
-`src/config.rs`. SPEC.md stays the source of truth.
+document, not a contract. SPEC.md stays the source of truth.
+
+**Status, 2026-11-06:** rustty as an MCP *server* is implemented as `rustty mcp` (SPEC
+§9.34, `docs/design-automation-api.md`). rustty as a *host* that starts plugins is not:
+no `[[plugin]]` key, no per-plugin grants, no grant dialog and no handshake timeout.
+The three open questions below are answered by that ADR.
 
 ## Decision: one mechanism, MCP over stdio
 

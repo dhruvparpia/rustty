@@ -765,4 +765,175 @@ mod tests {
         feed(&mut p, &mut g, "\x1b[1;2r\x1b[1;1H\x1b[5B");
         assert_eq!(p.cursor_row, 1);
     }
+
+    #[test]
+    fn sgr_16_colors_use_the_parser_palette() {
+        // Break caught: SGR 30-37 reading the fixed table, so every theme
+        // shows the same colours.
+        let mut p = Parser::new();
+        let mut g = grid();
+        p.palette[1] = Color::rgb(1, 2, 3);
+        p.palette[4] = Color::rgb(4, 5, 6);
+        feed(&mut p, &mut g, "\x1b[31;44m");
+        assert_eq!(p.pen_fg, Some(Color::rgb(1, 2, 3)));
+        assert_eq!(p.pen_bg, Some(Color::rgb(4, 5, 6)));
+    }
+
+    #[test]
+    fn sgr_bright_and_256_low_indices_use_the_parser_palette() {
+        // Break caught: bright colours or 38;5;n bypassing the theme.
+        let mut p = Parser::new();
+        let mut g = grid();
+        p.palette[9] = Color::rgb(9, 9, 9);
+        p.palette[2] = Color::rgb(2, 2, 2);
+        p.palette[12] = Color::rgb(12, 12, 12);
+        feed(&mut p, &mut g, "\x1b[91;104m");
+        assert_eq!(p.pen_fg, Some(Color::rgb(9, 9, 9)));
+        assert_eq!(p.pen_bg, Some(Color::rgb(12, 12, 12)));
+        feed(&mut p, &mut g, "\x1b[38;5;2m");
+        assert_eq!(p.pen_fg, Some(Color::rgb(2, 2, 2)));
+    }
+
+    #[test]
+    fn sgr_256_cube_ignores_the_palette() {
+        // Break caught: the palette leaking into the fixed 6x6x6 cube.
+        let mut p = Parser::new();
+        let mut g = grid();
+        p.palette = [Color::rgb(1, 1, 1); 16];
+        feed(&mut p, &mut g, "\x1b[38;5;196m");
+        assert_eq!(p.pen_fg, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn reset_keeps_the_palette() {
+        // Break caught: ESC c dropping the theme back to the fixed colours.
+        let mut p = Parser::new();
+        let mut g = grid();
+        p.palette[1] = Color::rgb(1, 2, 3);
+        feed(&mut p, &mut g, "\x1bc");
+        feed(&mut p, &mut g, "\x1b[31m");
+        assert_eq!(p.pen_fg, Some(Color::rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn osc_9_is_a_notification() {
+        // Break caught: an agent's "needs input" notification being dropped.
+        let mut p = Parser::new();
+        let mut g = grid();
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]9;Approve the edit?\x07"),
+            vec![ParserEvent::Notify("Approve the edit?".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc_777_notify_uses_title_and_body() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]777;notify;Claude;Needs input\x07"),
+            vec![ParserEvent::Notify("Claude: Needs input".to_string())]
+        );
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]777;notify;Just a title\x07"),
+            vec![ParserEvent::Notify("Just a title".to_string())]
+        );
+        assert_eq!(feed(&mut p, &mut g, "\x1b]777;other;x\x07"), vec![]);
+    }
+
+    #[test]
+    fn osc_9_4_reports_progress_not_a_notification() {
+        // Break caught: a progress update raising "needs you".
+        let mut p = Parser::new();
+        let mut g = grid();
+        for (seq, active) in [
+            ("\x1b]9;4;1;42\x07", true),
+            ("\x1b]9;4;2;42\x07", true),
+            ("\x1b]9;4;3\x07", true),
+            ("\x1b]9;4;4;10\x07", true),
+            ("\x1b]9;4;0;0\x07", false),
+            ("\x1b]9;4;0\x07", false),
+        ] {
+            assert_eq!(
+                feed(&mut p, &mut g, seq),
+                vec![ParserEvent::Progress(active)],
+                "{seq}"
+            );
+        }
+    }
+
+    #[test]
+    fn numbered_osc_9_commands_are_not_notifications() {
+        // Break caught: a prompt reporting its directory with OSC 9;9 showing
+        // "Needs you" on every background session.
+        let mut p = Parser::new();
+        let mut g = grid();
+        for seq in ["\x1b]9;12\x07", "\x1b]9;1;500\x07"] {
+            assert_eq!(feed(&mut p, &mut g, seq), vec![], "{seq}");
+        }
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]9;9;C:\\Users\\me\\src\x07"),
+            vec![ParserEvent::CwdPath("C:\\Users\\me\\src".to_string())]
+        );
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]9;2 tests failed\x07"),
+            vec![ParserEvent::Notify("2 tests failed".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_program_can_ask_whether_status_reports_are_welcome() {
+        // Break caught: Claude Code staying silent because nothing answered.
+        let mut p = Parser::new();
+        let mut g = grid();
+        assert_eq!(
+            feed(&mut p, &mut g, "\x1b]7501;?\x1b\\"),
+            vec![ParserEvent::Respond(crate::program_status::query_reply())]
+        );
+        // Break caught: a program flooding the query, each reply being about 2 KiB
+        // of key events written on the UI thread. A second query this soon is dropped.
+        assert_eq!(feed(&mut p, &mut g, "\x1b]7501;?\x1b\\"), vec![]);
+        assert_eq!(feed(&mut p, &mut g, "\x1b]7501;state=bad\x07"), vec![]);
+    }
+
+    #[test]
+    fn a_status_report_reaches_the_pane() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        let events = feed(&mut p, &mut g, "\x1b]7501;state=working\x07");
+        assert!(
+            matches!(events.as_slice(), [ParserEvent::ProgramStatus(_)]),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_private_marker_never_means_the_plain_command() {
+        // Break caught: Claude Code's `CSI > 4 m` (a keyboard mode) turning on
+        // underline for every later character; `CSI ? u` moving the cursor.
+        let mut p = Parser::new();
+        let mut g = grid();
+        feed(&mut p, &mut g, "\x1b[>4m\x1b[>4;2m\x1b[>0q\x1b[=1m\x1b[<1m");
+        assert_eq!(p.pen_attrs, crate::grid::CellAttribute::empty());
+        feed(&mut p, &mut g, "\x1b[3;4H\x1b[s\x1b[5;6H\x1b[?u");
+        assert_eq!((p.cursor_row, p.cursor_col), (4, 5), "`? u` is a query");
+        feed(&mut p, &mut g, "\x1b[?s\x1b[9;9H\x1b[u");
+        assert_eq!((p.cursor_row, p.cursor_col), (2, 3), "`? s` saved nothing");
+    }
+
+    #[test]
+    fn real_private_modes_still_work() {
+        let mut p = Parser::new();
+        let mut g = grid();
+        let events = feed(&mut p, &mut g, "\x1b[?25l");
+        assert!(
+            events.contains(&ParserEvent::CursorVisibility(false)),
+            "{events:?}"
+        );
+        feed(&mut p, &mut g, "\x1b[2;3H");
+        let events = feed(&mut p, &mut g, "\x1b[?6n");
+        assert_eq!(events, vec![ParserEvent::Respond(b"\x1b[2;3R".to_vec())]);
+        feed(&mut p, &mut g, "\x1b[4m");
+        assert_ne!(p.pen_attrs, crate::grid::CellAttribute::empty());
+    }
 }

@@ -24,6 +24,14 @@ use crate::grid::{Cell, CellAttribute, Grid};
 pub enum ParserEvent {
     /// OSC 0/1/2 requested a tab title.
     Title(String),
+    /// OSC 9 or OSC 777;notify: a program is asking for attention.
+    Notify(String),
+    /// OSC 7501: a program reports its status (STATUS-001).
+    ProgramStatus(crate::program_status::Report),
+    /// OSC 9;9: a prompt reports its folder as a plain path.
+    CwdPath(String),
+    /// OSC 9;4: a program reports progress (`true`) or that it has stopped.
+    Progress(bool),
     /// The shell asked for the alternate screen (`CSI ?1049h` family).
     EnterAltScreen,
     /// The shell left the alternate screen (`CSI ?1049l` family).
@@ -125,6 +133,8 @@ pub enum MouseProtocol {
 /// Streaming VT parser plus the terminal state for one pane.
 #[derive(Debug, Clone)]
 pub struct Parser {
+    /// How often OSC 7501's support query is answered (STATUS-001).
+    status_query_limit: crate::program_status::QueryLimit,
     /// Current state-machine state.
     pub state: State,
     /// CSI parameter buffer.
@@ -168,6 +178,9 @@ pub struct Parser {
     pub string_utf8: u8,
     /// Saved cursor, if any.
     pub saved: Option<SavedCursor>,
+    /// ANSI-16 colors used by SGR 30-37, 40-47, 90-97, 100-107 and the low
+    /// indices of SGR 38;5 / 48;5. The window sets it from the theme.
+    pub palette: [Color; 16],
     /// Current foreground pen.
     pub pen_fg: Option<Color>,
     /// Current background pen.
@@ -201,6 +214,7 @@ impl Parser {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            status_query_limit: crate::program_status::QueryLimit::default(),
             state: State::Ground,
             params: Vec::new(),
             private: Vec::new(),
@@ -221,6 +235,7 @@ impl Parser {
             region_follows_bottom: true,
             string_utf8: 0,
             saved: None,
+            palette: ansi_palette(),
             pen_fg: None,
             pen_bg: None,
             pen_attrs: CellAttribute::empty(),
@@ -497,7 +512,19 @@ impl Parser {
 
     /// Full terminal reset (`ESC c`): state back to power-on defaults.
     pub fn reset(&mut self) {
+        let palette = self.palette;
         *self = Self::new();
+        // The palette belongs to the theme, not to terminal state.
+        self.palette = palette;
+    }
+
+    /// Color for an ANSI-256 index: the theme's palette for 0-15, the fixed
+    /// cube and gray ramp above that.
+    fn indexed_color(&self, n: u8) -> Color {
+        self.palette
+            .get(usize::from(n))
+            .copied()
+            .unwrap_or_else(|| ansi256(n))
     }
 
     /// The OSC 8 URI a cell's link id points to, `None` if the target
@@ -758,6 +785,31 @@ impl Parser {
             match prefix {
                 "0" | "1" | "2" => events.push(ParserEvent::Title(rest.to_string())),
                 "7" => events.push(ParserEvent::Cwd(rest.to_string())),
+                "9" => {
+                    if let Some(progress) = rest.strip_prefix("4;").or((rest == "4").then_some(""))
+                    {
+                        // State 0 clears; 1-4 are normal, error, busy and paused.
+                        let state = progress.split(';').next().unwrap_or("0");
+                        events.push(ParserEvent::Progress(state != "0" && !state.is_empty()));
+                    } else if let Some(path) = rest.strip_prefix("9;") {
+                        events.push(ParserEvent::CwdPath(path.to_string()));
+                    } else if !rest.split(';').next().is_some_and(|first| {
+                        !first.is_empty() && first.bytes().all(|b| b.is_ascii_digit())
+                    }) {
+                        // A leading number is a ConEmu command, such as a
+                        // prompt's `9;9` directory report: not a message.
+                        events.push(ParserEvent::Notify(rest.to_string()));
+                    }
+                }
+                "777" => {
+                    if let Some(body) = rest.strip_prefix("notify;") {
+                        let text = match body.split_once(';') {
+                            Some((title, message)) => format!("{title}: {message}"),
+                            None => body.to_string(),
+                        };
+                        events.push(ParserEvent::Notify(text));
+                    }
+                }
                 "8" => {
                     // OSC 8 `params;uri`; params (`id=`) are ignored. An
                     // empty URI closes the link. The target is stored as
@@ -772,6 +824,15 @@ impl Parser {
                         events.push(ParserEvent::Hyperlink(Some(uri.to_string())));
                     }
                 }
+                "7501" => match crate::program_status::parse(rest) {
+                    crate::program_status::Report::Query => {
+                        if self.status_query_limit.allow(std::time::Instant::now()) {
+                            events.push(ParserEvent::Respond(crate::program_status::query_reply()));
+                        }
+                    }
+                    crate::program_status::Report::Ignored => {}
+                    report => events.push(ParserEvent::ProgramStatus(report)),
+                },
                 "133" => {
                     let (marker, code) = match rest.split_once(':') {
                         Some((m, c)) => (m, c.parse().ok()),
@@ -891,6 +952,14 @@ impl Parser {
         printed: &mut bool,
     ) {
         if !self.intermediates.is_empty() {
+            return;
+        }
+        // A private marker makes it a different command: `CSI > 4 m` is a
+        // keyboard mode, not underline, and `CSI ? u` a query, not a restore.
+        // Only the DEC forms this parser really implements get through.
+        if !self.private.is_empty()
+            && !(self.private == b"?" && matches!(final_byte, b'h' | b'l' | b'n' | b'J' | b'K'))
+        {
             return;
         }
         let params = self.param_list();
@@ -1165,7 +1234,7 @@ impl Parser {
                     Some((5, _)) => (
                         params
                             .get(i + 2)
-                            .map(|&(idx, _)| ansi256(u8::try_from(idx).unwrap_or(0))),
+                            .map(|&(idx, _)| self.indexed_color(u8::try_from(idx).unwrap_or(0))),
                         3,
                     ),
                     Some((2, _)) => {
@@ -1226,10 +1295,10 @@ impl Parser {
                 29 => self.pen_attrs = self.pen_attrs.without(CellAttribute::STRIKE),
                 39 => self.pen_fg = None,
                 49 => self.pen_bg = None,
-                30..=37 => self.pen_fg = Some(ansi_palette()[p as usize - 30]),
-                40..=47 => self.pen_bg = Some(ansi_palette()[p as usize - 40]),
-                90..=97 => self.pen_fg = Some(ansi_palette()[p as usize - 90 + 8]),
-                100..=107 => self.pen_bg = Some(ansi_palette()[p as usize - 100 + 8]),
+                30..=37 => self.pen_fg = Some(self.palette[p as usize - 30]),
+                40..=47 => self.pen_bg = Some(self.palette[p as usize - 40]),
+                90..=97 => self.pen_fg = Some(self.palette[p as usize - 90 + 8]),
+                100..=107 => self.pen_bg = Some(self.palette[p as usize - 100 + 8]),
                 _ => {}
             }
             i += 1;

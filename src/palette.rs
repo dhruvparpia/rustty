@@ -54,6 +54,8 @@ pub enum Command {
     SwitchTheme(usize),
     /// Open existing Git worktree `n` as a tab at its root.
     OpenWorktree(usize),
+    /// Run a window menu command by id, for commands with no [`KeyAction`].
+    MenuItem(u32),
     /// Open the native Preferences config editor.
     OpenPreferences,
     /// Open the in-app settings overlay at setting `n` (issue #91).
@@ -271,6 +273,8 @@ pub fn builtin_shortcut(action: KeyAction) -> Option<&'static str> {
         KeyAction::CommandPalette => "ctrl+shift+p",
         KeyAction::HintMode => "ctrl+shift+k",
         KeyAction::ToggleBookmark => "ctrl+shift+b",
+        KeyAction::ToggleSessionRail => "ctrl+shift+s",
+        KeyAction::ToggleBoard => "ctrl+shift+r",
         _ => return None,
     })
 }
@@ -351,6 +355,8 @@ fn builtin_actions() -> impl Iterator<Item = (&'static str, KeyAction)> {
         CommandPalette,
         HintMode,
         ToggleBookmark,
+        ToggleSessionRail,
+        ToggleBoard,
     ]
     .into_iter()
     .filter_map(|a| builtin_shortcut(a).map(|s| (s, a)))
@@ -397,6 +403,11 @@ fn action_name(action: KeyAction) -> &'static str {
         KeyAction::CommandPalette => "command-palette",
         KeyAction::HintMode => "hint-mode",
         KeyAction::ToggleBookmark => "toggle-bookmark",
+        KeyAction::ToggleSessionRail => "toggle-session-rail",
+        KeyAction::ToggleBoard => "toggle-board",
+        KeyAction::NewWorktreeSession => "new-worktree-session",
+        KeyAction::InitProjectBrain => "init-project-brain",
+        KeyAction::StartBoss => "start-boss",
         KeyAction::ShowBookmarks => "show-bookmarks",
         KeyAction::ExportSelection => "export-selection",
         KeyAction::ExportLastCommand => "export-last-command",

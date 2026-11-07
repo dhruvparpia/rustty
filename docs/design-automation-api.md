@@ -1,5 +1,9 @@
 # ADR: Automation identity, IPC schema and capability grants (#44 slice 0, #55)
 
+**Status: accepted by the owner, 2026-11-06.** Implemented; the requirements are
+SPEC §9.34 (AUTO-001..015). Where the amendments at the end of this record differ
+from the text above them, the amendments win.
+
 Design record for the local automation API. Accepted decisions are binding for
 #56 (IPC server), #57 (CLI), #58 (events) and #59 (MCP adapter). One
 operations surface: the CLI, the raw IPC and the MCP adapter are three
@@ -91,3 +95,90 @@ JSON-RPC 2.0 (same base as MCP, so the adapter is a thin encoder):
 - The same identities feed the attach epic (#43) session aliases; identity
   design is shared, implementation is not.
 - Nothing here touches the PTY read loop, the parser, or the render loop.
+
+## Amendments (2026-11-06, while implementing)
+
+1. **Per-window write token** (owner's direction). Besides `automation-writes`, a
+   window generates a random token at start. Passed in `initialize` as `token`, it
+   grants writes to that connection only. A session the window starts for a boss
+   gets it as `RUSTTY_AUTOMATION_TOKEN`, through a helper no client can reach. It is
+   compared in constant time, never logged, never in a file, and sent only to the
+   window `RUSTTY_WINDOW` names. Shells never inherit it, nor `RUSTTY_WINDOW`: a
+   window or host started from inside a boss session would otherwise pass them to
+   everything it opens. Same-user code can read a process's environment, so this
+   scopes a grant; it is not a boundary against other code running as this user.
+2. **The send-text bucket is per pane, not per plugin** (§5). No plugin identity
+   exists yet, and a CLI opening a connection per call would get a fresh burst each
+   time, so a per-connection bucket would not limit anything. Per pane still does
+   what §5 wants: nothing can flood a shell. A call carries at most one burst.
+3. **Ids carry the process id in their high bits** (§1). Ids per process alone let
+   a pane id from one window name a different pane in another, when `--window`
+   changes or the window a client resolves to does. Every value stays below 2^53, the
+   integers JSON clients read exactly.
+4. **Injection is logged on the sidebar row, not in the tab** (§5). Text written
+   into the grid would desynchronise it from the program's own screen. The row says
+   "Typed by automation" for 5 s. With the sidebar off, nothing shows this.
+5. **The identity check is the host's** (§2): the peer process's token, not
+   impersonation, comparing user SID and also integrity level. The first pipe
+   instance refuses a name already taken, and a client checks the server's process
+   and identity before sending anything, since it may be about to send a token.
+6. **`pane-output` is whole lines of text read back from the grid** (§5), not raw
+   bytes, which would mean tapping the read path. Escapes are already gone. The line
+   the cursor is on waits until it is finished or the program exits. While a program
+   holds the alternate screen there are no lines to report: use `pane.read`. Lines
+   evicted before they were sent are counted in `skipped`.
+7. **Added to the fixed lists:** `status-changed {pane, status, detail}` (§5),
+   `tab.focus` (§4) and the error `rate-limited` in the table (§3 and §5).
+8. **Writes wait while a dialog is up or the window is being dragged** (§2). Code
+   behind a confirmation box resumes assuming the tabs didn't change. Reads carry on,
+   and a client that gives up takes its queued requests with it.
+9. **MCP revision and names** (§3, §5). `rustty mcp` speaks `2026-07-28`, which has
+   no handshake, and also serves `initialize` for `2025-11-25` and earlier. Dots in
+   operation names become underscores in tool names (`pane_send-text`), because
+   clients that pass tools to a model API commonly refuse dots. Events go out as
+   `notifications/message` to handshake clients, and on a `subscriptions/listen`
+   stream with the `com.rustty/events` extension to current ones.
+10. **Reads stop on time as well as size** (§3). A full 1 MiB page held the UI thread
+    for about 35 ms when measured, more than a tick, against the bounded per-tick work
+    §2 requires. A read now stops after 4 ms and says `more`, and the pane-output scan
+    shares 4 ms per tick, with busy panes taking turns. 1 MiB stays the cap on a page.
+11. **Writes can't be turned on by editing a file** (§4). `automation-writes` is read
+    once, when the window starts, and a hot reload never changes it: otherwise an
+    agent that can write a file could grant itself writes with nothing for the person
+    to notice. While it is on, the sidebar heading says "rustty · automation on".
+12. **The token reaches fewer places** (amendment 1). `rustty ctl` ignores
+    `RUSTTY_AUTOMATION_TOKEN` and only `rustty mcp` reads it, so running a command
+    inside a boss session is not enough to write. `tab.open` and `pane.split` refuse
+    it in `env`, and it is never in `WSLENV`. The boss starts with
+    `--strict-mcp-config` and `--permission-mode manual`. Anything the boss session
+    starts itself still inherits the variable and can read it: this scopes a grant,
+    and is not a boundary against code running as this user.
+13. **Discovery is a claim to check** (§2, amendment 5). The folder is writable by
+    anything running as this user, and a client holding a token believed whatever it
+    named. A client now accepts an entry only if the pid is the one in the id's high
+    bits, the start time is non-zero and matches the live process, and the pipe is a
+    local `\\.\pipe\rustty.` name with no separators. Two entries with one id fail
+    closed. A true pid with a false pipe was already stopped by the server identity
+    check, and still is.
+14. **A token reaches what it opened** (amendment 1). The window keeps a set of tabs
+    and panes opened through a token-holding connection, including from `pane.split`,
+    and a token alone writes only to those. `automation-writes` keeps its window-wide
+    meaning. A token alone can't `pane.send-text` while the pane shows a permission,
+    trust or auth wait; a program reporting one falsely only blocks a write, which is
+    the safe direction, and `kind=question` stays answerable.
+15. **Reads need a grant** (§4, which this replaces). A screen can hold anything ever
+    printed in it, so implicit reads let anything running as this user read every
+    session. `list`, `pane.read` and `events.subscribe` now need the token,
+    `automation-reads = true` or `automation-writes = true`; `initialize` and
+    `capabilities` stay open, and so does `events.unsubscribe`, which gives nothing
+    away. `automation-reads` defaults to false and is read once, as in amendment 11.
+    Denied calls get `denied-grant` with one line naming the key. `capabilities`
+    reports each operation's grant as `none`, `read` or `write`.
+16. **The session host is a known exception** (AUTO-007). None of these grants cover
+    its own pipe: `--attach --take-control`, `session.input`, `session.terminate` and
+    `host.shutdown` need no grant. They stay as they are, so a host session can be
+    typed into and ended by any client of this user.
+17. **Statuses are claims** (§5). A question on the screen outranks a report other
+    than `blocked`, including `done` and `error`, which would hide it the same way as
+    `working`. `list` and `status-changed` carry `detailSource`, so a reader can tell
+    what a program claimed from what rustty saw.

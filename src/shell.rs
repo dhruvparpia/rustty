@@ -79,6 +79,24 @@ pub enum ShellEvent {
     Notice(&'static str),
 }
 
+/// `current`, with `names` added unless already listed (with or without flags).
+#[must_use]
+pub fn wslenv_with(current: Option<&str>, names: &[&str]) -> String {
+    let mut out = current.unwrap_or("").to_string();
+    for name in names {
+        let listed = out
+            .split(':')
+            .any(|item| item.split('/').next() == Some(*name));
+        if !listed {
+            if !out.is_empty() {
+                out.push(':');
+            }
+            out.push_str(name);
+        }
+    }
+    out
+}
+
 /// What [`Shell::spawn`] needs to start a pane's process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnOptions {
@@ -97,7 +115,109 @@ pub struct SpawnOptions {
     pub env: BTreeMap<String, String>,
 }
 
+/// `current` with `dir` added last, or `None` when `dir` is already there.
+/// Letter case and a trailing backslash don't count as a difference.
+#[must_use]
+pub fn path_with_dir(current: &str, dir: &str) -> Option<String> {
+    let same = |entry: &str| {
+        entry
+            .trim_end_matches('\\')
+            .eq_ignore_ascii_case(dir.trim_end_matches('\\'))
+    };
+    if current.split(';').any(same) {
+        return None;
+    }
+    let current = current.trim_end_matches(';');
+    if current.is_empty() {
+        Some(dir.to_string())
+    } else {
+        Some(format!("{current};{dir}"))
+    }
+}
+
+/// The folder holding the running executable.
+#[must_use]
+pub fn own_exe_dir() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.to_string_lossy().into_owned())
+}
+
 impl SpawnOptions {
+    /// Add `dir` to the end of this shell's PATH, so the `rustty` commands work
+    /// inside it without installing anything. Only this shell's environment
+    /// changes. A profile's own PATH is extended rather than replaced, and
+    /// `inherited_path` is the starting point otherwise.
+    pub fn add_own_dir(&mut self, dir: &str, inherited_path: &str) {
+        let key = self
+            .env
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case("PATH"))
+            .cloned();
+        let current = key
+            .as_ref()
+            .and_then(|key| self.env.get(key))
+            .map_or(inherited_path, String::as_str);
+        if let Some(path) = path_with_dir(current, dir) {
+            self.env
+                .insert(key.unwrap_or_else(|| "PATH".to_string()), path);
+        }
+    }
+
+    /// Tell programs which terminal they are in, the way other terminals do,
+    /// so harnesses and agent CLIs can detect rustty. A profile's own value wins.
+    pub fn add_terminal_identity(&mut self, version: &str) {
+        for (name, value) in [
+            ("TERM_PROGRAM", "rustty"),
+            ("TERM_PROGRAM_VERSION", version),
+            ("COLORTERM", "truecolor"),
+        ] {
+            if !self.env.keys().any(|key| key.eq_ignore_ascii_case(name)) {
+                self.env.insert(name.to_string(), value.to_string());
+            }
+        }
+        self.list_in_wslenv(&["TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"]);
+    }
+
+    /// WSL passes on only what WSLENV lists.
+    fn list_in_wslenv(&mut self, names: &[&str]) {
+        let key = self
+            .env
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case("WSLENV"))
+            .cloned();
+        let current = key
+            .as_ref()
+            .and_then(|key| self.env.get(key))
+            .cloned()
+            .or_else(|| std::env::var("WSLENV").ok());
+        let merged = wslenv_with(current.as_deref(), names);
+        self.env
+            .insert(key.unwrap_or_else(|| "WSLENV".to_string()), merged);
+    }
+
+    /// Set a variable, replacing any spelling of its name.
+    fn set_env_exact(&mut self, name: &str, value: String) {
+        self.env.retain(|key, _| !key.eq_ignore_ascii_case(name));
+        self.env.insert(name.to_string(), value);
+    }
+
+    /// Tell this session which window it is in (AUTO-006): `rustty ctl` and
+    /// `rustty mcp` run inside it then target that window by default. This
+    /// value always wins, so a session can't be pointed at another window.
+    pub fn add_window_env(&mut self, window: u64) {
+        let name = crate::automation::ENV_WINDOW;
+        self.set_env_exact(name, window.to_string());
+        self.list_in_wslenv(&[name]);
+    }
+
+    /// Hand this session the window's write token (AUTO-007). Only sessions a
+    /// window starts for a boss get it; nothing else ever calls this. It stays out
+    /// of `WSLENV`: nothing inside WSL needs it, and everything there would see it.
+    pub fn add_boss_token(&mut self, token: &str) {
+        let name = crate::automation::ENV_TOKEN;
+        self.set_env_exact(name, token.to_string());
+    }
+
     /// Options for `program` (no args) at `cols` x `rows`.
     pub fn new(program: impl Into<String>, cols: usize, rows: usize) -> Self {
         Self {
@@ -347,12 +467,37 @@ pub fn probe_shell(cfg: &Config) -> SpawnOptions {
     opts
 }
 
+/// Wait for what a program printed just before exiting to reach the pane: the
+/// window closes a pane as soon as it hears of the exit, so that news must come
+/// after the output. Done when nothing has been waiting to be delivered for a
+/// little while, or after a bound, so a window not draining can't hold it forever.
+#[cfg(windows)]
+fn wait_for_last_output(queued: &AtomicUsize) {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(25);
+    const QUIET_POLLS: u32 = 4;
+    const MOST_POLLS: u32 = 80;
+    let mut quiet = 0;
+    for _ in 0..MOST_POLLS {
+        std::thread::sleep(POLL);
+        quiet = if queued.load(Ordering::Relaxed) == 0 {
+            quiet + 1
+        } else {
+            0
+        };
+        if quiet >= QUIET_POLLS {
+            return;
+        }
+    }
+}
+
 /// A shell process behind the pane.
 ///
 /// The UI side owns the receiver; the reader thread owns a sender clone
 /// and reports output chunks plus the exit event (TTY-025).
 pub struct Shell {
     state: ShellState,
+    /// The child's process id, while this shell owns a console.
+    pid: Option<u32>,
     #[cfg(windows)]
     inner: Option<Inner>,
     #[cfg(windows)]
@@ -394,6 +539,7 @@ impl Shell {
     pub fn new() -> Self {
         Self {
             state: ShellState::Inactive,
+            pid: None,
             #[cfg(windows)]
             inner: None,
             #[cfg(windows)]
@@ -410,6 +556,13 @@ impl Shell {
             view: None,
             view_notice: false,
         }
+    }
+
+    /// The child's process id, while this shell owns a console. A session
+    /// view has none: its process belongs to the host.
+    #[must_use]
+    pub const fn process_id(&self) -> Option<u32> {
+        if self.is_running() { self.pid } else { None }
     }
 
     /// Current lifecycle state.
@@ -458,6 +611,13 @@ impl Shell {
     /// `Spawning`/`Running`/`Inactive` transitions.
     #[cfg(windows)]
     fn attach_console(&mut self, opts: &SpawnOptions) -> Result<(), ShellError> {
+        // Every local shell passes through here: tabs, splits and restored panes.
+        let mut opts = opts.clone();
+        opts.add_terminal_identity(env!("CARGO_PKG_VERSION"));
+        if let Some(dir) = own_exe_dir() {
+            opts.add_own_dir(&dir, &std::env::var("PATH").unwrap_or_default());
+        }
+        let opts = &opts;
         let spawn_err = |e: std::io::Error| ShellError::Spawn {
             program: opts.program.clone(),
             source: e,
@@ -473,12 +633,31 @@ impl Shell {
             None,
         )
         .map_err(spawn_err)?;
+        self.pid = Some(conpty::process_id(&process)).filter(|&pid| pid != 0);
         // The primary thread handle is not needed after spawn (WIN-001:
         // no handle leaks); dropping the SendHandle closes it.
         drop(thread);
         let reader_handle = conpty.output_reader().map_err(spawn_err)?;
 
+        let process = Arc::new(process);
         let (tx, rx) = mpsc::channel::<ShellEvent>();
+        // The output pipe can stay open after the program exits, until the
+        // pseudo-console is closed, so the reader alone may never report it.
+        // This does, and the pane closing then closes the pseudo-console. The
+        // session host watches its processes the same way.
+        let exit_tx = tx.clone();
+        let exit_process = Arc::clone(&process);
+        let exit_queued = Arc::clone(&self.queued);
+        let watcher = std::thread::Builder::new()
+            .name("rustty-shell-exit".to_string())
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let code = conpty::wait_exit_code(&exit_process);
+                wait_for_last_output(&exit_queued);
+                let _ = exit_tx.send(ShellEvent::Exited(code));
+            });
+        // Without it the reader still reports an exit if its pipe closes.
+        drop(watcher);
         let pump_tx = tx.clone();
         let pump_queued = Arc::clone(&self.queued);
         let pump_stopping = Arc::clone(&self.stopping);
@@ -1147,6 +1326,70 @@ impl Drop for Shell {
 mod tests {
     use super::*;
 
+    /// A real shell through a real pseudo-console: only the pane answers the
+    /// cursor query conhost starts with, so this goes through `Pane`.
+    #[cfg(windows)]
+    #[test]
+    fn a_shell_that_exits_is_noticed_with_its_output_and_exit_code() {
+        // Break caught: the output pipe stays open after the child exits, so a
+        // reader waiting for it to close never reports the exit. The pane then
+        // stays open forever, showing a program that has gone.
+        let mut pane = crate::pane::Pane::with_size(80, 24, 100);
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.args = vec!["/c".to_string(), "echo marker-text& exit 3".to_string()];
+        pane.spawn_shell(&opts).expect("cmd.exe starts");
+        let start = std::time::Instant::now();
+        while !matches!(pane.shell().state(), crate::shell::ShellState::Exited(_)) {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(15),
+                "the exit was never noticed; {:?}",
+                pane.shell().state()
+            );
+            pane.drain_shell();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            pane.shell().state(),
+            crate::shell::ShellState::Exited(Some(3))
+        );
+        let text: Vec<String> = (0..pane.grid().rows)
+            .filter_map(|row| pane.grid().line_text(row))
+            .collect();
+        assert!(
+            text.iter().any(|line| line == "marker-text"),
+            "output printed just before the exit must not be lost: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_session_is_told_its_window_and_wsl_can_see_it() {
+        let mut opts = SpawnOptions::new("x", 80, 24);
+        opts.env
+            .insert("RUSTTY_WINDOW".to_string(), "wrong".to_string());
+        opts.add_window_env(7);
+        assert_eq!(opts.env.get("RUSTTY_WINDOW").map(String::as_str), Some("7"));
+        let wslenv = opts.env.get("WSLENV").cloned().unwrap_or_default();
+        assert!(wslenv.split(':').any(|n| n == "RUSTTY_WINDOW"), "{wslenv}");
+        assert!(!opts.env.contains_key("RUSTTY_AUTOMATION_TOKEN"));
+    }
+
+    #[test]
+    fn only_the_boss_helper_hands_out_the_token() {
+        let mut opts = SpawnOptions::new("x", 80, 24);
+        opts.add_boss_token("secret-value");
+        assert_eq!(
+            opts.env.get("RUSTTY_AUTOMATION_TOKEN").map(String::as_str),
+            Some("secret-value")
+        );
+        let wslenv = opts.env.get("WSLENV").cloned().unwrap_or_default();
+        assert!(
+            !wslenv
+                .split(':')
+                .any(|n| n.starts_with("RUSTTY_AUTOMATION_TOKEN")),
+            "{wslenv}"
+        );
+    }
+
     #[test]
     fn new_shell_is_inactive() {
         let shell = Shell::new();
@@ -1216,5 +1459,124 @@ mod tests {
             quote_for_drop(ShellFamily::Other, r"C:\x y\file.txt"),
             r" C:\x y\file.txt"
         );
+    }
+
+    #[test]
+    fn dir_is_appended_last() {
+        // Break caught: rustty's folder shadowing a rustty the user installed.
+        assert_eq!(
+            path_with_dir(r"C:\a;C:\b", r"C:\r"),
+            Some(r"C:\a;C:\b;C:\r".to_string())
+        );
+    }
+
+    #[test]
+    fn existing_dir_is_not_added_twice() {
+        // Break caught: PATH growing in every nested shell.
+        assert_eq!(path_with_dir(r"C:\A\;C:\b", r"c:\a"), None);
+        assert_eq!(path_with_dir(r"C:\a;C:\b", r"C:\B\"), None);
+    }
+
+    #[test]
+    fn empty_path_gets_just_the_dir() {
+        assert_eq!(path_with_dir("", r"C:\r"), Some(r"C:\r".to_string()));
+    }
+
+    #[test]
+    fn a_trailing_separator_does_not_leave_an_empty_entry() {
+        assert_eq!(
+            path_with_dir(r"C:\a;", r"C:\r"),
+            Some(r"C:\a;C:\r".to_string())
+        );
+    }
+
+    #[test]
+    fn profile_path_is_extended_whatever_its_case() {
+        // Break caught: a second Path variable, or losing the profile's own.
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.env.insert("Path".to_string(), r"C:\mine".to_string());
+        opts.add_own_dir(r"C:\r", r"C:\inherited");
+        assert_eq!(opts.env.len(), 1);
+        assert_eq!(
+            opts.env.get("Path").map(String::as_str),
+            Some(r"C:\mine;C:\r")
+        );
+    }
+
+    #[test]
+    fn without_a_profile_path_the_inherited_one_is_extended() {
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.add_own_dir(r"C:\r", r"C:\inherited");
+        assert_eq!(
+            opts.env.get("PATH").map(String::as_str),
+            Some(r"C:\inherited;C:\r")
+        );
+    }
+
+    #[test]
+    fn a_path_that_already_has_the_dir_is_left_alone() {
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.add_own_dir(r"C:\r", r"C:\inherited;C:\r");
+        assert!(opts.env.is_empty());
+    }
+
+    #[test]
+    fn shells_can_tell_they_are_in_rustty() {
+        // Break caught: harnesses treating rustty as an unknown terminal.
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.add_terminal_identity("0.6.0");
+        assert_eq!(
+            opts.env.get("TERM_PROGRAM").map(String::as_str),
+            Some("rustty")
+        );
+        assert_eq!(
+            opts.env.get("TERM_PROGRAM_VERSION").map(String::as_str),
+            Some("0.6.0")
+        );
+        assert_eq!(
+            opts.env.get("COLORTERM").map(String::as_str),
+            Some("truecolor")
+        );
+    }
+
+    #[test]
+    fn a_profile_can_override_the_terminal_identity() {
+        let mut opts = SpawnOptions::new("cmd.exe", 80, 24);
+        opts.env
+            .insert("term_program".to_string(), "mine".to_string());
+        opts.add_terminal_identity("0.6.0");
+        assert_eq!(
+            opts.env.get("term_program").map(String::as_str),
+            Some("mine")
+        );
+        assert!(!opts.env.contains_key("TERM_PROGRAM"));
+    }
+
+    #[test]
+    fn wsl_shells_get_the_terminal_identity_too() {
+        // Break caught: an agent CLI inside WSL not detecting rustty.
+        assert_eq!(wslenv_with(None, &["A", "B"]), "A:B",);
+        assert_eq!(
+            wslenv_with(Some("USERPROFILE/p"), &["A"]),
+            "USERPROFILE/p:A"
+        );
+        assert_eq!(wslenv_with(Some("A/u:B"), &["A", "B", "C"]), "A/u:B:C");
+        assert_eq!(wslenv_with(Some(""), &["A"]), "A");
+        let mut opts = SpawnOptions::new("wsl.exe", 80, 24);
+        opts.add_terminal_identity("0.6.0");
+        let value = opts.env.get("WSLENV").map_or("", String::as_str);
+        for name in ["TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"] {
+            assert!(value.split(':').any(|item| item == name), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_profile_wslenv_is_kept() {
+        let mut opts = SpawnOptions::new("wsl.exe", 80, 24);
+        opts.env.insert("wslenv".to_string(), "MINE".to_string());
+        opts.add_terminal_identity("0.6.0");
+        let value = opts.env.get("wslenv").map_or("", String::as_str);
+        assert!(value.starts_with("MINE:"), "{value}");
+        assert!(!opts.env.contains_key("WSLENV"));
     }
 }

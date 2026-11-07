@@ -4,7 +4,90 @@ All notable changes to `rusttyterm` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - unreleased feature work
+## [0.7.0] - unreleased feature work
+
+Everything built on top of 0.6.0: the sessions sidebar, restart safety, worktrees, automation, per-project secrets, King Crab and skinned dialogs.
+
+### Added
+
+- Local automation API (AUTO-001..015): `rustty ctl <verb>` and `rustty mcp` control a running
+  window over a per-window pipe, so a script or a coding agent can start sessions, read their
+  output, type into them and see whether they need attention. Reading needs
+  `automation-reads = true`, and writing `automation-writes = true`; a window reads both once, when
+  it starts, and its token gives a boss session the same reads and writes to the sessions it opened.
+  See [the design record](docs/design-automation-api.md).
+- Per-project 1Password secrets (SECRET-001..012): `rustty secrets setup`, `add`, `list` and
+  `run --only A,B -- cmd` give each project its own small vault and read-only service account, so
+  agents stop prompting for approval in every sub-shell. Values are held in locked, encrypted memory
+  and the started command's environment block is wiped straight after it starts. This limits damage
+  and cannot prevent it: code running as the same Windows user can still reach these secrets, and a
+  command given a secret can print it. A separate Windows user for agents is the real boundary, and
+  it is not built.
+- Dialogs now wear the theme: questions and messages use the skin's colors, with buttons that say what they do, such as Quit or Start. The Save dialog is still Windows' own.
+- King Crab, the boss agent: "Start King Crab" in the command palette opens a Claude Code session that can
+  split work across sessions in their own worktrees, watch them, and report back. It stops before
+  merging, never pushes, and leaves permission prompts to you. `rustty worktree add NAME` creates a
+  worktree and prints its path.
+- The sidebar now shows when Claude Code is waiting on you, with its actual question, read from its
+  screen. Programs can also report their status directly through OSC 7501.
+- Fixed: `Ctrl+Shift+Enter` never split a pane: it matched a key code Windows does not send. It now splits right, as the welcome banner says.
+- Fixed: `rustty C:\folder` was ignored when a saved session existed. The saved tabs now come back with that folder's tab in front, reusing one already there.
+- Fixed: a window started without activation, such as from a "Run minimized" shortcut, had no
+  renderer and could not draw.
+- Fixed: `CSI > 4 m`, which Claude Code sends at startup, turned on underline for all later text.
+  A private marker now never runs as the plain command.
+- Worktree sessions, a project brain and a roadmap board: "New Session in Worktree" gives a session
+  its own branch and folder; "Create Project Brain" adds plain files agents can read in
+  `.rustty/brain`; Ctrl+Shift+R shows `roadmap.md` as a board where each card can open a session.
+- Restart safety: the session is saved when Windows shuts down and every 30 seconds, and panes that
+  were running Claude Code or Codex come back as Interrupted, with a click to resume. Sidebar
+  projects now follow an agent's real folder, even when the shell reports none.
+- A sessions sidebar, on by default: every session grouped by project with what it is doing
+  (needs you, working, finished, ready, exited), plus background host sessions you can click to
+  open and type in (read-only if another window controls them). It reads signals agent CLIs already send. Ctrl+Shift+S or `session-rail = false` turns it
+  off, which brings the tab strip back. Closing a session from its row asks first when it is
+  working or waiting for you, or when the profile asks.
+- `TERM_PROGRAM`, `TERM_PROGRAM_VERSION` and `COLORTERM` also reach WSL shells, through `WSLENV`.
+- Shells see `TERM_PROGRAM=rustty`, `TERM_PROGRAM_VERSION` and `COLORTERM=truecolor`.
+- A welcome banner when rustty starts with no other rustty window open: your crab snaps its
+  claws twice beside the session status, key commands and a tip. `welcome = false` removes it.
+- Shells started by rustty get its folder at the end of their PATH, so `rustty` commands
+  work inside them with a portable install. Nothing persistent changes.
+- Symbols Nerd Font Mono v3.5.1 is embedded as a fallback, so prompt icons work with no
+  setup. It adds about 2.6 MB to the executable. A chosen font that has the glyph keeps it.
+
+### Changed
+
+- A pane now closes when its program exits even if the pseudo-console keeps its output pipe open,
+  as it does on current Windows builds, where `exit` used to leave the pane open and blank.
+- The permanent menu bar is gone. Tap Alt to open the same menu as a popup; every menu
+  command is also in the command palette, including minimize, maximize, close window, about
+  and saving workspaces.
+- Tabs now sit in the title bar on one seamless surface, with rustty drawing the minimize,
+  maximize and close buttons in theme colors. Dragging, resizing and Snap Layouts stay native.
+- The tab strip is quieter: taller, with no divider line, Windows UI font titles, the `+`
+  button after the last tab, and no default shell icon. The window has 12 by 10 DIPs of
+  padding by default.
+- Copper is the default skin: `copper-dark` on a dark system and `copper-light` on a light
+  one. An explicit theme in config still wins. The tab strip now matches the terminal
+  background unless `tab-bar` is set explicitly.
+
+### Fixed
+
+- A normal launch no longer crashes. After a GUI launch released its console, printing any
+  diagnostic could panic, or land in whatever now held that handle number. A portable install
+  hit this on every start through the jump list error.
+- Bold text is bold and italic text is italic. They were swapped.
+- The window is sized so the configured columns and rows fit inside the padding.
+- Words are evenly spaced. The grid now matches the font's own advance instead of rounding
+  it up, which stretched the gaps between words.
+- Block characters and Powerline separators are drawn as geometry, so rows and prompt
+  segments join with no gaps at any line height.
+- Theme palettes now colour ANSI output, so each theme shows its own 16 colors. Text
+  already on screen keeps its colors after a theme switch, and a session host's snapshot
+  of existing text uses the default palette.
+
+## [0.6.0] - never released; its changes ship in 0.7.0
 
 Release policy: `v0.5.0` remains immutable; `v0.5.1` is the compatible repair. Feature work targets minors. `packaging/check-release.ps1` checks tag/version/SHA and CI fetches tags and runs it for `v0.5.1`.
 

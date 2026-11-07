@@ -498,7 +498,9 @@ Splits are not MVP, but are required for Ghostty-like parity.
 | SHELL-019 | The terminal shall support starting shell in a user-defined working directory. | P0 |
 | SHELL-020 | The terminal shall support `~`, `%USERPROFILE%`, and Windows paths appropriately. | P0 |
 | SHELL-021 | The terminal shall pass environment variables to the shell. | P0 |
+| SHELL-029 | The terminal shall add its own folder to the end of the PATH of every shell it starts, unless already present, without changing any persistent setting. | P1 |
 | SHELL-022 | The terminal shall avoid injecting unsafe environment variables into shells. | P0 |
+| SHELL-030 | A program name with no path separator shall be resolved to an absolute path before it starts, for every shell, profile, `tab.open` command and boss: the Windows folders, then the absolute entries of `PATH`, as a `.com`, `.exe`, `.bat` or `.cmd`, with App Execution Aliases counting as files. The current folder and relative `PATH` entries are never searched. A name found nowhere fails with a clear not-found error, with no fallback to `CreateProcessW`'s own search, which looks in the current folder first. A `.bat` or `.cmd` found this way runs under the rules of SECRET-011. A name with a path part is used as given. | P0 |
 
 Recommended shell defaults:
 
@@ -763,13 +765,13 @@ The product must support common terminal/TUI applications.
 | THEME-001 | The terminal shall support color themes. | P0 |
 | THEME-002 | The terminal shall define foreground color. | P0 |
 | THEME-003 | The terminal shall define background color. | P0 |
-| THEME-004 | The terminal shall define ANSI 16 palette. | P0 |
+| THEME-004 | The terminal shall define ANSI 16 palette, used for ANSI-16 output and the low indices of 256-color output written under that theme. | P0 |
 | THEME-005 | The terminal shall define cursor color. | P0 |
 | THEME-006 | The terminal shall define selection color. | P0 |
-| THEME-007 | The terminal shall define tab bar colors. | P1 |
+| THEME-007 | The terminal shall define tab bar colors. The tab strip uses the terminal background unless `tab-bar` is set explicitly, so the window reads as one surface. | P1 |
 | THEME-008 | The terminal shall define pane border colors. | P1 |
 | THEME-009 | The terminal shall support named theme files. | P1 |
-| THEME-010 | The terminal shall support system dark/light theme detection. | P1 |
+| THEME-010 | The terminal shall support system dark/light theme detection. With no configured theme, a dark system uses `copper-dark` and a light system uses `copper-light`. | P1 |
 | THEME-011 | The terminal shall support per-profile themes. | P1 |
 | THEME-012 | The terminal shall support theme hot reload. | P2 |
 | THEME-013 | Themes shall be validated on load. | P0 |
@@ -777,12 +779,42 @@ The product must support common terminal/TUI applications.
 | THEME-015 | Themes shall support 256-color palette remapping. | P1 |
 | SKIN-001 | RusTTY shall offer paired `copper-dark` and `copper-light` native skins with charcoal/warm-paper surfaces and restrained copper focus accents. Existing themes and explicit profile overrides remain selectable. | P1 |
 | SKIN-002 | UI foreground, secondary text, accent and separator colors shall be independently overrideable from terminal foreground/cursor/ANSI colors using `ui-foreground`, `ui-muted`, `ui-accent` and `ui-border`. Omitted keys shall derive compatible colors from the selected theme. | P1 |
-| SKIN-003 | Tabs, palette, search, bookmark and pane-title chrome shall use shared semantic UI colors. Active tabs and selected palette/bookmark rows shall have a visible positional indicator as well as a changed background. | P1 |
+| SKIN-003 | Tabs, palette, search, bookmark and pane-title chrome shall use shared semantic UI colors. Active tabs and selected palette/bookmark rows shall have a visible positional indicator as well as a changed background. The `+` button follows the last tab, and tab titles use the Windows UI font. | P1 |
 | SKIN-004 | Copper presets shall meet 4.5:1 normal/secondary text contrast against their chrome surfaces and 3:1 focus-indicator contrast. Selection/search text shall remain readable. Custom colors remain user-controlled and are validated for syntax. | P1 |
 | SKIN-005 | Skin changes shall use the existing theme resolution and reload paths, preserve terminal content/actions and reuse render buffers. Validation shall include dark/light, top/bottom tabs, mixed DPI, narrow windows, keyboard focus and Unicode fallback on Windows. | P1 |
-| SKIN-006 | The native caption shall follow the effective skin using supported DWM attributes, retain native window controls/drag/resize, and fall back to system rendering when an attribute is unsupported. Tab titles, profile icons and close controls shall be drawn separately. | P1 |
+| SKIN-006 | Tabs shall sit in the title bar on one surface, with minimize, maximize and close drawn by the terminal in theme colors. The window shall keep native drag, double-click maximize, the system menu, resize edges, Snap Layouts and screen-reader access. The frame shall follow the effective skin using supported DWM attributes and fall back to system rendering when an attribute is unsupported. Tab titles and close controls shall be drawn separately. | P1 |
 
 ---
+
+## 9.13b Sessions sidebar
+
+| ID | Requirement | Priority |
+|---|---|---|
+| DIALOG-001 | Every question and message rustty asks shall be a dialog in the active theme's colors, built from real Win32 controls so the keyboard, screen readers and dragging stay native. Enter answers the focused button, Esc and the close box cancel, a question that could lose something starts on cancel, and a button's letter presses it. Text on a dialog shall reach 4.5:1 in every preset. If the dialog cannot be built, Windows' own box asks instead. The Save dialog stays the system's. | P2 |
+| BOSS-001 | "Start King Crab", the boss agent, shall first ask the person with a Yes/No dialog naming the folder, since that folder can come from a program's report, and shall then open a Claude Code session with rustty's automation tools and a brief for splitting work across sessions in their own worktrees. The configuration and brief go inline on the command line, and no temp file is written; a command line over Windows' 32,767 characters is refused whole. Only that session gets the write token. It starts with `--strict-mcp-config`, so no other MCP server starts with the token in its environment, and `--permission-mode manual`, so a saved setting can't turn the prompts off. Tools that read are approved in advance; tools that start sessions or type stay behind Claude Code's own permission prompt. The token is never written to a file. `rustty worktree add NAME` creates a worktree and prints its path. | P1 |
+| STATUS-001 | rustty shall implement the Program Status Protocol (OSC 7501, revision 0.4): answer its support query and show what programs report on their row, ahead of any status it would guess. On Windows the answer is sent as console key events, because the console's input layer drops an OSC reply. A pane answers at most about once a second, and the first query always gets an answer. | P1 |
+| STATUS-002 | For a known agent, rustty shall read a question off the agent's screen and show it as Needs you with the question's text. A question on the screen outranks every report but `blocked`, so a program can't report `working` to hide a real prompt. Text a program chose is cleaned of control, invisible and direction characters before it is shown, and so are window captions and `tab.open`'s `name`, which is also capped at 120 characters. A control sequence with a private marker shall never run as the plain command. | P1 |
+| WORKTREE-010 | "New Session in Worktree" shall create a Git worktree on a new branch under the main checkout's `.worktrees` folder, keep that folder out of `git status`, and open a session in it. A taken name gets a number. Sessions in these worktrees group with their project in the sidebar. | P1 |
+| BRAIN-001 | "Create Project Brain" shall create `BRAIN.md`, `roadmap.md` and `decisions.md` in `.rustty/brain`, and never overwrite a file that exists. | P2 |
+| BOARD-001 | Ctrl+Shift+R shall show the project's `roadmap.md` as a board with the columns Idea bank, Backlog, In progress and Done. The file stays hand-editable, is read again before every change, and keeps every line that is not a card. Cards can be added, and moved by keyboard or drag. Enter opens a session for a card, W opens one in its own worktree, and both move the card to In progress. | P2 |
+| RESTORE-001 | The session shall be saved when Windows asks to end the session and every 30 seconds when it changed, not only when the window closes. rustty shall register to come back after a Windows Update restart, when the person's restart-apps setting allows it. | P1 |
+| RESTORE-002 | rustty shall notice known agent CLIs running under a pane's shell, and read the working folder of the agent or shell from its process. | P1 |
+| RESTORE-003 | After a restart, a pane that was running an agent shall show as Interrupted. Clicking its row shall run that agent's resume command, from a fixed table and never from the session file. Typing in the pane dismisses the offer. | P1 |
+| RAIL-001 | A sidebar shall list every session in the window, grouped by project, with a "New session" row. Ctrl+Shift+S and `session-rail` turn it on and off. While it is on it lists the tabs and the tab strip steps aside; tabs remain, and turning it off brings the strip back. It collapses under 720 DIPs and in fullscreen. | P1 |
+| RAIL-002 | Each row shall show what its session is doing: needs you, working, finished while unseen, ready or exited. Status comes from signals programs already send: a spinner in the title, recent output, shell integration, `OSC 9;4` progress, a bell, `OSC 9` or `OSC 777;notify`. Output within a second of a resize is a repaint, not work, and a spinner or progress report left behind by a program that stopped writing expires. No program needs to know about rustty. | P1 |
+| RAIL-003 | Live host sessions this window is not showing shall be listed under Background, and clicking one opens it. You can type in it unless another window controls it, in which case it opens read-only. | P1 |
+| RAIL-004 | The sidebar shall not write to any shell, use the network, or repaint while nothing changes. Working dots shall not pulse with Windows animation effects off. Notification text is shown with control characters removed. | P0 |
+| RAIL-005 | Shells shall see `TERM_PROGRAM=rustty`, `TERM_PROGRAM_VERSION` and `COLORTERM=truecolor`, so harnesses can detect the terminal. A profile's own value wins. | P1 |
+
+## 9.13a Welcome banner
+
+| ID | Requirement | Priority |
+|---|---|---|
+| WELCOME-001 | When rustty starts with no other rustty window open, the focused pane shall show a banner before its shell starts: the crab, version and session status, key commands and a tip. `welcome = false` removes it. | P1 |
+| WELCOME-002 | The banner shall not appear on new tabs, splits, the quick terminal, `--workspace` or `--attach` launches, or panes viewing a host session. | P1 |
+| WELCOME-003 | From 78 columns the banner shows the crab; from 52 columns the text alone. Below 52 columns or 14 rows there is no banner. A tip that would not fit on one line is left out. | P1 |
+| WELCOME-004 | The crab's claws shall snap twice over about one second, then stop, leaving no timer running. With Windows animation effects off the crab shall not move. | P1 |
+| WELCOME-005 | The banner shall never delay the shell, write to the shell's input or use the network, and the animation shall stop rather than overwrite other text. | P0 |
 
 ## 9.14 Font requirements
 
@@ -791,6 +823,8 @@ The product must support common terminal/TUI applications.
 | FONT-001 | The terminal shall use DirectWrite for font rendering. | P0 |
 | FONT-002 | The terminal shall support configurable font family. | P0 |
 | FONT-003 | The terminal shall support font fallback chains. | P0 |
+| FONT-031 | The terminal shall embed Symbols Nerd Font Mono as a fallback for private-use characters, so prompt icons work with no setup. A chosen font that has the glyph keeps it. | P1 |
+| FONT-030 | Block Elements (U+2580-259F) and Powerline separators (U+E0B0-E0B3) shall be drawn as geometry rather than font glyphs, so rows and segments join with no gaps at any line height. | P1 |
 | FONT-004 | The terminal shall support user-installed fonts. | P0 |
 | FONT-005 | The terminal shall support system fonts. | P0 |
 | FONT-006 | The terminal shall support Cascadia Mono. | P0 |
@@ -971,7 +1005,7 @@ COLORTERM
 | WINDOW-008 | The terminal shall support high DPI scaling. | P0 |
 | WINDOW-009 | The terminal shall support window snapping. | P0 |
 | WINDOW-010 | The terminal shall support window opacity. | P1 |
-| WINDOW-011 | The terminal shall support window padding. | P0 |
+| WINDOW-011 | The terminal shall support window padding, 12 by 10 DIPs by default. | P0 |
 | WINDOW-012 | The terminal shall support background color. | P0 |
 | WINDOW-013 | The terminal shall support system theme integration. | P1 |
 | WINDOW-014 | The terminal shall support window close confirmation for multiple tabs. | P0 |
@@ -988,6 +1022,7 @@ COLORTERM
 
 | ID | Requirement | Priority |
 |---|---|---|
+| MENU-000 | The menus below shall open as a popup when Alt is tapped alone, not as a permanent menu bar. Every menu command shall also be reachable from the command palette. | P1 |
 | MENU-001 | The terminal shall provide a File menu. | P1 |
 | MENU-002 | The terminal shall provide an Edit menu. | P1 |
 | MENU-003 | The terminal shall provide a View menu. | P1 |
@@ -1277,6 +1312,126 @@ owns managed PTYs independently of any client. Console attach
 | HOST-006 | Graceful termination closes the shell's input (stdin EOF) and waits a bounded grace period (5 s) before terminating the job, so shells get a chance to exit on their own. | P1 |
 | HOST-007 | Lifecycle is explicit at creation: persistent sessions survive client detach (the shell keeps running after `--new-session --detach` and after any client exits); ephemeral sessions terminate when the last client detaches. The host never adopts a process it did not spawn. | P1 |
 | HOST-008 | Protocol version negotiation: client and host agree on `min(client, host)` at `initialize`; an incompatible host exits 6 with a clear message. A client never replaces, kills, or reconfigures a live host to force a version. | P1 |
+
+---
+
+## 9.33 Project secrets requirements
+
+`rustty secrets` gives each project one small 1Password vault with its own
+read-only service account, so agents can fetch the secrets they need without a
+1Password approval prompt for every sub-shell. A service account cannot reach a
+Private vault, and its vault access cannot change after creation, so each
+project needs its own.
+
+**What this does not protect against (SECRET-012).** The threat considered is a
+compromised agent running as the same Windows user. This design limits the
+damage: a project's token reads one vault, and `run` hands a command only the
+names it asks for. It cannot prevent the damage. Code running as the same
+Windows user can still reach these secrets: it can decrypt the token file with
+DPAPI, because DPAPI protects against other users and not against this one; it
+can read a running process's memory and environment; and it can replace a
+per-user `op.exe`. A command given a secret can print it. A separate Windows
+user for agents is the real boundary, and it is not built.
+
+**Project separation limits mistakes and casual misuse.** It does not stop code
+running as the same Windows user, which can name any project: an agent can change
+folder or pass `--dir`, so `run` has no folder check that would only look like a
+boundary. A forged `.git` file gets its own project (SECRET-003), but that closes
+one shortcut and no more.
+
+| ID | Requirement | Priority |
+|---|---|---|
+| SECRET-001 | The project manifest `.rustty/secrets.toml` maps a NAME to an `op://` reference under a `[secrets]` table and holds no values. It may be committed. Unknown keys are refused. | P2 |
+| SECRET-002 | Names shall be safe as Windows environment variables (`[A-Za-z_][A-Za-z0-9_]*`, at most 255 characters, unique ignoring case) and shall not be `PATH`, `PATHEXT`, `SYSTEMROOT`, `WINDIR`, `COMSPEC` or start with `OP_`. References shall match the documented `op://vault/item/[section/]field[?query]` syntax with only letters, digits, `-`, `_`, `.` and spaces in a segment. Anything else is refused, so a literal secret cannot be stored in the manifest. No error message quotes a rejected value, a manifest line or a stray argument. | P2 |
+| SECRET-003 | A project's vault is named `rustty-<slug>-<hash>`: the folder name as `[a-z0-9-]`, at most 32 characters, and 8 hex digits of FNV-1a over the canonical project path (no verbatim prefix, lower case). The project is the nearest ancestor of the working directory or `--dir` holding a manifest or `.git`. A linked Git worktree resolves to its main checkout, so all worktrees of a repository share one project; `<gitdir>/gitdir` must exist and point back at the worktree's `.git` file, and a `.git` file that fails this is its own project. Moving a project folder changes its vault name: run `setup` and `add` again. | P2 |
+| SECRET-004 | Secret memory shall be page-aligned `VirtualAlloc` pages held with `VirtualLock`, and zeroed by a volatile write when dropped. Locking fails closed: the working-set quota is raised once, and memory that still cannot be locked is never used. | P2 |
+| SECRET-005 | Secret pages should be excluded from Windows Error Reporting dumps with `WerRegisterExcludedMemoryBlock`, looked up at run time because it needs Windows 10 2004 (FR-109). This is best effort and does not affect other dump tools. | P2 |
+| SECRET-006 | `LockedSecret` shall be encrypted with `CryptProtectMemory` (same-process) at rest, reachable only through a `with_plaintext` closure, and re-encrypted when that closure ends, including by a panic. It has no `Display`, and its `Debug` shows neither contents nor length. Off Windows every operation fails: there is no insecure fallback. | P2 |
+| SECRET-007 | Each project's service-account token is stored encrypted with DPAPI `CryptProtectData`, with the vault name as entropy, in `<vault>.token` under `%LOCALAPPDATA%\rustty\secrets`, taken from the known folder and not the environment variable. It is never in the project folder or the config. | P2 |
+| SECRET-008 | `rustty secrets setup [--dir D] [--json]` runs `op vault get <vault>`, `op vault create <vault>` if that failed, and `op service-account create <vault> --vault <vault>:read_items --raw`, and stores the token from stdout. The token is never printed or logged. The store and manifest are checked before anything is created, because `op` shows the token only once. A project already holding a token is left alone. `secrets` is a verb only as the first argument (`.\secrets` opens a folder) and a malformed verb never opens a window. Stable exit codes across the verbs: 2 usage, 3 not found, 8 manifest, 9 `op`, 10 token store, 11 secure memory, 12 command did not start, 13 declined. | P2 |
+| SECRET-009 | `rustty secrets add NAME --from op://... [--dir D] [--json]` runs `op read --no-newline <from>` and `op item create --vault <vault> --format json -`, under the owner's own 1Password session because the service account is read-only, and records `op://<vault>/<NAME>/password`. The value travels only through `op`'s stdout and stdin and locked memory in between, never a command line. A name already in the manifest is refused. Before reading anything it shows a native Yes/No dialog naming the source reference and the destination vault, with No as the default; no flag or standard input can skip it, and a No exits 13 having read nothing. `rustty secrets list [--dir D] [--json]` shows names and references, never values, and does not call `op`. | P2 |
+| SECRET-010 | `rustty secrets run --only A,B [--dir D] -- cmd args...` fetches only the named secrets with `op read --no-newline <reference>`, with the token only in that child's `OP_SERVICE_ACCOUNT_TOKEN`, and returns the command's full 32-bit exit code. Names are required: there is no default of all. A name not in the manifest, a reference outside the project's vault, a failed read or an empty, non-text or oversized value stops it before the command starts. `op` is located only in `Program Files\1Password CLI`, `Program Files\WinGet\Links` and the per-user WinGet folders. There shall be no environment or config override for its path, and neither `PATH` nor the current directory is searched for it. It runs from its own folder with inherited `OP_*` settings removed, and without `RUSTTY_AUTOMATION_TOKEN` or `RUSTTY_WINDOW`. | P2 |
+| SECRET-011 | The command starts through `CreateProcessW` with an environment block built in locked memory and wiped straight after the call, along with each secret, before the wait. It inherits stdio and no other handle, and its working directory is unchanged by `--dir`. Its environment has no `OP_*` variable and no `RUSTTY_AUTOMATION_TOKEN`, and a command that isn't found is not quoted back. A bare command name is searched on the absolute `PATH` entries only, never the current directory. A `.cmd` or `.bat` runs through `cmd.exe` from the system directory with every argument quoted, and an argument holding a quote, a percent sign or a line break is refused. | P2 |
+| SECRET-012 | The documentation shall state the limit above plainly. This feature shall not be described as protecting secrets from code running as the same Windows user. | P2 |
+
+## 9.34 Local automation API
+
+Design record: `docs/design-automation-api.md`. Scripts, editors and coding agents
+control a running window through one set of operations, whichever encoder they use.
+
+| ID | Requirement | Priority |
+|---|---|---|
+| AUTO-001 | Every window, tab and pane shall have a u64 id assigned at creation and never reused, stable across split, resize and closing a neighbour, and valid as an exact integer in JSON. A closed or unknown id shall answer `target-stale`, never a different target. | P1 |
+| AUTO-002 | Requests shall be JSON-RPC 2.0 with a version agreed in `initialize`, this build's or the one before; anything else is `protocol-mismatch`. Errors shall be `{code, message, target?, retryAfterMs?}` from the fixed table below. `capabilities` shall list operations, grants, events, errors and limits, and be the only such list. | P1 |
+| AUTO-003 | Each window shall serve a named pipe, `\\.\pipe\rustty.<user>.<pid>.<seq>`, published in `%APPDATA%\rustty\ipc\` while it lives; a file whose process is gone shall be removed. Pipe I/O shall stay off the UI thread. The window shall serve at most 16 requests or 4 ms per tick, and shall never wait on a client. | P1 |
+| AUTO-004 | The pipe shall take local clients of the same user and integrity level only. The first instance shall refuse a name already taken, and a client shall check the server's process and identity before sending anything. A client shall accept a discovery entry only if its pid is the one in its id's high bits, its start time is non-zero and matches the live process, and its pipe is `\\.\pipe\rustty.` followed by one name and no other host form. Two entries with one id shall fail closed, with `no-instance`, not pick one. | P0 |
+| AUTO-005 | The operations are in the table below. Status and detail shall be the sidebar's own, read from its last step: reading shall never step them, and they shall stay current with the sidebar off. | P1 |
+| AUTO-006 | Every shell a window starts shall have `RUSTTY_WINDOW` naming that window, which clients use by default. A named window that is gone shall be `target-stale`, never whichever is left. With nothing named and several windows, a client shall fail and list them; the quick terminal answers only when it is the only window. | P1 |
+| AUTO-007 | `list`, `pane.read` and `events.subscribe` shall need `automation-reads = true`, `automation-writes = true` or this window's token, and answer `denied-grant` naming the key otherwise; `initialize`, `capabilities` and `events.unsubscribe` stay open. Writes shall need `automation-writes = true` or this window's token shown in `initialize`, which grants that connection only. A window reads both keys once, when it starts, and a hot reload never changes them; while either is on the sidebar heading says so ("rustty · automation on" or "rustty · automation reads on"). The token shall come from the OS's random source, be compared in constant time, never be logged, written to a file or listed in `WSLENV`, and reach only sessions the window starts for a boss. Only `rustty mcp` reads `RUSTTY_AUTOMATION_TOKEN`; `rustty ctl` ignores it, and `tab.open` and `pane.split` refuse it in `env` with `bad-params`, in any letter case. Shells shall not inherit `RUSTTY_AUTOMATION_TOKEN` or `RUSTTY_WINDOW`. The config key reaches the whole window. A token alone reaches only tabs and panes a token-holding connection opened, including with `pane.split`, and refuses `pane.send-text` with `denied-grant` while the pane shows a permission, trust or auth wait: a question read off its screen, or an OSC 7501 record with `kind` of `permission` or `auth`. `kind` of `question` stays answerable. A spoofed report can only block a write. A wait that appears after the check is not caught, and only Claude Code's screen is read. This scopes a grant and is not a boundary: anything the boss session starts itself inherits the variable, so any such program can read it and connect with it. **Known exception:** the session host's route needs no grant. Any client of this user can use `--attach --take-control`, `session.input`, `session.terminate` and `host.shutdown` on host sessions, whatever these keys say. | P0 |
+| AUTO-008 | A request frame shall be at most 64 KiB and a response at most 1 MiB, counting JSON escapes. One read, and one tick's scan for pane output, shall stop after 4 ms and carry on later, so a page may be shorter than the cap: follow `more`. Scrollback reads return pages with a cursor that belongs to one pane. `pane.read` shows the live screen wherever the person has scrolled, and history stays the main screen's while a program holds the alternate one. | P1 |
+| AUTO-009 | Each client shall have at most 32 queued requests and 4 MiB queued output. Past that it is disconnected with `slow-client`; nobody else is affected. A client that leaves shall take its queued requests with it. At most 32 clients per window, and a connection that hasn't sent `initialize` within 5 s is disconnected, so idle connections can't hold them all. A frame nested over 32 levels is refused before it is parsed. | P0 |
+| AUTO-010 | Events, in order with a rising `seq`: `tab-opened`, `tab-closed`, `pane-closed`, `bell`, `command-started`, `command-finished`, `pane-output`, `status-changed`. One subscription per client per pane; a closed pane's subscription ends with `pane-closed`, and no event for a subscription follows the reply to its unsubscribe. A pane opened after a window-wide `pane-output` subscribe is reported from its first line. | P1 |
+| AUTO-011 | `pane.send-text` shall go through the keyboard's path, at most 8 KiB a call and 64 KiB/s per pane, answering `rate-limited` with `retryAfterMs` over that. The pane's sidebar row shall say it was typed by automation for 5 s. A read-only view refuses with `denied-grant`. | P1 |
+| AUTO-012 | `rustty ctl <verb>` shall never open a window or start a process, and shall exit with the code in the table below and a one-line message. `--json` puts the result, or the error as well as on stderr, on stdout. | P1 |
+| AUTO-013 | `rustty mcp` shall speak MCP over stdio, revision `2026-07-28` and `initialize` for earlier ones, with one tool per operation except `initialize`, generated from the capability list, and writing only MCP messages to stdout. An operation's failure is a tool error; only a malformed request is a protocol error. | P1 |
+| AUTO-014 | Nothing here shall touch the PTY read loop, the parser or the render hot path. With nobody subscribed, a scan shall cost one check. | P0 |
+| AUTO-015 | A shell's exit shall be noticed when its process ends, even if the output pipe stays open, after what it printed last has reached the pane. | P0 |
+
+**Operations.** Ids are integers. Everything after `initialize` needs it first.
+
+| Method | Params | Result | Grant |
+|---|---|---|---|
+| `initialize` | `protocolVersion`, `clientName?`, `token?` | `protocolVersion`, `serverProtocolVersion`, `capabilities`, `window`, `grants: {writes, reads}`, `serverVersion` | none |
+| `capabilities` | none | `protocolVersion`, `operations`, `events`, `errors`, `limits` | none |
+| `list` | none | `window`, `tabs: [{id, number, title, status, detail, detailSource, project, profile, active, panes: [{id, path, title, status, detail, detailSource, project, cwd, agent, active, exited, exitCode, commandRunning}]}]` | read |
+| `pane.read` | `pane`, `scrollback?`, `cursor?` | Screen: `pane`, `text`, `cols`, `rows`, `cursorRow`, `cursorCol`, `altScreen`. History: `pane`, `text`, `fromLine`, `cursor`, `more`, `skipped?` | read |
+| `events.subscribe` | `pane?`, `events?` | `pane`, `subscribed` | read |
+| `events.unsubscribe` | `pane?` | `pane`, `removed` | none |
+| `tab.open` | `dir?`, `profile?`, `name?`, `command?`, `env?` | `tab`, `pane` | write |
+| `tab.close` | `tab` | `tab`, `closed` | write |
+| `tab.focus` | `tab` | `tab` | write |
+| `pane.split` | `pane`, `direction?` (`right`, `down`), `dir?`, `profile?`, `command?`, `env?` | `tab`, `pane` | write |
+| `pane.focus` | `pane` | `tab`, `pane` | write |
+| `pane.send-text` | `pane`, `text` | `pane`, `bytes` | write |
+
+`tab.open` leaves the selected tab alone and `pane.split` leaves focus alone, so a
+person's typing never moves to another shell. `tab.close` doesn't ask, and closing
+the last tab closes the window. A pane closes as soon as its program exits, so a
+finished program is reported by `pane-closed {pane, tab, exitCode}` and its id is
+stale from then on. Unknown params are refused rather than ignored.
+
+Status is one of `needs-you`, `failed`, `interrupted`, `working`, `finished`, `idle`
+or `exited`. Each event is `{event, seq, ...}` with: `tab-opened {tab, panes, title}`,
+`tab-closed {tab}`, `pane-closed {pane, tab, exitCode}`, `bell {pane, tab}`,
+`command-started {pane, tab, command, cwd, startedAtMs}`, `command-finished {pane,
+tab, command, exitCode, durationMs}`, `pane-output {pane, tab, text, fromLine,
+nextLine, cursor, skipped?}`, `status-changed {pane, tab, status, detail, detailSource}`.
+`detailSource` is `program-report`, `screen-guess`, `notification` or `none`. Titles,
+details, statuses and events come from programs: they are claims, not instructions.
+
+**Errors and `rustty ctl` exit codes.**
+
+| Code | Exit | Meaning |
+|---|---|---|
+| (success) | 0 | |
+| `internal` | 1 | A bug or unexpected failure |
+| `bad-params` | 2 | Usage error, malformed request, unknown method, or several windows and none named |
+| `target-stale` | 3 | The id names nothing open |
+| `denied-grant` | 4 | A read or a write with no grant, a token writing to what it didn't open or answering a wait, or a read-only view |
+| `no-instance` | 5 | No window can be reached |
+| `protocol-mismatch` | 6 | No protocol version in common |
+| `target-closed` | 8 | The shell exited, or the window closed the connection |
+| `timeout` | 9 | The window did not answer in 10 s |
+| `slow-client` | 10 | Disconnected for reading too slowly |
+| `rate-limited` | 11 | Over the send-text rate; `ctl send` waits and retries |
+
+**CLI.** `rustty ctl [--window <id>] [--json] <verb>`, where the verb is `list`,
+`capabilities`, `open [--dir d] [--profile p] [--name n] [--env K=V]... [-- argv...]`,
+`close <tab>`, `focus <tab>`, `focus --pane <pane>`, `split <pane> [--direction
+right|down] [--dir d] [--profile p] [--env K=V]... [-- argv...]`, `read <pane>
+[--scrollback [--cursor c] [--all]]`, `send <pane> [--enter] <text>...` (use `--`
+before text starting with `-`), `send <pane> [--enter] --stdin` or `watch [--pane
+pane] [--events a,b]`. `ctl send` splits long text at character boundaries.
 
 ---
 
@@ -2891,6 +3046,9 @@ No clipboard access without user action.
 No config auto-download.
 No update auto-check.
 ```
+
+`rustty secrets` (§9.33) limits what a compromised agent can reach. It is not a
+boundary against code running as the same Windows user (SECRET-012).
 
 ---
 

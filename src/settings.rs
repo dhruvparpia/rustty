@@ -142,6 +142,34 @@ pub fn settings(cfg: &Config) -> Vec<Setting> {
     );
     add(
         &mut out,
+        "session-rail",
+        format!("{}", cfg.session_rail),
+        "global",
+        false,
+    );
+    add(
+        &mut out,
+        "automation-writes",
+        format!("{}", cfg.automation_writes),
+        "global",
+        true,
+    );
+    add(
+        &mut out,
+        "automation-reads",
+        format!("{}", cfg.automation_reads),
+        "global",
+        true,
+    );
+    add(
+        &mut out,
+        "welcome",
+        format!("{}", cfg.welcome),
+        "global",
+        false,
+    );
+    add(
+        &mut out,
         "session-restore",
         format!("{}", cfg.session_restore),
         "global",

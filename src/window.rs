@@ -25,12 +25,19 @@
 
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
+use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
+use std::cell::RefCell;
+use std::rc::Weak;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 use windows::Data::Xml::Dom::XmlDocument;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, ClientToScreen, EndPaint, GetMonitorInfoW, InvalidateRect,
     MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
@@ -39,9 +46,12 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetTickCount64;
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Accessibility::{
     IRawElementProviderSimple, UiaReturnRawElementProvider, UiaRootObjectId,
 };
+use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
     SetProcessDpiAwarenessContext,
@@ -51,42 +61,56 @@ use windows::Win32::UI::Input::Ime::{
     ImmGetContext, ImmNotifyIME, ImmReleaseContext, ImmSetCompositionWindow, NI_COMPOSITIONSTR,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, GetKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
-    ReleaseCapture, SetCapture, SetFocus, UnregisterHotKey, VK_CONTROL, VK_LCONTROL, VK_LMENU,
-    VK_RMENU, VK_SHIFT,
+    GetActiveWindow, GetDoubleClickTime, GetKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
+    MOD_SHIFT, RegisterHotKey, ReleaseCapture, SetCapture, SetFocus, UnregisterHotKey, VK_CONTROL,
+    VK_LCONTROL, VK_LMENU, VK_RMENU, VK_SHIFT,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP,
     SetCurrentProcessExplicitAppUserModelID, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRect, AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW,
-    DLGPROC, DLGTEMPLATE, DS_MODALFRAME, DefWindowProcW, DeleteMenu, DestroyMenu, DestroyWindow,
-    DialogBoxIndirectParamW, DispatchMessageW, EnableMenuItem, EndDialog, GW_CHILD, GW_HWNDNEXT,
-    GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClientRect, GetCursorPos, GetForegroundWindow,
-    GetMenu, GetMenuItemCount, GetMessageW, GetSubMenu, GetWindow, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextW, HMENU, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM, IDCANCEL,
-    IDOK, IDYES, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW, LoadIconW,
-    MB_DEFBUTTON2, MB_ICONASTERISK, MB_ICONWARNING, MB_OK, MB_YESNO, MF_BYCOMMAND, MF_BYPOSITION,
-    MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
-    MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_HIDE,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetMenu, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE,
-    WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_ENTERSIZEMOVE,
-    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR,
-    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INITDIALOG,
-    WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER,
-    WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    AdjustWindowRect, AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+    CheckMenuItem, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DeleteMenu, DestroyMenu,
+    DestroyWindow, DispatchMessageW, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetMenuItemCount, GetMessageW, GetSubMenu,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, HMENU, HTCLIENT, HWND_TOPMOST, IDC_ARROW,
+    IDC_IBEAM, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW, LoadIconW,
+    MB_ICONASTERISK, MF_BYCOMMAND, MF_BYPOSITION, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, PostMessageW, PostQuitMessage,
+    RegisterClassW, SIZE_MINIMIZED, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE,
+    WM_DESTROY, WM_DROPFILES, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO,
+    WM_GETOBJECT, WM_HOTKEY, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT,
+    WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR,
+    WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    HTCAPTION, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
+    NCCALCSIZE_PARAMS, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SM_CXPADDEDBORDER,
+    SM_CYSIZEFRAME, SWP_NOMOVE, SWP_NOSIZE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    WM_SYSKEYUP,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    TITLEBARINFOEX, WM_GETTITLEBARINFOEX, WM_NCLBUTTONDBLCLK,
 };
 use windows::core::{ComObject, PCWSTR, Result};
 
 use crate::app::{App, PaneClose};
+use crate::caption;
 use crate::clipboard;
 use crate::color::Color;
 use crate::config::{
@@ -95,9 +119,11 @@ use crate::config::{
 use crate::diagnostics::{self, Resolved};
 use crate::discovery::{self, Found};
 use crate::keyboard::{self, Modifiers};
+use crate::keyboard::{AltTap, VK_MENU};
 use crate::palette::{Command, PaletteItem, PaletteState, builtin_shortcut, display_shortcut};
 use crate::pane::Pane;
 use crate::parser::{MouseProtocol, bracketed_paste_bytes, mouse_report_bytes};
+use crate::rail;
 use crate::render::{
     CellMetrics, Renderer, SEARCH_BAR_HEIGHT, dips_to_px, measure_cells, palette_row_height,
     px_to_dips,
@@ -108,9 +134,10 @@ use crate::shell::{ShellFamily, SpawnOptions, quote_for_drop, shell_family};
 use crate::split::{Dir, Rect, Side};
 use crate::tabbar::TAB_BAR_HEIGHT;
 use crate::theme::{self, Theme};
+use crate::welcome;
 
-/// SKIN-006: retain native caption controls and let DWM color their surfaces.
-/// Unsupported attributes (Windows 10) fail harmlessly to the system caption.
+/// SKIN-006: let DWM color the frame and border around the drawn title strip.
+/// Unsupported attributes (Windows 10) fail harmlessly to the system frame.
 fn apply_caption_skin(hwnd: HWND, theme: &Theme) {
     use windows::Win32::Graphics::Dwm::{
         DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -145,9 +172,41 @@ const APP_NAME: &str = "rustty";
 
 /// Shell-output poll period in milliseconds.
 const POLL_MS: u32 = 33;
+/// Keeps COM open on the UI thread for as long as windows exist. The renderer's
+/// image factory needs it, and only activating a window happened to start it.
+struct ComApartment(bool);
+
+impl ComApartment {
+    fn open() -> Self {
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+        // Safety: called on this thread, and balanced in `drop` when it worked.
+        Self(unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok())
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.0 {
+            // Safety: balances the successful call in `open`, on the same thread.
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
+/// This process holds the instance mutex, so its layout is the one to keep.
+static PRIMARY_INSTANCE: AtomicBool = AtomicBool::new(false);
 
 /// Timer id for the shell-output poll.
 const POLL_TIMER: usize = 1;
+
+/// Per-session name of the mutex a GUI process holds.
+const INSTANCE_MUTEX: &str = "Local\\rustty-gui";
+
+/// `WM_MOUSELEAVE`, which the bindings do not export.
+const WM_MOUSELEAVE: u32 = 0x02A3;
+
+/// Timer id for the crab animation.
+const CLACK_TIMER: usize = 21;
 
 /// Timer id for the cursor blink (CONFIG-009).
 const BLINK_TIMER: usize = 2;
@@ -203,6 +262,7 @@ const MENU_COPY: usize = 0xE811;
 const MENU_PASTE: usize = 0xE812;
 const MENU_SEARCH: usize = 0xE821;
 const MENU_FULLSCREEN: usize = 0xE822;
+const MENU_SESSION_RAIL: usize = 0xE826;
 const MENU_PREV_COMMAND: usize = 0xE823;
 const MENU_NEXT_COMMAND: usize = 0xE824;
 const MENU_COPY_LAST_CMD: usize = 0xE825;
@@ -339,7 +399,7 @@ fn append_menu_submenu(parent: HMENU, text: &str, submenu: HMENU) -> Result<()> 
 /// keyboard shortcut text; the app's existing keybindings execute them.
 fn build_menu(profiles: &[ProfileSpec], theme_names: &[String]) -> Result<HMENU> {
     unsafe {
-        let menu = CreateMenu()?;
+        let menu = CreatePopupMenu()?;
 
         let file = CreatePopupMenu()?;
         append_menu_item(file, "&New Tab\tCtrl+Shift+T", MENU_NEW_TAB)?;
@@ -385,6 +445,7 @@ fn build_menu(profiles: &[ProfileSpec], theme_names: &[String]) -> Result<HMENU>
         append_menu_item(view, "Split Be&low\tCtrl+Shift+-", MENU_SPLIT_DOWN)?;
         append_menu_separator(view)?;
         append_menu_item(view, "Full &Screen\tF11", MENU_FULLSCREEN)?;
+        append_menu_item(view, "Sessions Side&bar\tCtrl+Shift+S", MENU_SESSION_RAIL)?;
         append_menu_separator(view)?;
         let themes = CreatePopupMenu()?;
         for (idx, name) in theme_names.iter().enumerate() {
@@ -615,11 +676,10 @@ fn profile_command(s: &WindowState, id: usize) -> Option<usize> {
 /// Update check marks and enabled state for the popup about to open.
 fn update_menu_checks(hwnd: HWND, wparam: WPARAM) {
     let popup = HMENU(wparam.0 as *mut c_void);
-    let menu = unsafe { GetMenu(hwnd) };
-    if menu.0.is_null() {
-        return;
-    }
     let Some(state) = state_ref(hwnd) else {
+        return;
+    };
+    let Some(menu) = state.menu else {
         return;
     };
     let tabs = state.app.tab_count();
@@ -649,6 +709,7 @@ fn update_menu_checks(hwnd: HWND, wparam: WPARAM) {
         }
         enable_menu_item(view, MENU_SEARCH, tabs > 0);
         check_menu_item(view, MENU_FULLSCREEN, state.fullscreen.is_some());
+        check_menu_item(view, MENU_SESSION_RAIL, state.rail_enabled);
     }
 
     if let Some(window) = submenu_of(menu, 3)
@@ -722,6 +783,7 @@ fn handle_command(hwnd: HWND, wparam: WPARAM) {
         MENU_VIEW_TAKE_CONTROL => take_view_control(hwnd),
         MENU_VIEW_TERMINATE => terminate_view_session(hwnd),
         MENU_FULLSCREEN => toggle_fullscreen(hwnd),
+        MENU_SESSION_RAIL => toggle_session_rail(hwnd),
         MENU_COPY => copy_screen(hwnd),
         MENU_PASTE => paste_clipboard(hwnd),
         MENU_OPEN_LINK => {
@@ -783,6 +845,7 @@ fn set_theme(hwnd: HWND, idx: usize) {
         for problem in problems {
             eprintln!("rustty: {problem}");
         }
+        s.app.set_palette(theme.palette);
         s.theme = theme;
     }
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -848,19 +911,36 @@ fn open_preferences(hwnd: HWND) {
 }
 
 fn show_about(hwnd: HWND) {
-    let text = wstr(&format!(
-        "rustty {}\n\nA native Windows terminal emulator.\nMIT licensed. No telemetry.",
-        env!("CARGO_PKG_VERSION")
-    ));
-    let caption = wstr("About rustty");
-    unsafe {
-        let _ = MessageBoxW(
-            Some(hwnd),
-            PCWSTR(text.as_ptr()),
-            PCWSTR(caption.as_ptr()),
-            MB_OK,
-        );
-    }
+    let heading = format!("rustty {}", env!("CARGO_PKG_VERSION"));
+    let spec = crate::dialog::Spec {
+        title: "About rustty",
+        heading: Some(&heading),
+        ..crate::dialog::Spec::message(
+            "A native Windows terminal emulator.\nMIT licensed. No telemetry.",
+        )
+    };
+    crate::dialog::show(Some(hwnd), &dialog_palette(hwnd), &spec);
+}
+
+/// The dialog colors for this window's theme (DIALOG-001).
+fn dialog_palette(hwnd: HWND) -> crate::dialog::Palette {
+    state_ref(hwnd).map_or_else(
+        || crate::dialog::palette(&Theme::copper_dark()),
+        |s| crate::dialog::palette(&s.theme),
+    )
+}
+
+/// A question with its own button labels. The focus starts on cancel.
+fn ask(
+    hwnd: HWND,
+    heading: Option<&str>,
+    message: &str,
+    confirm: &str,
+    cancel: &str,
+    tone: crate::dialog::Tone,
+) -> bool {
+    let spec = crate::dialog::Spec::question(heading, message, confirm, cancel, tone);
+    crate::dialog::show(Some(hwnd), &dialog_palette(hwnd), &spec).confirmed
 }
 
 // ---- workspace templates (WORKSPACE-003..008) ---------------------------
@@ -871,29 +951,16 @@ fn ws_menu_label(name: &str) -> String {
 }
 
 fn ws_report(hwnd: HWND, text: &str) {
-    let text = wstr(text);
-    let caption = wstr("rustty");
-    unsafe {
-        let _ = MessageBoxW(
-            Some(hwnd),
-            PCWSTR(text.as_ptr()),
-            PCWSTR(caption.as_ptr()),
-            MB_OK | MB_ICONWARNING,
-        );
-    }
+    show_message(hwnd, text);
 }
 
 fn ws_confirm(hwnd: HWND, text: &str, caption: &str) -> bool {
-    let text = wstr(text);
-    let caption = wstr(caption);
-    unsafe {
-        MessageBoxW(
-            Some(hwnd),
-            PCWSTR(text.as_ptr()),
-            PCWSTR(caption.as_ptr()),
-            MB_YESNO | MB_DEFBUTTON2,
-        ) == IDYES
-    }
+    let tone = if caption.starts_with("Delete") {
+        crate::dialog::Tone::Danger
+    } else {
+        crate::dialog::Tone::Normal
+    };
+    ask(hwnd, Some(caption), text, "&Yes", "&No", tone)
 }
 
 /// WORKSPACE-003: rebuild the Workspaces submenu every time it opens:
@@ -1068,161 +1135,26 @@ fn delete_workspace_by_index(hwnd: HWND, idx: usize) {
 /// template (no .rc resource): a label, an edit seeded with `initial`,
 /// OK and Cancel. Returns the typed name on OK, `None` on Cancel.
 fn prompt_workspace_name(parent: HWND, title: &str, initial: &str) -> Option<String> {
-    let mut answer = initial.to_owned();
-    let template = ws_name_dialog_template(title);
-    let hinstance = unsafe { GetModuleHandleW(None) }.ok()?;
-    let dlg: DLGPROC = Some(ws_name_dlgproc);
-    let res = unsafe {
-        DialogBoxIndirectParamW(
-            Some(hinstance.into()),
-            template.as_ptr().cast::<DLGTEMPLATE>(),
-            Some(parent),
-            dlg,
-            LPARAM(&mut answer as *mut String as isize),
-        )
+    let spec = crate::dialog::Spec {
+        title,
+        heading: Some(title),
+        message: "Workspace name:",
+        confirm: "OK",
+        cancel: Some("Cancel"),
+        tone: crate::dialog::Tone::Normal,
+        input: Some(initial),
+        focus_confirm: true,
     };
-    (res == IDOK.0 as isize).then_some(answer)
-}
-
-/// Pack a UTF-16 word stream into the DWORD-aligned buffer a dialog
-/// template pointer must be.
-fn pack_words(words: Vec<u16>) -> Vec<u32> {
-    words
-        .chunks(2)
-        .map(|c| u32::from(c[0]) | c.get(1).map_or(0, |w| u32::from(*w) << 16))
-        .collect()
-}
-
-fn dlg_push_str(words: &mut Vec<u16>, s: &str) {
-    words.extend(s.encode_utf16());
-    words.push(0);
-    if words.len() % 2 == 1 {
-        words.push(0);
-    }
-}
-
-fn dlg_push_atom(words: &mut Vec<u16>, atom: u16) {
-    words.extend([0xFFFF, atom]);
-}
-
-fn dlg_item(words: &mut Vec<u16>, style: u32, id: u16, class: u16, rect: [i16; 4], text: &str) {
-    let [x, y, cx, cy] = rect;
-    words.extend([
-        (style & 0xFFFF) as u16,
-        (style >> 16) as u16,
-        0,
-        0,
-        x as u16,
-        y as u16,
-        cx as u16,
-        cy as u16,
-        id,
-    ]);
-    dlg_push_atom(words, class);
-    dlg_push_str(words, text);
-}
-
-/// The name prompt layout: label, edit, OK, Cancel (dialog units).
-/// Built to the documented DLGTEMPLATE layout: dialog header, then four
-/// DLGITEMTEMPLATE records (style, extended style, x/y/cx/cy, id, class
-/// atom, text), every field WORD-aligned.
-fn ws_name_dialog_template(title: &str) -> Vec<u32> {
-    const WS_STATIC: u32 = WS_CHILD.0 | WS_VISIBLE.0; // SS_LEFT is 0
-    const WS_EDIT: u32 = WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | WS_BORDER.0;
-    const WS_BTN: u32 = WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0;
-    const ID_EDIT: u16 = 1000;
-    const ID_OK: u16 = 1; // IDOK
-    const ID_CANCEL: u16 = 2; // IDCANCEL
-    let style = WS_POPUP.0 | DS_MODALFRAME as u32 | WS_CAPTION.0 | WS_SYSMENU.0;
-    let mut w: Vec<u16> = vec![
-        (style & 0xFFFF) as u16,
-        (style >> 16) as u16,
-        0,
-        0,
-        4, // item count
-        0,
-        0,
-        220,
-        42, // dialog size in dialog units
-        0,
-        0, // menu: none
-        0,
-        0, // window class: default
-    ];
-    dlg_push_str(&mut w, title);
-    dlg_item(
-        &mut w,
-        WS_STATIC,
-        1001,
-        0x0082,
-        [10, 8, 200, 10],
-        "Workspace name:",
-    );
-    dlg_item(&mut w, WS_EDIT, ID_EDIT, 0x0081, [10, 20, 200, 12], "");
-    dlg_item(
-        &mut w,
-        WS_BTN | BS_DEFPUSHBUTTON as u32,
-        ID_OK,
-        0x0080,
-        [90, 35, 50, 14],
-        "OK",
-    );
-    dlg_item(
-        &mut w,
-        WS_BTN | BS_PUSHBUTTON as u32,
-        ID_CANCEL,
-        0x0080,
-        [145, 35, 50, 14],
-        "Cancel",
-    );
-    pack_words(w)
-}
-
-unsafe extern "system" fn ws_name_dlgproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> isize {
-    // The edit is the second template control (after the label), which is
-    // its child-window order.
-    let edit = || -> Option<HWND> {
-        let first = unsafe { GetWindow(hwnd, GW_CHILD) }.ok()?;
-        unsafe { GetWindow(first, GW_HWNDNEXT) }.ok()
-    };
-    match msg {
-        WM_INITDIALOG => {
-            let seed = unsafe { &*(lparam.0 as *const String) };
-            if let Some(edit) = edit() {
-                let text = wstr(seed);
-                let _ = unsafe { SetWindowTextW(edit, PCWSTR(text.as_ptr())) };
-                let _ = unsafe { SetFocus(Some(edit)) };
-            }
-            1
-        }
-        WM_COMMAND => {
-            if wparam.0 as u32 == IDOK.0 as u32 {
-                let answer = unsafe { &mut *(lparam.0 as *mut String) };
-                if let Some(edit) = edit() {
-                    let mut buf = [0u16; 512];
-                    let n = unsafe { GetWindowTextW(edit, &mut buf) };
-                    *answer = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
-                }
-                let _ = unsafe { EndDialog(hwnd, IDOK.0 as isize) };
-                1
-            } else if wparam.0 as u32 == IDCANCEL.0 as u32 {
-                let _ = unsafe { EndDialog(hwnd, IDCANCEL.0 as isize) };
-                1
-            } else {
-                0
-            }
-        }
-        _ => 0,
-    }
+    let answer = crate::dialog::show(Some(parent), &dialog_palette(parent), &spec);
+    answer.text.filter(|_| answer.confirmed)
 }
 
 /// Per-window state, boxed onto the heap and pointed at by
 /// `GWLP_USERDATA` (created in `WM_CREATE`, reclaimed in `WM_DESTROY`).
+/// The window's side of the local automation API (AUTO-003).
+mod automation;
+pub use automation::open_boss_tab;
+
 struct WindowState {
     app: App,
     theme: Theme,
@@ -1273,6 +1205,53 @@ struct WindowState {
     /// Saved window rect + styles while fullscreen (F11), `None` in
     /// windowed mode.
     fullscreen: Option<(RECT, isize, isize)>,
+    /// Caption button under the pointer.
+    caption_hover: Option<caption::Hit>,
+    /// Caption button held down.
+    caption_pressed: Option<caption::Hit>,
+    /// The window menu, opened as a popup. `None` on the quick terminal.
+    menu: Option<HMENU>,
+    /// Watches for a lone tap of Alt.
+    alt_tap: AltTap,
+    /// The sessions sidebar is switched on.
+    rail_enabled: bool,
+    /// The left button went down in the grid and has not come back up.
+    grid_pressed: bool,
+    /// The open roadmap board (BOARD-001).
+    board: Option<BoardOpen>,
+    /// A worktree being created off the UI thread, and the tab title for it.
+    worktree_rx: Option<Receiver<(std::result::Result<PathBuf, String>, String)>>,
+    /// When to look for agent CLIs next (RESTORE-002).
+    agent_next_poll: Option<Instant>,
+    /// The process list being read off the UI thread.
+    agent_rx: Option<std::sync::mpsc::Receiver<Vec<crate::agents::Inspection>>>,
+    /// When to save the session next (RESTORE-001).
+    session_next_save: Option<Instant>,
+    /// What the last periodic save wrote.
+    session_saved: Option<crate::session::Session>,
+    /// Windows is shutting down: agents dying now must not be recorded as
+    /// having been closed.
+    shutting_down: bool,
+    /// Its width right now: 0 when off, too narrow, fullscreen or quick.
+    rail_w: f32,
+    /// When its rows are next rebuilt.
+    rail_next_tick: Option<Instant>,
+    /// When host sessions are next listed.
+    rail_next_host_poll: Option<Instant>,
+    /// The answer to a host session listing still on its way.
+    rail_host_rx: Option<Receiver<Vec<serde_json::Value>>>,
+    /// Host sessions from the last listing.
+    rail_hosts: Vec<serde_json::Value>,
+    /// Heading for a session whose folder is unknown: where rustty started.
+    rail_home_project: String,
+    /// Time zero for sidebar activity.
+    rail_epoch: Instant,
+    /// Working dots pulse, unless Windows animation effects are off.
+    rail_animate: bool,
+    /// This launch shows the banner; cleared once it has.
+    greet: bool,
+    /// The running crab animation and the pane it draws in.
+    clack: Option<(welcome::Clack, Weak<RefCell<Pane>>)>,
     /// Issue #25: high half of a UTF-16 surrogate pair from `WM_CHAR`
     /// (VK_PACKET/IME deliver non-BMP characters as two messages).
     pending_surrogate: Option<u16>,
@@ -1330,6 +1309,8 @@ struct WindowState {
     /// the render target follows live, the grid/ConPTY reflow lands once at
     /// the end (mid-drag reflow was the visible text bounce).
     drag_resize: bool,
+    /// The local automation API (AUTO-003); `None` if its pipe couldn't start.
+    automation: Option<automation::Binding>,
 }
 
 impl WindowState {
@@ -1337,10 +1318,43 @@ impl WindowState {
     /// `always` shows it, `auto` shows it only with more than one tab,
     /// `hidden` never shows it.
     fn bar_height(&self) -> f32 {
+        // The sidebar lists the tabs, so the tab strip steps aside.
+        if self.rail_w > 0.0 {
+            return 0.0;
+        }
         match self.tab_bar {
             TabBar::Always => TAB_BAR_HEIGHT,
             TabBar::Auto if self.app.tab_count() > 1 => TAB_BAR_HEIGHT,
             TabBar::Auto | TabBar::Hidden => 0.0,
+        }
+    }
+
+    /// Title strip height: none on quick and fullscreen windows.
+    fn caption_height(&self) -> f32 {
+        if self.quick || self.fullscreen.is_some() {
+            0.0
+        } else {
+            caption::STRIP_HEIGHT
+        }
+    }
+
+    fn tabs_on_top(&self) -> bool {
+        self.cfg.tab_bar.placement != TabBarPlacement::Bottom
+    }
+
+    /// Chrome above and below the grid together.
+    fn total_chrome(&self) -> f32 {
+        caption::total_chrome(self.tabs_on_top(), self.bar_height(), self.caption_height())
+    }
+
+    /// End of the `+` button when the title strip holds tabs, otherwise 0.
+    fn tabs_end(&self) -> f32 {
+        if self.rail_w > 0.0 {
+            return self.rail_w;
+        }
+        match &self.renderer {
+            Some(r) if self.tabs_on_top() && self.bar_height() > 0.0 => r.tabs_end(),
+            _ => 0.0,
         }
     }
 
@@ -1356,12 +1370,8 @@ impl WindowState {
     /// Y where the grid starts, i.e. below (or above) the tab bar, plus the
     /// window padding (WINDOW-011).
     fn grid_top(&self) -> f32 {
-        let bar = if self.cfg.tab_bar.placement == TabBarPlacement::Bottom {
-            0.0
-        } else {
-            self.bar_height()
-        };
-        bar + self.pad_y()
+        caption::top_chrome(self.tabs_on_top(), self.bar_height(), self.caption_height())
+            + self.pad_y()
     }
 
     /// `[window.padding]` in DIPs, matched to what the renderer insets by.
@@ -1497,7 +1507,7 @@ impl WindowState {
         }
         for (idx, &(lo, hi)) in layout.tabs.iter().enumerate() {
             if x >= lo && x < hi {
-                let close_w = crate::tabbar::close_width(self.metrics.cell_width);
+                let close_w = crate::tabbar::close_width(crate::tabbar::UI_CHAR_WIDTH);
                 if self.cfg.tab_bar.close_button && x >= hi - close_w {
                     return TabHit::Close(idx);
                 }
@@ -1568,7 +1578,14 @@ unsafe extern "system" fn wnd_proc(
         WM_GETMINMAXINFO => {
             let mm = lparam.0 as *mut MINMAXINFO;
             if let (true, Some(s)) = (!mm.is_null(), state_ref(hwnd)) {
-                let (w, h) = px_size(s.metrics, MIN_COLS, MIN_ROWS, s.bar_height());
+                let (w, h) = px_size(
+                    s.metrics,
+                    MIN_COLS,
+                    MIN_ROWS,
+                    s.total_chrome(),
+                    s.pad_x(),
+                    s.pad_y(),
+                );
                 unsafe { (*mm).ptMinTrackSize = POINT { x: w, y: h } };
             }
             LRESULT(0)
@@ -1600,6 +1617,7 @@ unsafe extern "system" fn wnd_proc(
                 let width = ((lparam.0 & 0xFFFF) as u16) as u32;
                 let height = (((lparam.0 >> 16) & 0xFFFF) as u16) as u32;
                 resize_window(hwnd, width, height);
+                sync_caption_state(hwnd);
             }
             LRESULT(0)
         }
@@ -1684,8 +1702,9 @@ unsafe extern "system" fn wnd_proc(
                 if !s.quick
                     && let Ok(menu) =
                         build_menu(&s.profiles, &menu_theme_names(s.theme_dir.as_deref()))
+                    && let Some(old) = s.menu.replace(menu)
                 {
-                    let _ = unsafe { SetMenu(hwnd, Some(menu)) };
+                    let _ = unsafe { DestroyMenu(old) };
                 }
                 let names: Vec<String> = s.profiles.iter().map(|p| p.name.clone()).collect();
                 rebuild_jumplist(&names);
@@ -1697,11 +1716,20 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_KEYDOWN => {
+            note_alt_tap_key(hwnd, (wparam.0 & 0xFFFF) as u16);
             handle_keydown(hwnd, (wparam.0 & 0xFFFF) as u16);
+            LRESULT(0)
+        }
+        WM_SYSKEYUP if (wparam.0 & 0xFFFF) as u16 == VK_MENU => {
+            let tapped = state_mut(hwnd).is_some_and(|s| s.alt_tap.key_up(VK_MENU));
+            if tapped {
+                show_window_menu(hwnd);
+            }
             LRESULT(0)
         }
         WM_SYSKEYDOWN => {
             let vk = (wparam.0 & 0xFFFF) as u16;
+            note_alt_tap_key(hwnd, vk);
             // Alt+Tab and friends must keep their system behaviour.
             if vk == 0x09 {
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
@@ -1746,6 +1774,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            if let Some(s) = state_mut(hwnd) {
+                s.alt_tap.cancel();
+            }
             handle_lbutton_down(hwnd, lparam);
             LRESULT(0)
         }
@@ -1753,7 +1784,12 @@ unsafe extern "system" fn wnd_proc(
             handle_dblclick(hwnd, lparam);
             LRESULT(0)
         }
+        WM_MOUSELEAVE => {
+            set_rail_hover(hwnd, rail::Hit::None);
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
+            set_caption_hover(hwnd, None);
             handle_mouse_move(hwnd, wparam, lparam);
             LRESULT(0)
         }
@@ -1775,6 +1811,63 @@ unsafe extern "system" fn wnd_proc(
                 LRESULT(0)
             }
         }
+        WM_NCCALCSIZE if wparam.0 != 0 && has_drawn_caption(hwnd) => {
+            // Keep the standard side and bottom frame and take over the top,
+            // so the client area runs up to the top edge of the window.
+            let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
+            let top = unsafe { (*params).rgrc[0].top };
+            let result = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            // A maximized window overhangs the monitor by its frame.
+            let inset = if unsafe { IsZoomed(hwnd).as_bool() } {
+                frame_thickness_px(hwnd)
+            } else {
+                0
+            };
+            unsafe { (*params).rgrc[0].top = top + inset };
+            result
+        }
+        WM_NCHITTEST if has_drawn_caption(hwnd) => {
+            let result = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            LRESULT(nc_hit_test(hwnd, result.0 as u32, lparam) as isize)
+        }
+        // Screen readers learn where the caption buttons are from this message.
+        WM_GETTITLEBARINFOEX if has_drawn_caption(hwnd) => {
+            let result = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            fill_title_bar_info(hwnd, lparam.0 as *mut TITLEBARINFOEX);
+            result
+        }
+        WM_NCMOUSEMOVE if has_drawn_caption(hwnd) => {
+            set_caption_hover(hwnd, caption_button(wparam.0 as u32));
+            track_nc_leave(hwnd);
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_NCMOUSELEAVE if has_drawn_caption(hwnd) => {
+            if let Some(s) = state_mut(hwnd) {
+                s.caption_pressed = None;
+            }
+            set_caption_hover(hwnd, None);
+            LRESULT(0)
+        }
+        // The second click of a double-click is one more press: Windows would
+        // otherwise run its own button handling for a button it does not draw.
+        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK
+            if caption_button(wparam.0 as u32).is_some() && has_drawn_caption(hwnd) =>
+        {
+            if let Some(s) = state_mut(hwnd) {
+                s.caption_pressed = caption_button(wparam.0 as u32);
+            }
+            sync_caption_state(hwnd);
+            LRESULT(0)
+        }
+        WM_NCLBUTTONUP if caption_button(wparam.0 as u32).is_some() && has_drawn_caption(hwnd) => {
+            let button = caption_button(wparam.0 as u32);
+            let pressed = state_mut(hwnd).and_then(|s| s.caption_pressed.take());
+            sync_caption_state(hwnd);
+            if button == pressed {
+                run_caption_button(hwnd, button);
+            }
+            LRESULT(0)
+        }
         WM_CONTEXTMENU => {
             handle_context_menu(hwnd, lparam);
             LRESULT(0)
@@ -1793,8 +1886,28 @@ unsafe extern "system" fn wnd_proc(
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
         }
+        windows::Win32::UI::WindowsAndMessaging::WM_QUERYENDSESSION => {
+            save_for_shutdown(hwnd);
+            LRESULT(1)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_ENDSESSION => {
+            if wparam.0 == 0 {
+                // Something cancelled the shutdown: back to normal.
+                if let Some(s) = state_mut(hwnd) {
+                    s.shutting_down = false;
+                }
+            } else {
+                save_for_shutdown(hwnd);
+            }
+            LRESULT(0)
+        }
         WM_TIMER => {
-            if wparam.0 == BLINK_TIMER {
+            rail_tick(hwnd);
+            agent_tick(hwnd);
+            worktree_tick(hwnd);
+            if wparam.0 == CLACK_TIMER {
+                clack_tick(hwnd);
+            } else if wparam.0 == BLINK_TIMER {
                 blink_cursor(hwnd);
             } else if wparam.0 == BELL_TIMER {
                 // BELL-003/004: one flash, for a fixed time.
@@ -1816,6 +1929,7 @@ unsafe extern "system" fn wnd_proc(
                 search_step_tick(hwnd);
             }
             drain_and_cleanup(hwnd);
+            automation::tick(hwnd);
             LRESULT(0)
         }
         WM_COMMAND => {
@@ -1831,6 +1945,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_KILLFOCUS => {
+            if let Some(s) = state_mut(hwnd) {
+                s.alt_tap.cancel();
+            }
             // Roadmap v0.2: the quick terminal vanishes when you click away.
             if state_ref(hwnd).is_some_and(|s| s.quick && s.cfg.quick_terminal.autohide) {
                 let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
@@ -1860,7 +1977,16 @@ unsafe extern "system" fn wnd_proc(
             }
             // WINDOW-014: quitting asks first when the profile wants it.
             let ask = state_ref(hwnd).is_some_and(|s| s.app.tab_confirm_close());
-            if ask && !confirm_yes_no(hwnd, "Quit rustty?") {
+            if ask
+                && !self::ask(
+                    hwnd,
+                    Some("Quit rustty?"),
+                    "Every session in this window will close.",
+                    "&Quit",
+                    "&Cancel",
+                    crate::dialog::Tone::Danger,
+                )
+            {
                 return LRESULT(0);
             }
             let _ = unsafe { DestroyWindow(hwnd) };
@@ -1880,7 +2006,7 @@ unsafe extern "system" fn wnd_proc(
                 } else {
                     // TAB-026/WINDOW-015/016: save while every shell is still
                     // live (fresh OSC 7 cwds); a failed save never blocks quit.
-                    if state.cfg.session_restore {
+                    if state.cfg.session_restore && !state.shutting_down {
                         let session = snapshot_session(&state, hwnd);
                         if let Err(e) = crate::session::save(&session) {
                             eprintln!("rustty: session save failed: {e}");
@@ -1925,17 +2051,39 @@ fn reclaim_state(hwnd: HWND) -> Option<*mut WindowState> {
 /// WM_CREATE follow-up: show the window, build the renderer, size the
 /// grid, spawn the first shell, start the output-poll timer.
 fn init_window(hwnd: HWND) {
+    // First: the shells started below are told which window they are in.
+    automation::start(hwnd);
     let quick = state_ref(hwnd).is_some_and(|s| s.quick);
-    // Native menu bar (MENU-001..005). A menu failure leaves the terminal
+    if !quick {
+        // The window draws its own title bar: keep DWM's shadow and border, and
+        // make Windows recompute the frame now that the state is in place.
+        let margins = MARGINS {
+            cxLeftWidth: 0,
+            cxRightWidth: 0,
+            cyTopHeight: 1,
+            cyBottomHeight: 0,
+        };
+        unsafe {
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+    }
+    // Window menu (MENU-001..005), opened as a popup by tapping Alt. A menu failure leaves the terminal
     // usable, matching the no-fatal-UI-failure rule. The frameless quick
     // window has no menu, and it is not shown until the hotkey summons it.
     if !quick {
         let menu = state_ref(hwnd)
             .map(|s| build_menu(&s.profiles, &menu_theme_names(s.theme_dir.as_deref())));
-        if let Some(menu) = menu.and_then(|r| r.ok()) {
-            unsafe {
-                let _ = SetMenu(hwnd, Some(menu));
-            }
+        if let (Some(menu), Some(s)) = (menu.and_then(|r| r.ok()), state_mut(hwnd)) {
+            s.menu = Some(menu);
         }
         let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
     }
@@ -1969,6 +2117,26 @@ fn init_window(hwnd: HWND) {
     if let Some(s) = state_mut(hwnd) {
         s.renderer = renderer;
         sync_chrome(s);
+        // The renderer starts from the grid size it was asked for. The window
+        // exists by now, so the first shell and banner get its real size.
+        let mut client = RECT::default();
+        if unsafe { GetClientRect(hwnd, &mut client) }.is_ok()
+            && let Some(r) = &mut s.renderer
+            && client.right > 0
+            && client.bottom > 0
+        {
+            r.resize(client.right as u32, client.bottom as u32);
+        }
+        // Before the first shell and banner are sized.
+        let scale = dpi.max(96) as f32 / 96.0;
+        let enabled = s.rail_enabled && !s.quick;
+        s.rail_w = rail::effective_width(enabled, client.right as f32 / scale);
+        let (bar, rail_w) = (s.bar_height(), s.rail_w);
+        if let Some(r) = &mut s.renderer {
+            r.set_rail_width(rail_w);
+            r.set_tab_bar_height(bar);
+        }
+        s.app.set_palette(s.theme.palette);
         if s.restore.is_some() {
             // TAB-026: rebuild saved tabs; shells spawn after the tab bar
             // has taken its final height.
@@ -1991,7 +2159,12 @@ fn init_window(hwnd: HWND) {
                 tab.set_profile(spec.name.clone());
                 tab.set_auto_title(spec.name.clone());
                 tab.set_color(spec.color);
+                if s.greet {
+                    // The banner is written at the window's real size.
+                    tab.pane_mut().fit_grid(cols, rows);
+                }
             }
+            greet_focused_pane(s, &spec.program);
             // Spawn first, then resize: a resize must reach a live ConPTY, and
             // the shell must start at the window's real grid size (NFR-216:
             // these failures are logged, never fatal).
@@ -2007,11 +2180,24 @@ fn init_window(hwnd: HWND) {
         }
     }
     if restored {
+        // A folder on the command line is what the person asked for, and the saved
+        // layout is still theirs: keep both, with that folder in front.
+        let folder = state_ref(hwnd).and_then(|s| {
+            let dir = s.spawn.cwd.clone()?;
+            let saved = s.restore.as_ref()?;
+            let tab = crate::session::tab_in_folder(saved, &dir);
+            Some((dir, tab))
+        });
         // The bar height follows the restored tab count (TAB-010 "auto");
         // grid and every tab must follow before shells spawn.
         sync_tab_bar(hwnd);
         if let Some(s) = state_mut(hwnd) {
             spawn_restored(s);
+        }
+        match folder {
+            Some((_, Some(tab))) => activate_tab(hwnd, tab),
+            Some((dir, None)) => open_session_in(hwnd, std::path::Path::new(&dir), None),
+            None => {}
         }
     }
     if let Some(s) = state_mut(hwnd) {
@@ -2022,8 +2208,14 @@ fn init_window(hwnd: HWND) {
             unsafe { SetTimer(Some(hwnd), BLINK_TIMER, BLINK_MS, None) };
         }
         set_title(hwnd, &s.app);
-        let _ = unsafe { SetFocus(Some(hwnd)) };
+        // Only if showing it made it the active window. SetFocus on a window that
+        // isn't would activate it, even if its launcher asked for no activation, and
+        // a window that takes the foreground takes what the person is typing.
+        if unsafe { GetActiveWindow() } == hwnd {
+            let _ = unsafe { SetFocus(Some(hwnd)) };
+        }
     }
+    clack_tick(hwnd);
     apply_opacity(hwnd);
 }
 
@@ -2096,7 +2288,14 @@ fn dock_quick(quick: HWND, cfg: &Config) {
     }
     let work = info.rcWork;
     // The window rect gets no frame (WS_POPUP), so it is pure grid.
-    let (_, height) = px_size(metrics, 1, cfg.quick_terminal.height, 0.0);
+    let (_, height) = px_size(
+        metrics,
+        1,
+        cfg.quick_terminal.height,
+        0.0,
+        0.0,
+        cfg.window.padding.y as f32,
+    );
     let y = match cfg.quick_terminal.edge {
         QuickEdge::Top => work.top,
         QuickEdge::Bottom => work.bottom - height,
@@ -2141,6 +2340,7 @@ fn create_quick_window() {
         ws_pending: None,
         cmd_notified: 0,
         drag_resize: false,
+        automation: None,
         app: {
             let mut app = App::with_size(spawn.cols, spawn.rows, cfg.scrollback);
             app.set_show_cwd(cfg.tab_bar.show_cwd);
@@ -2170,6 +2370,34 @@ fn create_quick_window() {
         suppress_char: false,
         pending_surrogate: None,
         fullscreen: None,
+        caption_hover: None,
+        caption_pressed: None,
+        menu: None,
+        alt_tap: AltTap::default(),
+        greet: false,
+        clack: None,
+        rail_enabled: false,
+        grid_pressed: false,
+        board: None,
+        worktree_rx: None,
+        agent_next_poll: None,
+        agent_rx: None,
+        session_next_save: None,
+        session_saved: None,
+        shutting_down: false,
+        rail_w: 0.0,
+        rail_next_tick: None,
+        rail_next_host_poll: None,
+        rail_host_rx: None,
+        rail_hosts: Vec::new(),
+        rail_home_project: rail::project_of(
+            std::env::current_dir()
+                .ok()
+                .as_deref()
+                .and_then(std::path::Path::to_str),
+        ),
+        rail_epoch: Instant::now(),
+        rail_animate: animations_enabled(),
         search: None,
         palette: None,
         hint: None,
@@ -2394,19 +2622,27 @@ fn spawn_restored(s: &mut WindowState) {
     if let Err(e) = s.app.resize_all_tabs(cols, rows) {
         eprintln!("rustty: restored tab resize failed: {e}");
     }
+    let program = tab_profile(s).program;
+    greet_focused_pane(s, &program);
     for (i, st) in session.tabs.iter().enumerate() {
         let spec = profile_spec_named(s, &st.profile);
         let mut cwds = Vec::new();
         st.shape.leaf_cwds(&mut cwds);
-        let opts = spec_opts(&spec, cols, rows, s.cfg.shell_integration);
+        let mut opts = spec_opts(&spec, cols, rows, s.cfg.shell_integration);
+        s.app.apply_session_env(&mut opts);
         let cmds: &[Option<Vec<String>>] = ws_cmds
             .as_deref()
             .and_then(|tabs| tabs.get(i))
             .map_or(&[], Vec::as_slice);
-        if let Some(tab) = s.app.tab_at_mut(i)
-            && let Err(e) = tab.spawn_panes_cmds(&opts, &cwds, cmds)
-        {
-            eprintln!("rustty: shell spawn failed: {e}");
+        if let Some(tab) = s.app.tab_at_mut(i) {
+            if let Err(e) = tab.spawn_panes_cmds(&opts, &cwds, cmds) {
+                eprintln!("rustty: shell spawn failed: {e}");
+            }
+            // RESTORE-003: what the last run left running.
+            let mut agents = Vec::new();
+            st.shape.leaf_agents(&mut agents);
+            let mut leaf = agents.into_iter();
+            tab.for_each_pane(|pane, _| pane.set_interrupted(leaf.next().flatten()));
         }
     }
 }
@@ -2430,10 +2666,7 @@ fn snapshot_session(s: &WindowState, hwnd: HWND) -> crate::session::Session {
     let mut rc = RECT::default();
     let window = if s.fullscreen.is_some() {
         None
-    } else if unsafe { GetWindowRect(hwnd, &mut rc) }.is_ok()
-        && rc.right > rc.left
-        && rc.bottom > rc.top
-    {
+    } else if normal_window_rect(hwnd, &mut rc) && rc.right > rc.left && rc.bottom > rc.top {
         Some(crate::session::WindowRect {
             x: rc.left,
             y: rc.top,
@@ -2448,6 +2681,61 @@ fn snapshot_session(s: &WindowState, hwnd: HWND) -> crate::session::Session {
         focused_tab: s.app.active_tab_index(),
         window,
     }
+}
+
+/// Set the size a window started minimized comes back at. `CW_USEDEFAULT` has no
+/// position to give, so that case takes a corner of the work area.
+fn keep_normal_size(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowPlacement, IsIconic, SetWindowPlacement, WINDOWPLACEMENT,
+    };
+    /// Where a window with no saved position comes back.
+    const DEFAULT_CORNER: i32 = 64;
+    if !unsafe { IsIconic(hwnd) }.as_bool() {
+        return;
+    }
+    let mut placement = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_err() {
+        return;
+    }
+    let left = if x == CW_USEDEFAULT {
+        DEFAULT_CORNER
+    } else {
+        x
+    };
+    let top = if y == CW_USEDEFAULT {
+        DEFAULT_CORNER
+    } else {
+        y
+    };
+    placement.rcNormalPosition = RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    };
+    let _ = unsafe { SetWindowPlacement(hwnd, &placement) };
+}
+
+/// The window's rectangle when it is not minimized. A minimized window's own
+/// rectangle is only Windows' parking spot for it.
+fn normal_window_rect(hwnd: HWND, rect: &mut RECT) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowPlacement, IsIconic, WINDOWPLACEMENT};
+    if unsafe { IsIconic(hwnd) }.as_bool() {
+        let mut placement = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        if unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_ok() {
+            *rect = placement.rcNormalPosition;
+            return true;
+        }
+        return false;
+    }
+    unsafe { GetWindowRect(hwnd, rect) }.is_ok()
 }
 
 /// CONFIG-009: flip the cursor blink phase and repaint.
@@ -2466,6 +2754,8 @@ fn blink_cursor(hwnd: HWND) {
 /// WM_SIZE follow-up: resize render target -> grid -> ConPTY (NFR resize
 /// chain, spec NFR).
 fn resize_window(hwnd: HWND, width_px: u32, height_px: u32) {
+    sync_rail_width(hwnd);
+    sync_tab_bar(hwnd);
     let Some(s) = state_mut(hwnd) else { return };
     let Some(r) = &mut s.renderer else { return };
     r.resize(width_px, height_px);
@@ -2493,17 +2783,1015 @@ fn sync_active_tab_geometry(hwnd: HWND) {
     resize_window(hwnd, width, height);
 }
 
+/// Holds a per-user named mutex for the life of the GUI process, so a later
+/// launch can tell another rustty window is open. Each window is its own process.
+struct InstanceGuard(HANDLE);
+
+impl InstanceGuard {
+    /// `None` when another holder exists or the mutex cannot be created.
+    fn acquire(name: &str) -> Option<Self> {
+        let wide = windows::core::HSTRING::from(name);
+        let handle = unsafe { CreateMutexW(None, false, &wide) }.ok()?;
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            let _ = unsafe { CloseHandle(handle) };
+            return None;
+        }
+        Some(Self(handle))
+    }
+}
+
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Whether Windows has animation effects on. Assume yes if it will not say.
+fn animations_enabled() -> bool {
+    let mut enabled = windows::core::BOOL(1);
+    let _ = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(core::ptr::from_mut(&mut enabled).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    enabled.as_bool()
+}
+
+/// Write the banner to the focused pane if this launch greets, and start the
+/// session-count query and the animation. Runs before the pane's shell starts.
+fn greet_focused_pane(s: &mut WindowState, program: &str) {
+    if !std::mem::take(&mut s.greet) {
+        return;
+    }
+    let colors = welcome::Colors::from_theme(&s.theme);
+    let animate = animations_enabled();
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos().into());
+    let Some(tab) = s.app.active_tab_mut() else {
+        return;
+    };
+    let weak = tab.focused_pane_weak();
+    let mut pane = tab.pane_mut();
+    let banner = welcome::Banner {
+        version: env!("CARGO_PKG_VERSION"),
+        cols: pane.grid().cols,
+        rows: pane.grid().rows,
+        exe: welcome::exe_for_program(program),
+        tip: welcome::pick_tip(seed),
+        colors,
+        frame: if animate {
+            welcome::Frame::Open
+        } else {
+            welcome::Frame::Closed
+        },
+    };
+    let Some(text) = banner.render() else {
+        return;
+    };
+    let anchor = pane.grid().live_abs(pane.parser().cursor_row).unwrap_or(0);
+    pane.feed(text.as_bytes());
+    let status_at = (anchor, banner.status_column());
+    drop(pane);
+    // Never delays the shell: the answer is picked up during the animation,
+    // and a late one is dropped.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("rustty-welcome-status".to_string())
+        .spawn(move || {
+            let _ = tx.send(crate::host::client::Client::live_session_count());
+        });
+    let clack = welcome::Clack::new(
+        anchor,
+        colors.foreground,
+        animate,
+        Some(rx),
+        status_at,
+        colors,
+    );
+    let clack = if banner.has_crab() {
+        clack
+    } else {
+        clack.without_crab()
+    };
+    s.clack = Some((clack, weak));
+}
+
+/// Advance the crab animation, and remove its timer when it is over.
+fn clack_tick(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some((mut clack, weak)) = s.clack.take() else {
+        let _ = unsafe { KillTimer(Some(hwnd), CLACK_TIMER) };
+        return;
+    };
+    let next = weak
+        .upgrade()
+        .and_then(|pane| clack.step(&mut pane.borrow_mut()));
+    match next {
+        Some(delay) => {
+            s.clack = Some((clack, weak));
+            let ms = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX);
+            let _ = unsafe { SetTimer(Some(hwnd), CLACK_TIMER, ms, None) };
+        }
+        None => {
+            let _ = unsafe { KillTimer(Some(hwnd), CLACK_TIMER) };
+        }
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Recompute the sessions sidebar's width from the setting and the window size.
+fn sync_rail_width(hwnd: HWND) {
+    let mut client = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut client) };
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    if let Some(s) = state_mut(hwnd) {
+        let enabled = s.rail_enabled && !s.quick && s.fullscreen.is_none();
+        let hidden = s.rail_w <= 0.0;
+        s.rail_w = rail::effective_width(enabled, client.right as f32 / scale);
+        if hidden && s.rail_w > 0.0 {
+            // Nothing watched sessions while it was hidden.
+            s.rail_next_tick = None;
+            for i in 0..s.app.tab_count() {
+                if let Some(tab) = s.app.tab_at_mut(i) {
+                    tab.for_each_pane(|pane, _| pane.reset_rail_activity());
+                }
+            }
+        }
+    }
+}
+
+/// Keep what a restart needs current: which panes run an agent, and the saved
+/// session (RESTORE-001, RESTORE-002). The process list is read off the UI
+/// thread; a save writes only when the session changed.
+fn agent_tick(hwnd: HWND) {
+    const POLL: Duration = Duration::from_secs(5);
+    const SAVE: Duration = Duration::from_secs(30);
+    let now = Instant::now();
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.quick || s.shutting_down {
+        return;
+    }
+    if let Some(rx) = &s.agent_rx {
+        match rx.try_recv() {
+            Ok(found) => {
+                s.agent_rx = None;
+                for i in 0..s.app.tab_count() {
+                    if let Some(tab) = s.app.tab_at_mut(i) {
+                        tab.for_each_pane(|pane, _| {
+                            let root = pane.shell().process_id();
+                            if let Some(seen) = found.iter().find(|seen| Some(seen.root) == root) {
+                                pane.set_agent(seen.agent);
+                                pane.set_process_cwd(seen.cwd.clone());
+                            }
+                        });
+                    }
+                }
+            }
+            Err(TryRecvError::Disconnected) => s.agent_rx = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+    if s.agent_rx.is_none() && s.agent_next_poll.is_none_or(|next| now >= next) {
+        s.agent_next_poll = Some(now + POLL);
+        let mut roots = Vec::new();
+        for i in 0..s.app.tab_count() {
+            if let Some(tab) = s.app.tab_at_mut(i) {
+                tab.for_each_pane(|pane, _| roots.extend(pane.shell().process_id()));
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("rustty-agents".to_string())
+            .spawn(move || {
+                let table = crate::agents::process_table();
+                let found = roots
+                    .into_iter()
+                    .map(|root| crate::agents::inspect(&table, root))
+                    .collect();
+                let _ = tx.send(found);
+            });
+        if spawned.is_ok() {
+            s.agent_rx = Some(rx);
+        }
+    }
+    let due = s.session_next_save.is_none_or(|next| now >= next);
+    if due {
+        s.session_next_save = Some(now + SAVE);
+        // A second window would overwrite the first one's layout.
+        if s.cfg.session_restore && PRIMARY_INSTANCE.load(Ordering::Acquire) {
+            let session = snapshot_session(s, hwnd);
+            if s.session_saved.as_ref() != Some(&session) {
+                if let Err(e) = crate::session::save(&session) {
+                    eprintln!("rustty: session save failed: {e}");
+                }
+                s.session_saved = Some(session);
+            }
+        }
+    }
+}
+
+/// Windows is ending the session (RESTORE-001): save now, while everything is
+/// still known. It may not get as far as closing this window.
+fn save_for_shutdown(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.quick {
+        return;
+    }
+    if !s.shutting_down && s.cfg.session_restore {
+        let session = snapshot_session(s, hwnd);
+        if let Err(e) = crate::session::save(&session) {
+            eprintln!("rustty: session save failed: {e}");
+        }
+    }
+    s.shutting_down = true;
+}
+
+/// Run what a restart stopped in the active tab (RESTORE-003). The name comes
+/// from a fixed table, never straight from the session file.
+fn resume_interrupted(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(tab) = s.app.active_tab_mut() else {
+        return;
+    };
+    tab.for_each_pane(|pane, _| {
+        let Some(agent) = pane.interrupted().map(str::to_string) else {
+            return;
+        };
+        match crate::agents::resume_command(&agent) {
+            Some(command) => {
+                let _ = pane.send_input(format!("{command}\r").as_bytes());
+            }
+            None => pane.set_interrupted(None),
+        }
+    });
+}
+
+/// The roadmap board while it is open.
+struct BoardOpen {
+    state: crate::board::State,
+    /// The project it belongs to.
+    root: PathBuf,
+    /// Its name, for the heading.
+    project: String,
+    /// The card a press started on.
+    drag: Option<(usize, usize)>,
+}
+
+/// The project the active session is in.
+fn active_project_root(s: &WindowState) -> PathBuf {
+    let cwd = s
+        .app
+        .active_tab()
+        .and_then(|tab| tab.pane().saved_cwd().map(PathBuf::from))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    crate::project_brain::project_root(&cwd)
+}
+
+/// Read the board's file again: people and agents edit it too.
+fn board_reload(open: &mut BoardOpen) {
+    let path = crate::project_brain::roadmap_path(&open.root);
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    open.state.board = crate::board::Board::parse(&text);
+    open.state.clamp();
+}
+
+/// Draw the board as it is now.
+fn board_show(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let view = s.board.as_ref().map(|open| open.state.view(&open.project));
+    if let Some(r) = &mut s.renderer {
+        r.set_board(view);
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// Open the board for the active session's project, or close it.
+fn toggle_board(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.board.take().is_none() {
+        s.palette = None;
+        s.search = None;
+        s.hint = None;
+        s.bookmarks_open = false;
+        s.settings_open = false;
+        let root = active_project_root(s);
+        let project = rail::project_of(Some(&root.to_string_lossy()));
+        let mut open = BoardOpen {
+            state: crate::board::State::default(),
+            root,
+            project,
+            drag: None,
+        };
+        board_reload(&mut open);
+        s.board = Some(open);
+    }
+    s.suppress_char = true;
+    board_show(hwnd);
+}
+
+/// Write the board's file; a failure is said out loud and loses nothing typed.
+fn board_save(hwnd: HWND) {
+    let Some(open) = state_ref(hwnd).and_then(|s| s.board.as_ref()) else {
+        return;
+    };
+    let path = crate::project_brain::roadmap_path(&open.root);
+    if let Err(e) = crate::board::write_file(&path, &open.state.board.render()) {
+        show_message(hwnd, &format!("Could not save the roadmap: {e}"));
+    }
+}
+
+/// Handle a key on the open board.
+fn board_key(hwnd: HWND, key: crate::board::Key) {
+    use crate::board::Action;
+    let Some(open) = state_mut(hwnd).and_then(|s| s.board.as_mut()) else {
+        return;
+    };
+    board_reload(open);
+    let root = open.root.clone();
+    match open.state.key(key) {
+        Action::None => {}
+        Action::Close => {
+            if let Some(s) = state_mut(hwnd) {
+                s.board = None;
+            }
+        }
+        Action::Save => board_save(hwnd),
+        Action::OpenSession(title) => {
+            board_save(hwnd);
+            if let Some(s) = state_mut(hwnd) {
+                s.board = None;
+            }
+            board_show(hwnd);
+            open_session_in(hwnd, &root, Some(&title));
+            return;
+        }
+        Action::OpenWorktree(title) => {
+            board_save(hwnd);
+            if let Some(s) = state_mut(hwnd) {
+                s.board = None;
+            }
+            board_show(hwnd);
+            start_worktree_session(hwnd, root, &title, title.clone());
+            return;
+        }
+    }
+    board_show(hwnd);
+}
+
+/// A press on the open board: select what is under it, ready to drag.
+fn board_press(hwnd: HWND, x: f32, y: f32) {
+    let hit = state_ref(hwnd)
+        .and_then(|s| s.renderer.as_ref())
+        .and_then(|r| r.board_hit(x, y));
+    let Some(open) = state_mut(hwnd).and_then(|s| s.board.as_mut()) else {
+        return;
+    };
+    open.drag = None;
+    if let Some((column, row)) = hit {
+        open.state.column = column;
+        open.state.row = row.unwrap_or(0);
+        open.state.clamp();
+        open.drag = row.map(|row| (column, row));
+    }
+    board_show(hwnd);
+}
+
+/// A release on the open board: a card dropped on another column moves there.
+fn board_release(hwnd: HWND, x: f32, y: f32) {
+    let hit = state_ref(hwnd)
+        .and_then(|s| s.renderer.as_ref())
+        .and_then(|r| r.board_hit(x, y));
+    let Some(open) = state_mut(hwnd).and_then(|s| s.board.as_mut()) else {
+        return;
+    };
+    let Some((from, row)) = open.drag.take() else {
+        return;
+    };
+    let Some((to, _)) = hit.filter(|&(to, _)| to != from) else {
+        return;
+    };
+    board_reload(open);
+    if let Some(new_row) = open.state.board.move_card(from, row, to) {
+        open.state.column = to;
+        open.state.row = new_row;
+        board_save(hwnd);
+    }
+    board_show(hwnd);
+}
+
+/// Open a session in `dir`, with `title` when it has a name of its own.
+fn open_session_in(hwnd: HWND, dir: &std::path::Path, title: Option<&str>) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let mut spec = active_profile(s);
+    spec.cwd = Some(dir.to_string_lossy().into_owned());
+    new_tab_with_profile(hwnd, spec);
+    if let Some(title) = title
+        && let Some(tab) = state_mut(hwnd).and_then(|s| s.app.active_tab_mut())
+    {
+        tab.set_title(title);
+    }
+}
+
+/// Create a worktree off the UI thread, then open a session in it (WORKTREE-010).
+fn start_worktree_session(hwnd: HWND, dir: PathBuf, name: &str, title: String) {
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.worktree_rx.is_some() {
+        show_message(hwnd, "A worktree is already being created.");
+        return;
+    }
+    let name = name.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("rustty-worktree".to_string())
+        .spawn(move || {
+            let _ = tx.send((crate::worktree::create(&dir, &name), title));
+        });
+    match spawned {
+        Ok(_) => s.worktree_rx = Some(rx),
+        Err(e) => show_message(hwnd, &format!("Could not create the worktree: {e}")),
+    }
+}
+
+/// A new session in its own worktree of the active session's project.
+fn new_worktree_session(hwnd: HWND) {
+    let Some(s) = state_ref(hwnd) else { return };
+    let root = active_project_root(s);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let name = format!("session-{}", stamp % 1_000_000);
+    start_worktree_session(hwnd, root, &name, name.clone());
+}
+
+/// Open the session for a finished worktree.
+fn worktree_tick(hwnd: HWND) {
+    let Some(s) = state_mut(hwnd) else { return };
+    let Some(rx) = &s.worktree_rx else { return };
+    match rx.try_recv() {
+        Ok((result, title)) => {
+            s.worktree_rx = None;
+            match result {
+                Ok(path) => open_session_in(hwnd, &path, Some(&title)),
+                Err(e) => show_message(hwnd, &format!("Could not create the worktree: {e}")),
+            }
+        }
+        Err(TryRecvError::Disconnected) => s.worktree_rx = None,
+        Err(TryRecvError::Empty) => {}
+    }
+}
+
+/// Start a Boss Agent session for the active session's project (BOSS-001). The
+/// folder can come from what a program reported, so the person is asked by name.
+fn start_boss(hwnd: HWND) {
+    let Some(s) = state_ref(hwnd) else { return };
+    let root = active_project_root(s);
+    let root_text = root.to_string_lossy().into_owned();
+    let question = format!("Start {}?", crate::boss::NAME);
+    if !ask(
+        hwnd,
+        Some(&question),
+        &crate::boss::confirm_text(&root_text),
+        "&Start",
+        "&Cancel",
+        crate::dialog::Tone::Normal,
+    ) {
+        return;
+    }
+    let exe = std::env::current_exe().unwrap_or_default();
+    let request = crate::automation::ops::SpawnRequest {
+        command: Some(crate::boss::command(&exe.to_string_lossy(), &root_text)),
+        dir: Some(root_text),
+        profile: None,
+        name: Some(crate::boss::NAME.to_string()),
+        env: std::collections::BTreeMap::new(),
+    };
+    match open_boss_tab(hwnd, &request) {
+        Ok(_) => {
+            // A tab opened through the API stays in the background; the person
+            // asked for this one.
+            let last = state_ref(hwnd).map_or(0, |s| s.app.tab_count().saturating_sub(1));
+            activate_tab(hwnd, last);
+        }
+        Err(e) => show_message(
+            hwnd,
+            &format!(
+                "Could not start King Crab. Is Claude Code installed? {}",
+                e.message
+            ),
+        ),
+    }
+}
+
+/// Create any missing brain files for the active session's project.
+fn init_project_brain(hwnd: HWND) {
+    let Some(s) = state_ref(hwnd) else { return };
+    let root = active_project_root(s);
+    let text = match crate::project_brain::init(&root) {
+        Ok(made) if made.is_empty() => {
+            format!(
+                "This project already has a brain in {}.",
+                crate::project_brain::brain_dir(&root).display()
+            )
+        }
+        Ok(made) => format!(
+            "Created {} files in {}.",
+            made.len(),
+            crate::project_brain::brain_dir(&root).display()
+        ),
+        Err(e) => format!("Could not create the project brain: {e}"),
+    };
+    show_message(hwnd, &text);
+}
+
+/// Show or hide the sessions sidebar.
+fn toggle_session_rail(hwnd: HWND) {
+    if let Some(s) = state_mut(hwnd) {
+        s.rail_enabled = !s.rail_enabled;
+        s.rail_next_tick = None;
+    }
+    sync_rail_width(hwnd);
+    sync_tab_bar(hwnd);
+    rail_tick(hwnd);
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
+/// One row per tab, then one per host session this window isn't showing.
+fn build_rail_rows(s: &mut WindowState, focused: bool, now_ms: u64) -> Vec<rail::Row> {
+    let active = s.app.active_index();
+    let mut rows = Vec::with_capacity(s.app.tab_count());
+    let mut shown_aliases = Vec::new();
+    for i in 0..s.app.tab_count() {
+        let Some(tab) = s.app.tab_at_mut(i) else {
+            continue;
+        };
+        let viewed = i == active && focused;
+        let mut statuses = Vec::new();
+        let mut messages = Vec::new();
+        let mut stopped = None;
+        let mut typed = None;
+        tab.for_each_pane(|pane, _| {
+            typed = typed.into_iter().chain(pane.automation_input_age()).min();
+            let status = pane.rail_step(viewed, now_ms);
+            statuses.push(status);
+            messages.push((status, pane.status_message(status)));
+            if stopped.is_none() {
+                stopped = pane.interrupted().map(str::to_string);
+            }
+            shown_aliases.extend(pane.view_alias());
+        });
+        let status = rail::most_urgent(statuses);
+        let title = rail::row_title(tab.title(), tab.profile());
+        let project = match tab.pane().saved_cwd() {
+            Some(cwd) => rail::project_of(Some(cwd)),
+            None => s.rail_home_project.clone(),
+        };
+        rows.push(rail::Row {
+            target: rail::Target::Tab(i),
+            title,
+            detail: rail::automation_detail(
+                &rail::tab_detail(status, stopped.as_deref(), &messages),
+                typed,
+            )
+            .to_string(),
+            project,
+            status,
+            active: i == active,
+        });
+    }
+    for rec in &s.rail_hosts {
+        let field = |key: &str| rec.get(key).and_then(serde_json::Value::as_str);
+        let alias = rec
+            .get("alias")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|a| u32::try_from(a).ok());
+        let Some(alias) = alias else { continue };
+        if field("state") != Some("live") || shown_aliases.contains(&alias) {
+            continue;
+        }
+        rows.push(rail::Row {
+            target: rail::Target::Host(alias),
+            title: rail::row_title(field("name").unwrap_or(""), "session"),
+            detail: rail::detail_for(rail::Status::Background, None),
+            project: "Background".to_string(),
+            status: rail::Status::Background,
+            active: false,
+        });
+    }
+    rail::group(&mut rows);
+    rows
+}
+
+/// Refresh the sidebar: at most a few times a second, and it repaints only when
+/// something changed or a working dot is pulsing.
+fn rail_tick(hwnd: HWND) {
+    /// How often rows are rebuilt.
+    const TICK: Duration = Duration::from_millis(100);
+    /// How often host sessions are listed.
+    const HOST_POLL: Duration = Duration::from_secs(3);
+    let now = Instant::now();
+    let focused = unsafe { GetForegroundWindow() } == hwnd;
+    let Some(s) = state_mut(hwnd) else { return };
+    if s.rail_w <= 0.0 {
+        // Nothing to draw, but a session you can see has still been seen.
+        if focused && let Some(tab) = s.app.active_tab_mut() {
+            tab.for_each_pane(|pane, _| pane.mark_seen());
+        }
+        return;
+    }
+    if s.rail_next_tick.is_some_and(|next| now < next) {
+        return;
+    }
+    s.rail_next_tick = Some(now + TICK);
+    if let Some(rx) = &s.rail_host_rx {
+        match rx.try_recv() {
+            Ok(hosts) => {
+                s.rail_hosts = hosts;
+                s.rail_host_rx = None;
+            }
+            Err(TryRecvError::Disconnected) => s.rail_host_rx = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+    if s.rail_host_rx.is_none() && s.rail_next_host_poll.is_none_or(|next| now >= next) {
+        s.rail_next_host_poll = Some(now + HOST_POLL);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("rustty-rail-hosts".to_string())
+            .spawn(move || {
+                let _ = tx.send(session_records());
+            });
+        if spawned.is_ok() {
+            s.rail_host_rx = Some(rx);
+        }
+    }
+    let elapsed = now.duration_since(s.rail_epoch);
+    let rows = build_rail_rows(
+        s,
+        focused,
+        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+    );
+    let pulsing = s.rail_animate && rows.iter().any(|r| r.status == rail::Status::Working);
+    let heading = automation::rail_heading(s);
+    let Some(r) = &mut s.renderer else { return };
+    // Fixed for the window's life, and the first tick's rows repaint it.
+    r.set_rail_heading(heading);
+    let changed = r.rail_rows() != rows.as_slice();
+    if changed {
+        r.set_rail_rows(rows);
+    }
+    let pulse = if pulsing {
+        rail::pulse_at(elapsed.as_secs_f32())
+    } else {
+        1.0
+    };
+    let stepped = r.set_rail_pulse(pulse);
+    // The timer's damage paint draws the sidebar and leaves a quiet grid alone.
+    if (changed || stepped)
+        && let Some(tab) = s.app.active_tab_mut()
+    {
+        tab.pane_mut().mark_dirty();
+    }
+}
+
+/// Ask for a repaint after the pointer moved in the sidebar. This repaints the
+/// whole window, so nothing periodic may use it.
+fn invalidate_rail(hwnd: HWND) {
+    let mut client = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut client) };
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    let width = state_ref(hwnd).map_or(0.0, |s| s.rail_w);
+    let area = RECT {
+        left: 0,
+        top: 0,
+        right: (width * scale).ceil() as i32,
+        bottom: client.bottom,
+    };
+    let _ = unsafe { InvalidateRect(Some(hwnd), Some(&area), false) };
+}
+
+/// Close a tab from its row, asking first when that could lose work (TAB-018).
+/// The tab comes to the front, so you can see what you are being asked about.
+fn close_tab_from_rail(hwnd: HWND, tab: usize, status: rail::Status) {
+    activate_tab(hwnd, tab);
+    let Some((live, confirm, last)) = state_ref(hwnd).map(|s| {
+        (
+            s.app
+                .active_tab()
+                .is_some_and(|t| t.pane().shell().state() == crate::shell::ShellState::Running),
+            s.app.tab_confirm_close(),
+            s.app.tab_count() == 1,
+        )
+    }) else {
+        return;
+    };
+    if rail::close_needs_confirm(status, confirm, live, last) {
+        let text = if last {
+            "Close this session? It is the last one, so rustty will quit."
+        } else {
+            "Close this session and kill what is running in it?"
+        };
+        if !confirm_yes_no(hwnd, text) {
+            return;
+        }
+    }
+    close_tab(hwnd, tab);
+}
+
+/// Whether a client x is over the sidebar.
+fn over_rail(hwnd: HWND, x: f32) -> bool {
+    state_ref(hwnd).is_some_and(|s| x < s.rail_w)
+}
+
+/// A click in the sidebar.
+fn rail_click(hwnd: HWND, x: f32, y: f32) {
+    // Rows can be up to a tick old: a closed or moved tab must not shift what
+    // this click means.
+    if let Some(s) = state_mut(hwnd) {
+        s.rail_next_tick = None;
+    }
+    rail_tick(hwnd);
+    let Some((hit, rows)) = state_ref(hwnd)
+        .and_then(|s| s.renderer.as_ref())
+        .map(|r| (r.rail_hit(x, y), r.rail_rows().to_vec()))
+    else {
+        return;
+    };
+    let target = |i: usize| rows.get(i).map(|row| row.target);
+    let status = |i: usize| rows.get(i).map_or(rail::Status::Idle, |row| row.status);
+    match hit {
+        rail::Hit::New => new_tab(hwnd),
+        rail::Hit::Row(i) => match target(i) {
+            Some(rail::Target::Tab(tab)) => {
+                activate_tab(hwnd, tab);
+                if status(i) == rail::Status::Interrupted {
+                    resume_interrupted(hwnd);
+                }
+            }
+            Some(rail::Target::Host(alias)) => {
+                // Fresh, not the last poll: taking control from someone who
+                // attached a moment ago would take their keyboard away.
+                let controllers = live_sessions()
+                    .iter()
+                    .find(|rec| {
+                        rec.get("alias").and_then(serde_json::Value::as_u64)
+                            == Some(u64::from(alias))
+                    })
+                    .and_then(|rec| rec.get("controllers"))
+                    .and_then(serde_json::Value::as_u64);
+                open_session_view(hwnd, alias, rail::opens_with_control(controllers));
+            }
+            None => {}
+        },
+        rail::Hit::Close(i) => {
+            if let Some(rail::Target::Tab(tab)) = target(i) {
+                close_tab_from_rail(hwnd, tab, status(i));
+            }
+        }
+        rail::Hit::None => {}
+    }
+    if let Some(s) = state_mut(hwnd) {
+        s.rail_next_tick = None;
+    }
+    rail_tick(hwnd);
+}
+
+/// Bring tab `idx` to the front.
+fn activate_tab(hwnd: HWND, idx: usize) {
+    if let Some(s) = state_mut(hwnd) {
+        if s.app.select_tab(idx) {
+            apply_active_profile_theme(s);
+        }
+        set_title(hwnd, &s.app);
+    }
+    sync_active_tab_geometry(hwnd); // issue #9
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    search_resync(hwnd);
+}
+
+/// Update what the pointer is over in the sidebar, and ask to hear when it leaves.
+fn set_rail_hover(hwnd: HWND, hit: rail::Hit) {
+    let changed = state_mut(hwnd)
+        .and_then(|s| s.renderer.as_mut())
+        .is_some_and(|r| r.set_rail_hover(hit));
+    if changed {
+        if hit != rail::Hit::None {
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            let _ = unsafe { TrackMouseEvent(&mut track) };
+        }
+        invalidate_rail(hwnd);
+    }
+}
+
+/// Tell the Alt-tap detector about a key press.
+fn note_alt_tap_key(hwnd: HWND, vk: u16) {
+    let ctrl = read_mods().ctrl;
+    if let Some(s) = state_mut(hwnd) {
+        s.alt_tap.key_down(vk, ctrl);
+    }
+}
+
+/// Open the window menu just under the left end of the title strip.
+fn show_window_menu(hwnd: HWND) {
+    let Some(menu) = state_ref(hwnd).and_then(|s| s.menu) else {
+        return;
+    };
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    let mut point = POINT {
+        x: 0,
+        y: (caption::STRIP_HEIGHT * scale) as i32,
+    };
+    let _ = unsafe { ClientToScreen(hwnd, &mut point) };
+    let _ = unsafe { TrackPopupMenu(menu, TPM_LEFTALIGN, point.x, point.y, None, hwnd, None) };
+}
+
+/// True for a window that draws its own title bar: not the quick terminal,
+/// and not fullscreen (a bare popup has no caption).
+fn has_drawn_caption(hwnd: HWND) -> bool {
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+    style & WS_CAPTION.0 == WS_CAPTION.0 && state_ref(hwnd).is_some_and(|s| !s.quick)
+}
+
+/// Thickness of the sizing frame in physical pixels.
+fn frame_thickness_px(hwnd: HWND) -> i32 {
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    unsafe {
+        GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
+    }
+}
+
+/// `WM_NCHITTEST` for a drawn caption. `default` is what Windows answered for
+/// the standard frame; only its client area is ours to classify.
+fn nc_hit_test(hwnd: HWND, default: u32, lparam: LPARAM) -> u32 {
+    let mut point = POINT {
+        x: i32::from((lparam.0 & 0xFFFF) as i16),
+        y: i32::from(((lparam.0 >> 16) & 0xFFFF) as i16),
+    };
+    if !unsafe { ScreenToClient(hwnd, &mut point) }.as_bool() {
+        return default;
+    }
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    let border = frame_thickness_px(hwnd) as f32 / scale;
+    let (x, y) = (point.x as f32 / scale, point.y as f32 / scale);
+    let maximized = unsafe { IsZoomed(hwnd).as_bool() };
+    // The side frame is Windows' to answer, but its top corners are ours.
+    if !maximized && y < border {
+        match default {
+            HTLEFT => return HTTOPLEFT,
+            HTRIGHT => return HTTOPRIGHT,
+            _ => {}
+        }
+    }
+    if default != HTCLIENT {
+        return default;
+    }
+    let mut rect = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut rect) };
+    let ctx = caption::Ctx {
+        maximized,
+        resize_border: border,
+        tabs_end: state_ref(hwnd).map_or(0.0, WindowState::tabs_end),
+    };
+    match caption::hit_test(x, y, rect.right as f32 / scale, ctx) {
+        caption::Hit::Client => HTCLIENT,
+        caption::Hit::Caption => HTCAPTION,
+        caption::Hit::Min => HTMINBUTTON,
+        // HTMAXBUTTON is what gives Windows 11 its Snap Layouts flyout.
+        caption::Hit::Max => HTMAXBUTTON,
+        caption::Hit::Close => HTCLOSE,
+        caption::Hit::TopEdge => HTTOP,
+    }
+}
+
+/// Report the drawn title strip and buttons, in screen pixels, in place of the
+/// standard caption that no longer exists.
+fn fill_title_bar_info(hwnd: HWND, info: *mut TITLEBARINFOEX) {
+    /// `STATE_SYSTEM_INVISIBLE`.
+    const INVISIBLE: u32 = 0x8000;
+    if info.is_null() {
+        return;
+    }
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    let mut client = RECT::default();
+    let mut origin = POINT::default();
+    let located = unsafe { GetClientRect(hwnd, &mut client) }.is_ok()
+        && unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool();
+    if !located {
+        return;
+    }
+    let width = client.right as f32 / scale;
+    let strip = (caption::STRIP_HEIGHT * scale) as i32;
+    let rect = |lo: i32, hi: i32| RECT {
+        left: origin.x + lo,
+        top: origin.y,
+        right: origin.x + hi,
+        bottom: origin.y + strip,
+    };
+    // The indices come from TITLEBARINFOEX: 2 minimize, 3 maximize, 4 help, 5 close.
+    let info = unsafe { &mut *info };
+    info.rcTitleBar = rect(0, client.right);
+    for (index, button) in [
+        (2, caption::Hit::Min),
+        (3, caption::Hit::Max),
+        (5, caption::Hit::Close),
+    ] {
+        if let Some((lo, hi)) = caption::button_span(button, width) {
+            info.rgrect[index] = rect((lo * scale) as i32, (hi * scale) as i32);
+            info.rgstate[index] &= !INVISIBLE;
+        }
+    }
+    info.rgrect[4] = RECT::default();
+    info.rgstate[4] |= INVISIBLE;
+}
+
+/// The caption button a non-client hit code names.
+const fn caption_button(hit: u32) -> Option<caption::Hit> {
+    match hit {
+        HTMINBUTTON => Some(caption::Hit::Min),
+        HTMAXBUTTON => Some(caption::Hit::Max),
+        HTCLOSE => Some(caption::Hit::Close),
+        _ => None,
+    }
+}
+
+/// Ask for `WM_NCMOUSELEAVE`, so a hovered button clears when the pointer goes.
+fn track_nc_leave(hwnd: HWND) {
+    let mut track = TRACKMOUSEEVENT {
+        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE | TME_NONCLIENT,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    let _ = unsafe { TrackMouseEvent(&mut track) };
+}
+
+/// Update the hovered caption button, repainting only when it changed.
+fn set_caption_hover(hwnd: HWND, hover: Option<caption::Hit>) {
+    let changed = state_mut(hwnd).is_some_and(|s| {
+        let changed = s.caption_hover != hover;
+        s.caption_hover = hover;
+        changed
+    });
+    if changed {
+        sync_caption_state(hwnd);
+    }
+}
+
+/// Push hover, press and maximized state to the renderer and repaint the strip.
+fn sync_caption_state(hwnd: HWND) {
+    let maximized = unsafe { IsZoomed(hwnd).as_bool() };
+    if let Some(s) = state_mut(hwnd) {
+        let (hover, pressed) = (s.caption_hover, s.caption_pressed);
+        if let Some(r) = &mut s.renderer {
+            r.set_caption_state(hover, pressed, maximized);
+        }
+    }
+    invalidate_tab_bar(hwnd);
+}
+
+/// Do what a released caption button asks.
+fn run_caption_button(hwnd: HWND, button: Option<caption::Hit>) {
+    let command = match button {
+        Some(caption::Hit::Min) => SC_MINIMIZE,
+        Some(caption::Hit::Max) if unsafe { IsZoomed(hwnd).as_bool() } => SC_RESTORE,
+        Some(caption::Hit::Max) => SC_MAXIMIZE,
+        Some(caption::Hit::Close) => SC_CLOSE,
+        _ => return,
+    };
+    let _ = unsafe {
+        PostMessageW(
+            Some(hwnd),
+            WM_SYSCOMMAND,
+            WPARAM(command as usize),
+            LPARAM(0),
+        )
+    };
+}
+
 /// Tab-count change follow-up: re-apply the tab-bar visibility rule. The
 /// strip height carves grid area off the top, so when it changes the grid
 /// and the ConPTY must follow (TAB-010, `tab-bar = "auto"/"hidden"`).
 fn sync_tab_bar(hwnd: HWND) {
     let Some(s) = state_mut(hwnd) else { return };
     let bar = s.bar_height();
+    let strip = s.caption_height();
+    let rail_w = s.rail_w;
     let Some(r) = &mut s.renderer else { return };
-    if r.tab_bar_height() == bar {
+    if r.tab_bar_height() == bar && r.caption_height() == strip && r.rail_width() == rail_w {
         return;
     }
     r.set_tab_bar_height(bar);
+    r.set_caption_height(strip);
+    r.set_rail_width(rail_w);
     let (cols, rows) = r.grid_size().max((MIN_COLS, MIN_ROWS));
     if s.app.resize_active(cols, rows).is_err() {
         eprintln!("rustty: ConPTY resize failed");
@@ -2554,9 +3842,39 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
         handle_hint_keydown(hwnd, vk);
         return;
     }
+    // Ctrl+Shift+S shows or hides the sessions sidebar (RAIL-001).
+    if mods.ctrl && mods.shift && !mods.alt && vk == 0x53 {
+        toggle_session_rail(hwnd);
+        return;
+    }
     // Ctrl+Shift+B opens or closes the bookmark list (issue #53, BKMK-002).
     if mods.ctrl && mods.shift && !mods.alt && vk == 0x42 {
         toggle_bookmarks_overlay(hwnd);
+        return;
+    }
+    // BOARD-001: the roadmap board.
+    if mods.ctrl && mods.shift && !mods.alt && vk == 0x52 {
+        toggle_board(hwnd);
+        return;
+    }
+    if state_ref(hwnd).is_some_and(|s| s.board.is_some()) {
+        use crate::board::Key;
+        // Printable keys arrive as WM_CHAR.
+        let key = match vk {
+            0x25 if mods.shift => Some(Key::MoveLeft),
+            0x27 if mods.shift => Some(Key::MoveRight),
+            0x25 => Some(Key::Left),
+            0x27 => Some(Key::Right),
+            0x26 => Some(Key::Up),
+            0x28 => Some(Key::Down),
+            0x0D => Some(Key::Enter),
+            0x1B => Some(Key::Esc),
+            0x08 => Some(Key::Backspace),
+            _ => None,
+        };
+        if let Some(key) = key {
+            board_key(hwnd, key);
+        }
         return;
     }
     // While the bookmark list is open every keydown is swallowed:
@@ -2625,7 +3943,7 @@ fn handle_keydown(hwnd: HWND, vk: u16) {
                 switch_tab_rel(hwnd, -1);
                 true
             }
-            0x0A => {
+            0x0D => {
                 // Ctrl+Shift+Enter: split the focused pane, new pane right
                 // (SPLIT-005)
                 split_pane(hwnd, Dir::Vertical);
@@ -2786,6 +4104,12 @@ fn handle_char(hwnd: HWND, code: u32, sys: bool) {
         palette.push_char(ch);
         palette.refresh();
         let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+        return;
+    }
+    if s.board.is_some() {
+        if !ch.is_control() {
+            board_key(hwnd, crate::board::Key::Char(ch));
+        }
         return;
     }
     // #91 settings overlay: typed text builds the TOML value.
@@ -3830,11 +5154,43 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
             command: Command::OpenPreferences,
         });
     }
+    items.extend(standard_rows(
+        &RowCtx {
+            pane_count,
+            has_commands,
+            last_finished,
+            has_bookmarks,
+            has_selection,
+            quick: s.quick,
+        },
+        |action| shortcut_for(s, action),
+    ));
+    items.extend(menu_only_rows(
+        s.ws_source.is_some(),
+        &crate::workspace::names(),
+    ));
+    items
+}
+
+/// What the standard palette rows depend on.
+#[derive(Default)]
+struct RowCtx {
+    pane_count: usize,
+    has_commands: bool,
+    last_finished: bool,
+    has_bookmarks: bool,
+    has_selection: bool,
+    quick: bool,
+}
+
+/// The rows that run a [`KeyAction`].
+fn standard_rows(ctx: &RowCtx, shortcut: impl Fn(KeyAction) -> Option<String>) -> Vec<PaletteItem> {
+    let mut items: Vec<PaletteItem> = Vec::new();
     let mut push = |label: &str, group: &'static str, action: KeyAction, disabled: Option<&str>| {
         items.push(PaletteItem {
             label: label.to_string(),
             group,
-            shortcut: shortcut_for(s, action),
+            shortcut: shortcut(action),
             disabled_reason: disabled.map(str::to_owned),
             command: Command::Action(action),
         });
@@ -3850,42 +5206,42 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
         "Show Bookmark List",
         "Shell",
         KeyAction::ShowBookmarks,
-        (!has_bookmarks).then_some("No bookmarks in this pane"),
+        (!ctx.has_bookmarks).then_some("No bookmarks in this pane"),
     );
     push(
         "Export Selection to File",
         "Shell",
         KeyAction::ExportSelection,
-        (!has_selection).then_some("No selection"),
+        (!ctx.has_selection).then_some("No selection"),
     );
     push(
         "Export Last Command Output to File",
         "Shell",
         KeyAction::ExportLastCommand,
-        (!last_finished).then_some("No finished command in this pane yet"),
+        (!ctx.last_finished).then_some("No finished command in this pane yet"),
     );
     push("Clear Screen", "Shell", KeyAction::ClearScreen, None);
     push(
         "Copy Last Command Output",
         "Shell",
         KeyAction::CopyLastCommand,
-        (!last_finished).then_some("No finished command in this pane yet"),
+        (!ctx.last_finished).then_some("No finished command in this pane yet"),
     );
     push(
         "Previous Command",
         "Shell",
         KeyAction::PrevCommand,
-        (!has_commands).then_some("No command boundaries in this pane yet"),
+        (!ctx.has_commands).then_some("No command boundaries in this pane yet"),
     );
     push(
         "Next Command",
         "Shell",
         KeyAction::NextCommand,
-        (!has_commands).then_some("No command boundaries in this pane yet"),
+        (!ctx.has_commands).then_some("No command boundaries in this pane yet"),
     );
     push("Split Right", "Splits", KeyAction::SplitRight, None);
     push("Split Below", "Splits", KeyAction::SplitDown, None);
-    let no_split = (pane_count < 2).then_some("This tab has one pane");
+    let no_split = (ctx.pane_count < 2).then_some("This tab has one pane");
     push("Focus Pane Up", "Splits", KeyAction::FocusUp, no_split);
     push("Focus Pane Down", "Splits", KeyAction::FocusDown, no_split);
     push("Focus Pane Left", "Splits", KeyAction::FocusLeft, no_split);
@@ -3938,14 +5294,116 @@ fn build_palette_items(s: &WindowState) -> Vec<PaletteItem> {
     push("Reset Font Size", "View", KeyAction::ResetFontSize, None);
     push("Toggle Fullscreen", "Window", KeyAction::Fullscreen, None);
     push(
+        "Toggle Sessions Sidebar",
+        "Window",
+        KeyAction::ToggleSessionRail,
+        None,
+    );
+    push("Roadmap Board", "Project", KeyAction::ToggleBoard, None);
+    push(
+        "New Session in Worktree",
+        "Project",
+        KeyAction::NewWorktreeSession,
+        None,
+    );
+    push("Start King Crab", "Project", KeyAction::StartBoss, None);
+    push(
+        "Create Project Brain",
+        "Project",
+        KeyAction::InitProjectBrain,
+        None,
+    );
+    push(
         "Hide Quick Terminal",
         "Window",
         KeyAction::CloseQuick,
-        (!s.quick).then_some("This is not the quick terminal"),
+        (!ctx.quick).then_some("This is not the quick terminal"),
     );
     push("Reload Config", "Config", KeyAction::ReloadConfig, None);
     push("Quit", "Window", KeyAction::Quit, None);
     items
+}
+
+/// Rows for menu commands that have no [`KeyAction`]. The menu bar is gone, so
+/// everything it held has to be reachable from the palette.
+fn menu_only_rows(workspace_open: bool, workspaces: &[String]) -> Vec<PaletteItem> {
+    let row = |label: String, group: &'static str, id: usize, disabled: Option<&str>| PaletteItem {
+        label,
+        group,
+        shortcut: None,
+        disabled_reason: disabled.map(str::to_owned),
+        command: Command::MenuItem(id as u32),
+    };
+    let no_workspace = (!workspace_open).then_some("No saved workspace is open");
+    let mut items = vec![
+        row("Minimize Window".into(), "Window", MENU_MINIMIZE, None),
+        row(
+            "Maximize or Restore Window".into(),
+            "Window",
+            MENU_MAXIMIZE,
+            None,
+        ),
+        row("Close Window".into(), "Window", MENU_CLOSE_WINDOW, None),
+        row("About rustty".into(), "Window", MENU_ABOUT, None),
+        row(
+            "Save Workspace As...".into(),
+            "Workspaces",
+            MENU_WS_SAVE_AS,
+            None,
+        ),
+        row(
+            "Overwrite Workspace".into(),
+            "Workspaces",
+            MENU_WS_OVERWRITE,
+            no_workspace,
+        ),
+        row(
+            "Rename Workspace...".into(),
+            "Workspaces",
+            MENU_WS_RENAME,
+            no_workspace,
+        ),
+    ];
+    for (idx, name) in workspaces.iter().enumerate() {
+        items.push(row(
+            format!("Delete Workspace: {name}"),
+            "Workspaces",
+            MENU_WS_DEL_BASE + idx,
+            None,
+        ));
+    }
+    items
+}
+
+/// The palette command that does the same as a menu item.
+#[cfg(test)]
+fn palette_command_for_menu(id: usize) -> Option<Command> {
+    let action = |action| Some(Command::Action(action));
+    match id {
+        MENU_NEW_TAB => action(KeyAction::NewTab),
+        MENU_CLOSE_TAB => action(KeyAction::CloseTab),
+        MENU_SPLIT_RIGHT => action(KeyAction::SplitRight),
+        MENU_SPLIT_DOWN => action(KeyAction::SplitDown),
+        MENU_QUIT => action(KeyAction::Quit),
+        MENU_COPY => action(KeyAction::Copy),
+        MENU_PASTE => action(KeyAction::Paste),
+        MENU_SEARCH => action(KeyAction::Search),
+        MENU_FULLSCREEN => action(KeyAction::Fullscreen),
+        MENU_SESSION_RAIL => action(KeyAction::ToggleSessionRail),
+        MENU_PREV_COMMAND => action(KeyAction::PrevCommand),
+        MENU_NEXT_COMMAND => action(KeyAction::NextCommand),
+        MENU_COPY_LAST_CMD => action(KeyAction::CopyLastCommand),
+        MENU_NEXT_TAB => action(KeyAction::NextTab),
+        MENU_PREV_TAB => action(KeyAction::PrevTab),
+        MENU_TAB_LEFT => action(KeyAction::MoveTabLeft),
+        MENU_TAB_RIGHT => action(KeyAction::MoveTabRight),
+        MENU_RENAME_TAB => action(KeyAction::RenameTab),
+        MENU_PREFERENCES => Some(Command::OpenPreferences),
+        MENU_MINIMIZE | MENU_MAXIMIZE | MENU_CLOSE_WINDOW | MENU_ABOUT => {
+            Some(Command::MenuItem(id as u32))
+        }
+        _ => None,
+    }
 }
 
 /// The shortcut to display for `action`: a user binding wins, then the
@@ -3974,8 +5432,15 @@ fn handle_palette_keydown(hwnd: HWND, vk: u16) -> bool {
         0x26 => step_palette(hwnd, -1),
         0x28 => step_palette(hwnd, 1),
         0x0D | 0x0A => {
+            // Set before running it. A command that opens a dialog has this
+            // key's character delivered inside the dialog's message loop, so
+            // setting it afterwards would swallow the next key instead.
+            if let Some(s) = state_mut(hwnd) {
+                s.suppress_char = true;
+            }
             execute_palette_current(hwnd);
-            true
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            return true;
         }
         0x08 => {
             if let Some(s) = state_mut(hwnd)
@@ -4029,6 +5494,7 @@ fn execute_palette_current(hwnd: HWND) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
     match command {
         Command::Action(action) => run_key_action(hwnd, action),
+        Command::MenuItem(id) => handle_command(hwnd, WPARAM(id as usize)),
         Command::NewTabProfile(idx) => open_profile_tab(hwnd, idx),
         Command::AttachSession(alias) => open_session_view(hwnd, alias, false),
         Command::RunTask(id) => run_task(hwnd, id),
@@ -4251,6 +5717,14 @@ fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32,
     };
     let _ = unsafe { ScreenToClient(hwnd, &mut pt) };
+    let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    if over_rail(hwnd, pt.x.max(0) as f32 / scale) {
+        if let Some(r) = state_mut(hwnd).and_then(|s| s.renderer.as_mut()) {
+            r.scroll_rail(-f32::from(delta) / 120.0 * rail::ROW_HEIGHT);
+        }
+        invalidate_rail(hwnd);
+        return;
+    }
     let (cell, proto, sgr, urxvt) = {
         let Some(s) = state_mut(hwnd) else { return };
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
@@ -4350,7 +5824,8 @@ fn handle_drop(hwnd: HWND, hdrop: HDROP) {
         let height = client_height_dips(hwnd);
         let bar = s.bar_height();
         let top = s.bar_top(height);
-        let over_bar = bar > 0.0 && y >= top && y < top + bar;
+        // DRAG-002: the sidebar stands in for the tab strip it replaces.
+        let over_bar = (bar > 0.0 && y >= top && y < top + bar) || x < s.rail_w;
         let pane_idx = if over_bar {
             None
         } else {
@@ -4401,12 +5876,17 @@ fn handle_drop(hwnd: HWND, hdrop: HDROP) {
 /// edges extend the selection (WIN-004, SPLIT-004 hit-testing).
 fn cell_at(s: &WindowState, x: f32, y: f32, height: f32) -> Option<(usize, usize, usize)> {
     let top = s.grid_top();
-    let bottom = top + (height - s.bar_height() - 2.0 * s.pad_y()).max(0.0);
+    let bottom = top + (height - s.total_chrome() - 2.0 * s.pad_y()).max(0.0);
     if y < top || y >= bottom {
         return None;
     }
     let tab = s.app.active_tab()?;
-    let col = ((x - s.pad_x()) / s.metrics.cell_width).floor().max(0.0) as usize;
+    if x < s.rail_w || s.board.is_some() {
+        return None;
+    }
+    let col = ((x - s.rail_w - s.pad_x()) / s.metrics.cell_width)
+        .floor()
+        .max(0.0) as usize;
     let row = ((y - top) / s.metrics.cell_height).floor().max(0.0) as usize;
     let (cols, rows) = (tab.cols(), tab.rows());
     let col = col.min(cols.saturating_sub(1));
@@ -4467,7 +5947,7 @@ fn send_mouse_report(
 fn mouse_cell(hwnd: HWND, lparam: LPARAM) -> Option<(usize, usize, usize)> {
     let (x, y) = cursor_dips(hwnd, lparam);
     let height = client_height_dips(hwnd);
-    state_ref(hwnd).and_then(|s| cell_at(s, x, y, height))
+    state_ref(hwnd).and_then(|s| cell_at(s, rail::drag_x(x, s.rail_w, s.grid_pressed), y, height))
 }
 
 /// OSC 8 link target of grid cell (`view_row`, `col`) in pane `idx`
@@ -4562,6 +6042,9 @@ fn open_diagnostic(hwnd: HWND, r: Resolved) {
 }
 
 fn handle_rbutton_down(hwnd: HWND, lparam: LPARAM) {
+    if over_rail(hwnd, cursor_dips(hwnd, lparam).0) {
+        return;
+    }
     if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
         && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
     {
@@ -4572,6 +6055,9 @@ fn handle_rbutton_down(hwnd: HWND, lparam: LPARAM) {
 }
 
 fn handle_mbutton_down(hwnd: HWND, lparam: LPARAM) -> bool {
+    if over_rail(hwnd, cursor_dips(hwnd, lparam).0) {
+        return true;
+    }
     if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
         && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
     {
@@ -4795,6 +6281,17 @@ fn show_tab_menu(hwnd: HWND, idx: usize) {
 
 fn handle_lbutton_down(hwnd: HWND, lparam: LPARAM) {
     let (x, y) = cursor_dips(hwnd, lparam);
+    if over_rail(hwnd, x) {
+        rail_click(hwnd, x, y);
+        return;
+    }
+    if state_ref(hwnd).is_some_and(|s| s.board.is_some()) {
+        board_press(hwnd, x, y);
+        return;
+    }
+    if let Some(s) = state_mut(hwnd) {
+        s.grid_pressed = true;
+    }
     let hit = state_ref(hwnd).map(|s| s.tab_hit(x, y, client_height_dips(hwnd)));
     match hit {
         Some(TabHit::Tab(i)) => {
@@ -4940,6 +6437,16 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     const MK_RBUTTON: usize = 0x02;
     let (x, y) = cursor_dips(hwnd, lparam);
     let height = client_height_dips(hwnd);
+    let dragging = wparam.0 & MK_LBUTTON != 0 && state_ref(hwnd).is_some_and(|s| s.grid_pressed);
+    let hover = if !dragging && over_rail(hwnd, x) {
+        state_ref(hwnd)
+            .and_then(|s| s.renderer.as_ref())
+            .map_or(rail::Hit::None, |r| r.rail_hit(x, y))
+    } else {
+        rail::Hit::None
+    };
+    set_rail_hover(hwnd, hover);
+    let x = state_ref(hwnd).map_or(x, |s| rail::drag_x(x, s.rail_w, dragging));
     // Tab drag reorder (TAB-016): drop the dragged tab on the tab it crosses.
     if let Some(from) = state_ref(hwnd).and_then(|s| s.tab_drag)
         && let Some(to) = state_ref(hwnd).map(|s| s.tab_hit(x, y, height))
@@ -4993,7 +6500,7 @@ fn handle_mouse_move(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     // Dragging over the tab bar clamps the selection to the grid edge.
     let height = client_height_dips(hwnd);
     let top = s.grid_top();
-    let bottom = top + (height - s.bar_height()).max(0.0);
+    let bottom = top + (height - s.total_chrome()).max(0.0);
     let y = y.clamp(top, (bottom - 0.001).max(top));
     let Some((_, row, col)) = cell_at(s, x, y, height) else {
         return;
@@ -5060,6 +6567,11 @@ fn invalidate_tab_bar(hwnd: HWND) {
 /// WM_LBUTTONUP: end the selection drag (the selection stays visible
 /// and copyable until the next click).
 fn handle_lbutton_up(hwnd: HWND, lparam: LPARAM) {
+    if state_ref(hwnd).is_some_and(|s| s.board.is_some()) {
+        let (x, y) = cursor_dips(hwnd, lparam);
+        board_release(hwnd, x, y);
+        return;
+    }
     if let Some((idx, row, col)) = mouse_cell(hwnd, lparam)
         && state_ref(hwnd).is_some_and(|s| mouse_protocol_at(s, idx) != MouseProtocol::Off)
     {
@@ -5089,6 +6601,7 @@ fn handle_lbutton_up(hwnd: HWND, lparam: LPARAM) {
     }
     if let Some(s) = state_mut(hwnd) {
         s.drag_anchor = None;
+        s.grid_pressed = false;
         s.tab_drag = None;
     }
     // CONFIG-010: copy-on-select puts the selection on the clipboard.
@@ -5107,6 +6620,12 @@ fn set_cursor_for_position(wparam: WPARAM) {
     let _ = unsafe { ScreenToClient(target, &mut pt) };
     let dpi = unsafe { GetDpiForWindow(target) }.max(96) as f32;
     let y = px_to_dips(pt.y.max(0) as u32, dpi);
+    if over_rail(target, px_to_dips(pt.x.max(0) as u32, dpi)) {
+        if let Ok(cursor) = unsafe { LoadCursorW(None, IDC_ARROW) } {
+            let _ = unsafe { SetCursor(Some(cursor)) };
+        }
+        return;
+    }
     let over_bar = state_ref(target).is_some_and(|s| s.over_tab_bar(y, client_height_dips(target)));
     let idc = if over_bar { IDC_ARROW } else { IDC_IBEAM };
     if let Ok(cursor) = unsafe { LoadCursorW(None, idc) } {
@@ -5187,6 +6706,10 @@ fn toggle_fullscreen(hwnd: HWND) {
             s.fullscreen = Some((rect, style, exstyle));
         }
     }
+    // Fullscreen has no title strip or sidebar; the grid takes that room and
+    // gives it back.
+    sync_rail_width(hwnd);
+    sync_tab_bar(hwnd);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
@@ -5262,6 +6785,7 @@ fn drain_and_cleanup(hwnd: HWND) {
     let changed = {
         let Some(s) = state_mut(hwnd) else { return };
         s.app.drain_shells();
+        automation::scan(s, hwnd);
         s.take_bell(hwnd);
         s.notify_finished_command(hwnd);
         s.watch_config(hwnd);
@@ -5417,20 +6941,10 @@ fn split_pane(hwnd: HWND, dir: Dir) {
 /// with a confirm box when its shell is live); otherwise close the tab,
 /// and closing the last tab closes the window (WM_DESTROY reclaims the
 /// state and quits the loop).
-/// TAB-014/021: a native yes/no box. The default button is "No", so a
-/// stray Enter keeps the shells alive.
+/// TAB-014/021: a yes/no question whose focus starts on "No", so a stray Enter
+/// keeps the shells alive. These close things, so the button says so.
 fn confirm_yes_no(hwnd: HWND, text: &str) -> bool {
-    let text = wstr(text);
-    let caption = wstr("rustty");
-    let answer = unsafe {
-        MessageBoxW(
-            Some(hwnd),
-            PCWSTR::from_raw(text.as_ptr()),
-            PCWSTR::from_raw(caption.as_ptr()),
-            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
-        )
-    };
-    answer == IDYES
+    ask(hwnd, None, text, "&Yes", "&No", crate::dialog::Tone::Danger)
 }
 
 fn close_pane_or_tab(hwnd: HWND) {
@@ -5567,16 +7081,8 @@ fn live_sessions() -> Vec<serde_json::Value> {
 }
 
 fn show_message(hwnd: HWND, text: &str) {
-    let text = wstr(text);
-    let caption = wstr("rustty");
-    unsafe {
-        let _ = MessageBoxW(
-            Some(hwnd),
-            PCWSTR::from_raw(text.as_ptr()),
-            PCWSTR::from_raw(caption.as_ptr()),
-            MB_OK | MB_ICONWARNING,
-        );
-    }
+    let spec = crate::dialog::Spec::message(text);
+    crate::dialog::show(Some(hwnd), &dialog_palette(hwnd), &spec);
 }
 
 fn task_runner() -> crate::task_runner::TaskRunner {
@@ -5651,16 +7157,7 @@ fn open_session_view(hwnd: HWND, alias: u32, take_control: bool) {
         .into_iter()
         .find(|rec| rec.get("alias").and_then(serde_json::Value::as_u64) == Some(u64::from(alias)))
     else {
-        let text = wstr(&format!("Session {alias} is not live."));
-        let caption = wstr("rustty");
-        unsafe {
-            let _ = MessageBoxW(
-                Some(hwnd),
-                PCWSTR::from_raw(text.as_ptr()),
-                PCWSTR::from_raw(caption.as_ptr()),
-                MB_OK | MB_ICONASTERISK,
-            );
-        }
+        show_message(hwnd, &format!("Session {alias} is not live."));
         return;
     };
     let cols = usize::try_from(
@@ -5677,9 +7174,10 @@ fn open_session_view(hwnd: HWND, alias: u32, take_control: bool) {
     )
     .unwrap_or(24)
     .max(MIN_ROWS);
-    let label = format!(
-        "Session {alias} · {}",
-        if take_control { "ctrl" } else { "watch" }
+    let label = rail::view_label(
+        alias,
+        rec.get("name").and_then(serde_json::Value::as_str),
+        take_control,
     );
     let Some(s) = state_mut(hwnd) else { return };
     s.app
@@ -5772,9 +7270,11 @@ fn tab_profile(s: &WindowState) -> ProfileSpec {
 /// TAB-023, CONFIG-010), cursor (CONFIG-009), split border and padding, window
 /// padding. Startup and CONFIG-018 hot reload share this.
 fn sync_chrome(s: &mut WindowState) {
+    let strip = s.caption_height();
     let Some(r) = &mut s.renderer else {
         return;
     };
+    r.set_caption_height(strip);
     r.set_tab_bar_options(
         s.cfg.tab_bar.placement,
         s.cfg.tab_bar.show_profiles,
@@ -5811,7 +7311,12 @@ fn reload_config(s: &mut WindowState, hwnd: HWND) {
     }
     let font = cfg.font();
     let font_changed = font != s.font;
+    s.app.set_palette(new_theme.palette);
     s.theme = new_theme;
+    // Only a change to the file overrides what Ctrl+Shift+S chose.
+    if cfg.session_rail != s.cfg.session_rail {
+        s.rail_enabled = cfg.session_rail;
+    }
     s.cfg = cfg;
     // PALETTE-001: shortcuts and profiles changed; rebuild the registry on
     // the next open.
@@ -5839,6 +7344,7 @@ fn reload_config(s: &mut WindowState, hwnd: HWND) {
     apply_profile_theme(s, &spec);
     apply_profile_font(s, &spec);
     apply_opacity(hwnd);
+    sync_rail_width(hwnd);
     sync_tab_bar(hwnd);
     // A new font, bar placement, bar visibility or padding changes how many
     // cells fit in the same client rect, so refit every tab, not just the
@@ -5934,6 +7440,7 @@ fn apply_profile_theme(s: &mut WindowState, spec: &ProfileSpec) {
     for problem in &problems {
         eprintln!("rustty: {problem}");
     }
+    s.app.set_palette(theme.palette);
     s.theme = theme;
 }
 
@@ -6138,6 +7645,11 @@ fn run_key_action(hwnd: HWND, action: KeyAction) {
         KeyAction::CommandPalette => toggle_palette(hwnd),
         KeyAction::HintMode => toggle_hint(hwnd),
         KeyAction::ToggleBookmark => toggle_bookmark(hwnd),
+        KeyAction::ToggleSessionRail => toggle_session_rail(hwnd),
+        KeyAction::ToggleBoard => toggle_board(hwnd),
+        KeyAction::NewWorktreeSession => new_worktree_session(hwnd),
+        KeyAction::InitProjectBrain => init_project_brain(hwnd),
+        KeyAction::StartBoss => start_boss(hwnd),
         KeyAction::ShowBookmarks => toggle_bookmarks_overlay(hwnd),
         KeyAction::ExportSelection => export_selection(hwnd),
         KeyAction::ExportLastCommand => export_last_command(hwnd),
@@ -6313,6 +7825,7 @@ fn cycle_theme(hwnd: HWND, delta: i32) {
     let n = theme::PRESETS.len() as i32;
     let idx = (active_theme_index(s) as i32 + delta).rem_euclid(n) as usize;
     s.theme = Theme::preset(theme::PRESETS[idx]).unwrap_or_default();
+    s.app.set_palette(s.theme.palette);
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
@@ -6374,16 +7887,23 @@ fn paste_clipboard(hwnd: HWND) {
 fn set_title(hwnd: HWND, app: &App) {
     let title = app
         .active_tab()
-        .map(|t| format!("{} — {APP_NAME}", t.title()))
+        .map(|t| rail::window_caption(t.title(), APP_NAME))
         .unwrap_or_else(|| APP_NAME.to_string());
     let wide = wstr(&title);
     let _ = unsafe { SetWindowTextW(hwnd, PCWSTR::from_raw(wide.as_ptr())) };
 }
 
 /// Client-area pixel size for a `cols` x `rows` grid plus the tab bar.
-fn px_size(metrics: CellMetrics, cols: usize, rows: usize, bar_height: f32) -> (i32, i32) {
-    let w = (cols.max(1) as f32 * metrics.cell_width).ceil() as i32;
-    let h = (rows.max(1) as f32 * metrics.cell_height + bar_height).ceil() as i32;
+fn px_size(
+    metrics: CellMetrics,
+    cols: usize,
+    rows: usize,
+    chrome: f32,
+    pad_x: f32,
+    pad_y: f32,
+) -> (i32, i32) {
+    let w = (cols.max(1) as f32 * metrics.cell_width + 2.0 * pad_x).ceil() as i32;
+    let h = (rows.max(1) as f32 * metrics.cell_height + chrome + 2.0 * pad_y).ceil() as i32;
     (w.max(16), h.max(16))
 }
 
@@ -6439,8 +7959,12 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         tabs: Vec::new(),
         active: state.app.active_index(),
-        bar_visible: bar > 0.0,
-        bar_bounds: (0.0, bar_top, client_w, bar_top + bar),
+        bar_visible: bar > 0.0 || state.rail_w > 0.0,
+        bar_bounds: if state.rail_w > 0.0 {
+            (0.0, 0.0, state.rail_w, client_h)
+        } else {
+            (0.0, bar_top, client_w, bar_top + bar)
+        },
         tab_bounds: Vec::new(),
         client_w,
         client_h,
@@ -6482,7 +8006,18 @@ pub(crate) fn uia_snapshot(hwnd: HWND) -> Option<crate::uia::Snapshot> {
             activity: tab.bell_pending(),
         });
     }
-    snap.tab_bounds = renderer.tab_layout().tabs;
+    snap.tab_bounds = if state.rail_w > 0.0 {
+        (0..state.app.tab_count())
+            .map(|i| renderer.rail_tab_rect(i).unwrap_or((0.0, 0.0, 0.0, 0.0)))
+            .collect()
+    } else {
+        renderer
+            .tab_layout()
+            .tabs
+            .iter()
+            .map(|&(lo, hi)| (lo, bar_top, hi, bar_top + bar))
+            .collect()
+    };
     if let Some(tab) = state.app.active_tab() {
         snap.focused_pane = tab.focused_index().unwrap_or(0);
         tab.for_each_pane_ref(&mut |pane: &Pane, rect: Rect| {
@@ -6611,6 +8146,31 @@ pub fn run(
     spawn: SpawnOptions,
     workspace: Option<&str>,
 ) -> anyhow::Result<()> {
+    let _com = ComApartment::open();
+    // Held until this process exits, so a later launch knows a window is open.
+    let instance = InstanceGuard::acquire(INSTANCE_MUTEX);
+    PRIMARY_INSTANCE.store(instance.is_some(), Ordering::Release);
+    if instance.is_some() {
+        // RESTORE-001: come back after a Windows Update restart, if the
+        // person's "restart apps" setting allows it. Not after a crash.
+        use windows::Win32::System::Recovery::{
+            RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RegisterApplicationRestart,
+        };
+        let _ = unsafe {
+            RegisterApplicationRestart(
+                PCWSTR::null(),
+                RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_PATCH,
+            )
+        };
+    }
+    let greet = welcome::should_show(&welcome::Launch {
+        quick: false,
+        workspace: workspace.is_some(),
+        attach: false,
+        view: false,
+        welcome_enabled: cfg.welcome,
+        first_instance: instance.is_some(),
+    });
     // Per-monitor DPI v2 before any window metrics exist (WIN-002).
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     // Roadmap v0.2 "Windows Jump List": taskbar right-click gets a plain
@@ -6632,10 +8192,26 @@ pub fn run(
     let rows = cfg.window.rows.max(MIN_ROWS);
     // One tab at startup: "auto"/"hidden" bars start collapsed (TAB-010).
     let bar = match cfg.tab_bar.visible {
+        _ if cfg.session_rail => 0.0,
         TabBar::Always => TAB_BAR_HEIGHT,
         TabBar::Auto | TabBar::Hidden => 0.0,
     };
-    let (cell_w, cell_h) = px_size(metrics, cols, rows, bar);
+    let tabs_on_top = cfg.tab_bar.placement != TabBarPlacement::Bottom;
+    let chrome = caption::total_chrome(tabs_on_top, bar, caption::STRIP_HEIGHT);
+    let (cell_w, cell_h) = px_size(
+        metrics,
+        cols,
+        rows,
+        chrome,
+        cfg.window.padding.x as f32,
+        cfg.window.padding.y as f32,
+    );
+    // The sidebar comes on top of the configured grid, not out of it.
+    let cell_w = if cfg.session_rail {
+        cell_w + crate::render::dips_to_px(rail::RAIL_WIDTH, dpi as f32) as i32
+    } else {
+        cell_w
+    };
     let mut rect = RECT {
         left: 0,
         top: 0,
@@ -6704,6 +8280,7 @@ pub fn run(
         ws_pending,
         cmd_notified: 0,
         drag_resize: false,
+        automation: None,
         app: {
             let mut app = App::with_size(cols, rows, cfg.scrollback);
             // TAB-025: tab titles fall back to the pane's OSC 7 cwd.
@@ -6734,6 +8311,34 @@ pub fn run(
         suppress_char: false,
         pending_surrogate: None,
         fullscreen: None,
+        caption_hover: None,
+        caption_pressed: None,
+        menu: None,
+        alt_tap: AltTap::default(),
+        greet,
+        clack: None,
+        rail_enabled: cfg.session_rail,
+        grid_pressed: false,
+        board: None,
+        worktree_rx: None,
+        agent_next_poll: None,
+        agent_rx: None,
+        session_next_save: None,
+        session_saved: None,
+        shutting_down: false,
+        rail_w: 0.0,
+        rail_next_tick: None,
+        rail_next_host_poll: None,
+        rail_host_rx: None,
+        rail_hosts: Vec::new(),
+        rail_home_project: rail::project_of(
+            std::env::current_dir()
+                .ok()
+                .as_deref()
+                .and_then(std::path::Path::to_str),
+        ),
+        rail_epoch: Instant::now(),
+        rail_animate: animations_enabled(),
         search: None,
         palette: None,
         hint: None,
@@ -6807,6 +8412,11 @@ pub fn run(
             Some(state_param),
         )
     };
+    // A shortcut set to "Run minimized" starts the window minimized, and Windows
+    // then remembers its parking spot as the normal size. Give it the real one.
+    if let Ok(hwnd) = &created {
+        keep_normal_size(*hwnd, x, y, width, height);
+    }
     if let Err(e) = created {
         // The window never existed to reclaim the box; free it here.
         unsafe { drop(Box::from_raw(state_param as *mut WindowState)) };
@@ -6814,19 +8424,11 @@ pub fn run(
     }
     if let Some(name) = ws_miss {
         // WORKSPACE-007: a missing template opens a plain window and says why.
-        let msg = wstr(&format!(
+        let msg = format!(
             "rustty: no workspace template named {name:?}.\n\nA plain window opened instead."
-        ));
-        let caption = wstr("rustty");
+        );
         if let Ok(main) = created {
-            unsafe {
-                let _ = MessageBoxW(
-                    Some(main),
-                    PCWSTR(msg.as_ptr()),
-                    PCWSTR(caption.as_ptr()),
-                    MB_OK | MB_ICONWARNING,
-                );
-            }
+            show_message(main, &msg);
         }
     }
 
@@ -6929,5 +8531,119 @@ mod profile_tests {
             alt: false,
         };
         assert_eq!(key_spec(0x21, mods), "ctrl+shift+pageup");
+    }
+
+    /// Every command id in a built menu, including submenus.
+    fn menu_ids(menu: HMENU, out: &mut Vec<usize>) {
+        let count = unsafe { GetMenuItemCount(Some(menu)) };
+        for pos in 0..count {
+            if let Some(sub) = submenu_of(menu, pos) {
+                menu_ids(sub, out);
+                continue;
+            }
+            let id = unsafe { windows::Win32::UI::WindowsAndMessaging::GetMenuItemID(menu, pos) };
+            // Separators report 0.
+            if id != 0 {
+                out.push(id as usize);
+            }
+        }
+    }
+
+    #[test]
+    fn every_menu_command_has_a_palette_action() {
+        // Break caught: a command that only exists in the Alt menu, now that
+        // the permanent menu bar is gone. Walks the real menu, so a new item
+        // cannot be forgotten.
+        let menu = build_menu(&[], &[]).expect("menu");
+        let mut ids = Vec::new();
+        menu_ids(menu, &mut ids);
+        assert!(ids.len() > 15, "walked {} items", ids.len());
+        let rows: Vec<Command> = standard_rows(&RowCtx::default(), |_| None)
+            .into_iter()
+            .chain(menu_only_rows(false, &[]))
+            .map(|row| row.command)
+            .collect();
+        for id in ids {
+            // The palette opening itself needs no row.
+            if id == MENU_PALETTE {
+                continue;
+            }
+            let command = palette_command_for_menu(id)
+                .unwrap_or_else(|| panic!("menu id {id:#x} has no palette command"));
+            // OpenPreferences has its own row, built outside these two lists.
+            assert!(
+                command == Command::OpenPreferences || rows.contains(&command),
+                "menu id {id:#x}: {command:?} has no palette row"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_menu_commands_have_palette_rows() {
+        // Break caught: saving or deleting a workspace needing the Alt menu.
+        let names = vec!["alpha".to_string(), "beta".to_string()];
+        let rows = menu_only_rows(true, &names);
+        for id in [
+            MENU_WS_SAVE_AS,
+            MENU_WS_OVERWRITE,
+            MENU_WS_RENAME,
+            MENU_WS_DEL_BASE,
+            MENU_WS_DEL_BASE + 1,
+        ] {
+            assert!(
+                rows.iter()
+                    .any(|row| row.command == Command::MenuItem(id as u32)),
+                "{id:#x}"
+            );
+        }
+        let closed = menu_only_rows(false, &[]);
+        let disabled = |id: usize| {
+            closed
+                .iter()
+                .find(|row| row.command == Command::MenuItem(id as u32))
+                .is_some_and(|row| row.disabled_reason.is_some())
+        };
+        assert!(
+            disabled(MENU_WS_OVERWRITE),
+            "no workspace open to overwrite"
+        );
+        assert!(disabled(MENU_WS_RENAME), "no workspace open to rename");
+    }
+
+    #[test]
+    fn instance_mutex_is_in_the_session_namespace() {
+        // Break caught: "Local\r" written as a carriage return.
+        let (namespace, name) = INSTANCE_MUTEX
+            .split_once(char::from(92))
+            .expect("namespace");
+        assert_eq!(namespace, "Local");
+        assert_eq!(name, "rustty-gui");
+    }
+
+    #[test]
+    fn second_instance_is_refused_until_the_first_is_gone() {
+        // Break caught: the crab on every extra window, or never again after
+        // the first window closes.
+        let name = format!("Local\\rustty-test-{}", std::process::id());
+        let first = InstanceGuard::acquire(&name);
+        assert!(first.is_some());
+        assert!(InstanceGuard::acquire(&name).is_none());
+        drop(first);
+        assert!(InstanceGuard::acquire(&name).is_some());
+    }
+
+    #[test]
+    fn window_size_fits_the_configured_grid_with_padding() {
+        // Break caught: padding eating into the grid, so the default window
+        // comes up under 80 columns and the banner loses its crab.
+        let metrics = CellMetrics {
+            cell_width: 8.6,
+            cell_height: 21.0,
+            text_height: 18.0,
+        };
+        let (w, h) = px_size(metrics, 80, 24, 36.0, 12.0, 10.0);
+        let cols = ((w as f32 - 24.0) / 8.6).floor() as usize;
+        let rows = ((h as f32 - 36.0 - 20.0) / 21.0).floor() as usize;
+        assert_eq!((cols, rows), (80, 24));
     }
 }

@@ -353,6 +353,8 @@ fn cwd_from_url(url: &str) -> String {
 /// A single terminal pane (one grid, one parser, one shell process).
 #[derive(Debug)]
 pub struct Pane {
+    /// Stable identity (AUTO-001): assigned at creation, never reused.
+    id: u64,
     grid: Grid,
     shell: Shell,
     parser: Parser,
@@ -376,6 +378,38 @@ pub struct Pane {
     /// Main screen kept while the alternate screen is active (TTY-018).
     main_grid: Option<Grid>,
     in_alt: bool,
+    /// The user has sent input (see [`Pane::input_seen`]).
+    input_seen: bool,
+    /// A bell or notification nobody has seen yet.
+    attention: bool,
+    /// What the last notification said.
+    attention_message: Option<String>,
+    /// A program is reporting progress.
+    progress: bool,
+    /// When output last arrived.
+    last_output: Option<std::time::Instant>,
+    /// When the user last sent input.
+    last_input: Option<std::time::Instant>,
+    /// When the grid last changed size.
+    last_resize: Option<std::time::Instant>,
+    /// The agent CLI running here now (RESTORE-002).
+    agent: Option<&'static str>,
+    /// The agent a restart stopped here, until it is resumed or dismissed.
+    interrupted: Option<String>,
+    /// Where the agent, or else the shell, is really running.
+    process_cwd: Option<String>,
+    /// What programs have reported about themselves (STATUS-001).
+    program_status: crate::program_status::Records,
+    /// What the agent is asking on screen (STATUS-002).
+    screen_question: Option<String>,
+    /// The output the screen was last read at.
+    screen_read_at: Option<std::time::Instant>,
+    /// What the sessions sidebar remembers about this pane.
+    activity: crate::rail::Activity,
+    /// The status from the last sidebar step, for readers that must not step.
+    rail_status: crate::rail::Status,
+    /// When automation last typed here (AUTO-011: shown on the sidebar row).
+    automation_input: Option<std::time::Instant>,
     /// Grid changed since the renderer last asked (repaint hint).
     dirty: bool,
     /// Mouse text selection, in absolute grid coordinates (WIN-004).
@@ -401,6 +435,7 @@ impl Pane {
     pub fn new() -> Self {
         Self {
             grid: Grid::new(),
+            id: crate::automation::next_id(),
             shell: Shell::new(),
             parser: Parser::new(),
             title: None,
@@ -413,6 +448,22 @@ impl Pane {
             bell: false,
             main_grid: None,
             in_alt: false,
+            input_seen: false,
+            attention: false,
+            attention_message: None,
+            progress: false,
+            last_output: None,
+            last_input: None,
+            last_resize: None,
+            agent: None,
+            interrupted: None,
+            process_cwd: None,
+            program_status: crate::program_status::Records::default(),
+            screen_question: None,
+            screen_read_at: None,
+            activity: crate::rail::Activity::default(),
+            rail_status: crate::rail::Status::Idle,
+            automation_input: None,
             dirty: true,
             selection: None,
             bookmarks: Vec::new(),
@@ -429,6 +480,7 @@ impl Pane {
     pub fn with_size(cols: usize, rows: usize, scrollback: usize) -> Self {
         Self {
             grid: Grid::with_size(cols, rows, scrollback),
+            id: crate::automation::next_id(),
             shell: Shell::new(),
             parser: Parser::new(),
             title: None,
@@ -441,6 +493,22 @@ impl Pane {
             bell: false,
             main_grid: None,
             in_alt: false,
+            input_seen: false,
+            attention: false,
+            attention_message: None,
+            progress: false,
+            last_output: None,
+            last_input: None,
+            last_resize: None,
+            agent: None,
+            interrupted: None,
+            process_cwd: None,
+            program_status: crate::program_status::Records::default(),
+            screen_question: None,
+            screen_read_at: None,
+            activity: crate::rail::Activity::default(),
+            rail_status: crate::rail::Status::Idle,
+            automation_input: None,
             dirty: true,
             selection: None,
             bookmarks: Vec::new(),
@@ -449,6 +517,20 @@ impl Pane {
             view_alias: None,
             view_controller: false,
         }
+    }
+
+    /// Stable identity (AUTO-001): assigned at creation, never reused.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The grid holding this pane's history: the main screen, even while the
+    /// alternate screen is showing. The alternate grid numbers its lines
+    /// independently, so a scrollback cursor only means something here.
+    #[must_use]
+    pub fn history_grid(&self) -> &Grid {
+        self.main_grid.as_ref().unwrap_or(&self.grid)
     }
 
     /// The pane's grid (viewport rows are `0..grid.rows`).
@@ -640,6 +722,9 @@ impl Pane {
     /// switch selects.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.dirty = true;
+        if crate::rail::output_is_work(self.last_resize.map(|at| at.elapsed())) {
+            self.last_output = Some(std::time::Instant::now());
+        }
         let mut printed = false;
         let mut pos = 0usize;
         while pos < bytes.len() {
@@ -652,11 +737,29 @@ impl Pane {
                 match event {
                     ParserEvent::Title(title) => self.title = Some(title),
                     ParserEvent::Cwd(url) => self.record_cwd(&url),
+                    ParserEvent::CwdPath(path) => {
+                        let path = path.trim_matches('"').replace('\\', "/");
+                        if !path.is_empty() {
+                            self.cwd = Some(path);
+                            self.shell_host = None;
+                        }
+                    }
                     // The parser owns the link pen and the URI table; the
                     // renderer and window layer read them on demand.
                     ParserEvent::Hyperlink(_) => {}
-                    ParserEvent::Bell => self.bell = true,
+                    ParserEvent::Bell => {
+                        self.bell = true;
+                        self.attention = true;
+                    }
+                    ParserEvent::Notify(text) => {
+                        self.attention = true;
+                        self.attention_message = Some(crate::rail::clean_message(&text));
+                    }
+                    ParserEvent::Progress(active) => self.progress = active,
+                    ParserEvent::ProgramStatus(report) => self.program_status.apply(report),
                     ParserEvent::PromptStart => {
+                        self.progress = false;
+                        self.program_status.program_gone();
                         self.at_prompt = true;
                         self.command_running = false;
                         let abs = self.cursor_abs();
@@ -766,6 +869,22 @@ impl Pane {
         }
     }
 
+    /// Size a pane nothing has been written to yet, so text can go in at the
+    /// window's real size ahead of the shell. It rebuilds the grid: resizing
+    /// would push the empty top line into scrollback when shrinking, and a
+    /// later grow would bring it back above that text.
+    pub fn fit_grid(&mut self, cols: usize, rows: usize) {
+        self.grid = Grid::with_size(cols, rows, self.grid.scrollback());
+        self.parser.fit(&self.grid);
+        self.dirty = true;
+    }
+
+    /// Colors for ANSI-16 output from now on. Text already on screen keeps
+    /// the colors it was written with.
+    pub const fn set_palette(&mut self, palette: [crate::color::Color; 16]) {
+        self.parser.palette = palette;
+    }
+
     /// Whether the viewport follows new output at the live edge (issue #42).
     #[must_use]
     pub const fn follow(&self) -> bool {
@@ -845,7 +964,323 @@ impl Pane {
 
     /// Send keyboard/paste bytes to the shell (TTY-004..TTY-017).
     pub fn send_input(&mut self, bytes: &[u8]) -> Result<(), ShellError> {
+        self.input_seen = true;
+        self.interrupted = None;
+        self.last_input = Some(std::time::Instant::now());
         self.shell.write_input(bytes)
+    }
+
+    /// Whether a bell or notification is waiting to be seen.
+    #[must_use]
+    pub const fn needs_attention(&self) -> bool {
+        self.attention
+    }
+
+    /// What the last unseen notification said, if it said anything.
+    #[must_use]
+    pub fn attention_message(&self) -> Option<&str> {
+        if self.attention {
+            self.attention_message.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// The person has seen this pane.
+    pub fn mark_seen(&mut self) {
+        self.attention = false;
+        self.attention_message = None;
+    }
+
+    /// Whether a program is reporting progress.
+    #[must_use]
+    pub const fn progress_active(&self) -> bool {
+        self.progress
+    }
+
+    /// Time since the last output.
+    #[must_use]
+    pub fn output_age(&self) -> Option<std::time::Duration> {
+        self.last_output.map(|at| at.elapsed())
+    }
+
+    /// Time since the last input.
+    #[must_use]
+    pub fn input_age(&self) -> Option<std::time::Duration> {
+        self.last_input.map(|at| at.elapsed())
+    }
+
+    /// Record the agent CLI now running here.
+    pub fn set_agent(&mut self, agent: Option<&'static str>) {
+        if self.agent.is_some() && agent.is_none() {
+            // It ended without a new prompt to say so.
+            self.program_status.program_gone();
+        }
+        self.agent = agent;
+        if agent.is_some() {
+            self.interrupted = None;
+        }
+    }
+
+    /// Record that a restart stopped `agent` here.
+    pub fn set_interrupted(&mut self, agent: Option<String>) {
+        self.interrupted = agent;
+    }
+
+    /// The agent a restart stopped here.
+    #[must_use]
+    pub fn interrupted(&self) -> Option<&str> {
+        self.interrupted.as_deref()
+    }
+
+    /// Record where the agent, or else the shell, is running.
+    pub fn set_process_cwd(&mut self, cwd: Option<String>) {
+        self.process_cwd = cwd;
+    }
+
+    /// The folder this pane is really in. A running agent's own folder wins.
+    /// Next comes what the shell reported, since `cd` in PowerShell does not
+    /// move its process.
+    #[must_use]
+    pub fn saved_cwd(&self) -> Option<&str> {
+        if self.agent.is_some() && self.process_cwd.is_some() {
+            return self.process_cwd.as_deref();
+        }
+        self.cwd.as_deref().or(self.process_cwd.as_deref())
+    }
+
+    /// The agent to remember across a restart. A resume runs in the saved
+    /// folder, so without one there is nothing safe to offer.
+    #[must_use]
+    pub fn saved_agent(&self) -> Option<&str> {
+        self.interrupted
+            .as_deref()
+            .or_else(|| self.agent.filter(|_| self.saved_cwd().is_some()))
+    }
+
+    /// The bottom of the screen, where an agent's prompt can be.
+    fn prompt_lines(&self) -> Vec<String> {
+        /// Rows from the bottom a prompt can occupy.
+        const ROWS: usize = 24;
+        let rows = self.grid.rows;
+        (rows.saturating_sub(ROWS)..rows)
+            .filter_map(|row| self.grid.line_text(row))
+            .collect()
+    }
+
+    /// Read the agent's question off the screen, when new output arrived.
+    fn read_screen(&mut self) {
+        let Some(agent) = self.agent else {
+            self.screen_question = None;
+            return;
+        };
+        if self.screen_read_at == self.last_output {
+            return;
+        }
+        self.screen_read_at = self.last_output;
+        self.screen_question = crate::agents::waiting_on_screen(agent, &self.prompt_lines());
+    }
+
+    /// Whether this pane is waiting on a person's permission, trust or sign-in: a
+    /// program's report says so, or its screen asks. Read off the screen now, not
+    /// from the last sidebar step, since the answer decides whether text goes in.
+    #[must_use]
+    pub fn awaits_approval(&self) -> bool {
+        self.program_status.awaits_approval()
+            || self.agent.is_some_and(|agent| {
+                crate::agents::waiting_on_screen(agent, &self.prompt_lines()).is_some()
+            })
+    }
+
+    /// The status a program reported, when it reported one.
+    fn reported_status(&mut self, viewed: bool) -> Option<crate::rail::Status> {
+        use crate::program_status::State;
+        use crate::rail::Status;
+        let state = self.program_status.summary()?.state;
+        Some(match state {
+            State::Blocked => Status::NeedsYou,
+            State::Working => Status::Working,
+            State::Idle => Status::Idle,
+            State::Done | State::Error => {
+                if viewed {
+                    self.program_status.mark_seen();
+                    return self.reported_status(viewed);
+                }
+                if state == State::Done {
+                    Status::Finished
+                } else {
+                    Status::Failed
+                }
+            }
+        })
+    }
+
+    /// What the row should say for `status`, when there is more to say than
+    /// its name: a program's report, or an unseen notification.
+    #[must_use]
+    pub fn status_message(&self, status: crate::rail::Status) -> Option<String> {
+        self.status_note(status).0
+    }
+
+    /// Where the line [`Pane::rail_detail`] gives for `status` comes from.
+    #[must_use]
+    pub fn detail_source(&self, status: crate::rail::Status) -> crate::rail::DetailSource {
+        use crate::rail::{DetailSource, shows_message};
+        match self.status_note(status) {
+            (Some(message), source) if shows_message(status) && !message.is_empty() => source,
+            _ => DetailSource::None,
+        }
+    }
+
+    /// The message for `status`, and who it is from. A question on the screen comes
+    /// before any report but `blocked`, whose words are about the wait itself: a
+    /// program mustn't be able to talk over a real prompt.
+    fn status_note(
+        &self,
+        status: crate::rail::Status,
+    ) -> (Option<String>, crate::rail::DetailSource) {
+        use crate::program_status::State;
+        use crate::rail::{DetailSource, Status, clean_message};
+        let on_screen = || {
+            self.screen_question
+                .as_deref()
+                .map(|question| (Some(clean_message(question)), DetailSource::ScreenGuess))
+        };
+        if let Some(record) = self.program_status.summary() {
+            if status == Status::NeedsYou
+                && record.state != State::Blocked
+                && let Some(note) = on_screen()
+            {
+                return note;
+            }
+            if let Some(msg) = &record.msg {
+                return (Some(clean_message(msg)), DetailSource::ProgramReport);
+            }
+            if status == Status::NeedsYou {
+                let said = match record.kind.as_deref() {
+                    Some("permission") => "Needs your permission",
+                    Some("question") => "Has a question for you",
+                    Some("auth") => "Needs you to sign in",
+                    _ => return (None, DetailSource::None),
+                };
+                return (Some(said.to_string()), DetailSource::ProgramReport);
+            }
+            return (None, DetailSource::None);
+        }
+        if status != Status::NeedsYou {
+            return (None, DetailSource::None);
+        }
+        on_screen()
+            .or_else(|| {
+                self.attention_message()
+                    .map(|said| (Some(said.to_string()), DetailSource::Notification))
+            })
+            .unwrap_or((None, DetailSource::None))
+    }
+
+    /// Forget work the sidebar was not watching, so showing it again does not
+    /// report a false "Finished".
+    pub const fn reset_rail_activity(&mut self) {
+        self.activity.reset();
+    }
+
+    /// This pane's status for the sessions sidebar. `viewed` means the person
+    /// can see it, which also clears anything waiting to be seen.
+    pub fn rail_step(&mut self, viewed: bool, now_ms: u64) -> crate::rail::Status {
+        let status = self.step_activity(viewed, now_ms);
+        self.rail_status = status;
+        status
+    }
+
+    /// The status from the last [`Pane::rail_step`]. Stepping mutates what the
+    /// sidebar remembers, so anything else that wants the status reads this.
+    #[must_use]
+    pub const fn rail_status(&self) -> crate::rail::Status {
+        self.rail_status
+    }
+
+    /// Where [`Pane::rail_detail`]'s line comes from.
+    #[must_use]
+    pub fn rail_detail_source(&self) -> crate::rail::DetailSource {
+        self.detail_source(self.rail_status)
+    }
+
+    /// The line the sidebar shows for the last computed status.
+    #[must_use]
+    pub fn rail_detail(&self) -> String {
+        let status = self.rail_status;
+        crate::rail::tab_detail(
+            status,
+            self.interrupted(),
+            &[(status, self.status_message(status))],
+        )
+    }
+
+    /// Record that automation just typed into this pane (AUTO-011).
+    pub fn note_automation_input(&mut self) {
+        self.automation_input = Some(std::time::Instant::now());
+    }
+
+    /// Time since automation last typed into this pane.
+    #[must_use]
+    pub fn automation_input_age(&self) -> Option<std::time::Duration> {
+        self.automation_input.map(|at| at.elapsed())
+    }
+
+    fn step_activity(&mut self, viewed: bool, now_ms: u64) -> crate::rail::Status {
+        if viewed {
+            self.mark_seen();
+        }
+        self.read_screen();
+        // Claude Code's title says when it is busy, and its status bar redraws
+        // when it is not, so its output says nothing.
+        let title_tells = self.agent == Some("claude");
+        let signals = crate::rail::Signals {
+            title: self.title.as_deref().unwrap_or(""),
+            command_running: self.command_running,
+            exited: matches!(self.shell.state(), crate::shell::ShellState::Exited(_)),
+            attention: self.attention,
+            progress: self.progress,
+            output_age: self.output_age().filter(|_| !title_tells),
+            input_age: self.input_age(),
+        };
+        let status = self.activity.step(&signals, viewed, now_ms);
+        let exited = signals.exited;
+        if exited {
+            self.program_status.program_gone();
+        }
+        // A program saying what it is doing beats any guess from the outside, except
+        // that no report outranks a question on the screen. Otherwise a program could
+        // report that it is working to hide a real prompt from the person and a boss.
+        let reported = self.reported_status(viewed);
+        if self.screen_question.is_some() && !exited {
+            return crate::rail::Status::NeedsYou;
+        }
+        if let Some(reported) = reported {
+            return reported;
+        }
+        if self.interrupted.is_some() && !exited && status != crate::rail::Status::NeedsYou {
+            return crate::rail::Status::Interrupted;
+        }
+        status
+    }
+
+    /// Whether the user has sent this pane any input. Terminal replies do not
+    /// count.
+    #[must_use]
+    pub const fn input_seen(&self) -> bool {
+        self.input_seen
+    }
+
+    /// Whether the pane is showing the alternate screen.
+    #[must_use]
+    pub const fn in_alt(&self) -> bool {
+        self.in_alt
+    }
+
+    /// Ask for a repaint after writing to the grid directly.
+    pub const fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 
     /// Ask the shell to exit cleanly (TTY-024); the exit code arrives later
@@ -863,6 +1298,7 @@ impl Pane {
     /// text (the resize repaint clears the highlight).
     pub fn resize(&mut self, cols: usize, rows: usize) -> Result<(), ShellError> {
         self.dirty = true;
+        self.last_resize = Some(std::time::Instant::now());
         self.selection = None;
         if self.view_alias.is_some() {
             // A view's geometry is canonical from the host (issue
@@ -897,6 +1333,49 @@ impl Default for Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panes_get_distinct_ids_that_only_go_up() {
+        // Break caught: a closed pane's id naming a new pane.
+        let a = Pane::new();
+        let b = Pane::with_size(10, 4, 10);
+        assert_ne!(a.id(), 0);
+        assert!(b.id() > a.id());
+    }
+
+    #[test]
+    fn a_pane_remembers_the_status_it_last_stepped_to() {
+        // Break caught: automation stepping activity a second time per tick,
+        // which would clear "finished" and attention the sidebar still shows.
+        let mut pane = Pane::new();
+        assert_eq!(pane.rail_status(), crate::rail::Status::Idle);
+        pane.feed(b"\x1b]9;4;3;\x07");
+        let stepped = pane.rail_step(false, 0);
+        assert_eq!(stepped, crate::rail::Status::Working);
+        assert_eq!(pane.rail_status(), stepped);
+        assert_eq!(pane.rail_status(), stepped, "reading does not step");
+    }
+
+    #[test]
+    fn history_stays_the_main_screen_while_the_alternate_one_shows() {
+        // Break caught: a scrollback cursor reading the alt grid, whose line
+        // numbers are unrelated, and returning the wrong lines.
+        let mut pane = Pane::with_size(20, 3, 50);
+        pane.feed(b"main text\r\n");
+        let main_first = pane.history_grid().line_text_abs(0);
+        pane.feed(b"\x1b[?1049halt text");
+        assert!(pane.in_alt());
+        assert_eq!(pane.history_grid().line_text_abs(0), main_first);
+        assert_eq!(pane.grid().line_text_abs(0).as_deref(), Some("alt text"));
+    }
+
+    #[test]
+    fn automation_input_is_recorded_for_the_sidebar() {
+        let mut pane = Pane::new();
+        assert_eq!(pane.automation_input_age(), None);
+        pane.note_automation_input();
+        assert!(pane.automation_input_age().is_some());
+    }
     use crate::selection::Pos;
 
     #[test]
@@ -1234,6 +1713,281 @@ mod tests {
         pane.grid_mut().scroll_up(2);
         pane.update_follow();
         pane
+    }
+
+    #[test]
+    fn text_written_after_fit_grid_stays_at_the_top_when_the_window_grows() {
+        // Break caught: a shrink pushes the empty top line into scrollback,
+        // and a later grow brings it back above the banner.
+        let mut pane = Pane::with_size(80, 24, 100);
+        pane.fit_grid(77, 23);
+        pane.feed(b"first\r\n");
+        let _ = pane.resize(77, 25);
+        assert_eq!(pane.grid().line_text(0).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn bell_and_notification_ask_for_attention_until_seen() {
+        // Break caught: a session asking for you and nothing showing it.
+        let mut pane = Pane::with_size(40, 5, 10);
+        assert!(!pane.needs_attention());
+        pane.feed(b"\x07");
+        assert!(pane.needs_attention());
+        assert_eq!(pane.attention_message(), None);
+        pane.mark_seen();
+        assert!(!pane.needs_attention());
+        pane.feed(b"\x1b]9;Approve\x1b[31m it?\x07");
+        assert!(pane.needs_attention());
+        pane.mark_seen();
+        pane.feed(b"\x1b]777;notify;Claude;Needs input\x07");
+        assert_eq!(pane.attention_message(), Some("Claude: Needs input"));
+    }
+
+    #[test]
+    fn progress_is_tracked() {
+        let mut pane = Pane::with_size(40, 5, 10);
+        assert!(!pane.progress_active());
+        pane.feed(b"\x1b]9;4;1;50\x07");
+        assert!(pane.progress_active());
+        assert!(!pane.needs_attention(), "progress is not a request");
+        pane.feed(b"\x1b]9;4;0;0\x07");
+        assert!(!pane.progress_active());
+    }
+
+    #[test]
+    fn output_and_input_ages_are_tracked() {
+        let mut pane = Pane::with_size(40, 5, 10);
+        assert_eq!(pane.output_age(), None);
+        assert_eq!(pane.input_age(), None);
+        pane.feed(b"x");
+        assert!(pane.output_age().is_some());
+        let _ = pane.send_input(b"y");
+        assert!(pane.input_age().is_some());
+    }
+
+    #[test]
+    fn a_stopped_agent_shows_until_resumed_or_dismissed() {
+        // Break caught: a restart silently losing a running agent.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.set_interrupted(Some("claude".to_string()));
+        assert_eq!(pane.rail_step(true, 0), crate::rail::Status::Interrupted);
+        assert_eq!(pane.interrupted(), Some("claude"));
+        let _ = pane.send_input(b"x");
+        assert_eq!(pane.interrupted(), None, "typing dismisses it");
+
+        pane.set_interrupted(Some("claude".to_string()));
+        pane.set_agent(Some("claude"));
+        assert_eq!(pane.interrupted(), None, "it is running again");
+    }
+
+    #[test]
+    fn only_an_agent_with_a_known_folder_is_remembered() {
+        // Break caught: `claude --continue` resuming a conversation from the
+        // wrong folder.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.set_agent(Some("claude"));
+        assert_eq!(pane.saved_agent(), None);
+        pane.feed(b"\x1b]7;file://DESKTOP/C:/src/rust\x07");
+        assert_eq!(pane.saved_agent(), Some("claude"));
+        pane.set_agent(None);
+        assert_eq!(pane.saved_agent(), None);
+        pane.set_interrupted(Some("codex".to_string()));
+        assert_eq!(pane.saved_agent(), Some("codex"), "kept across restarts");
+    }
+
+    #[test]
+    fn an_agents_own_folder_beats_what_the_shell_last_said() {
+        // Break caught: PowerShell reports nothing, so a running agent was
+        // forgotten; or the shell's old folder resumed the wrong conversation.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.set_agent(Some("claude"));
+        pane.set_process_cwd(Some("C:/work/api".to_string()));
+        assert_eq!(pane.saved_cwd(), Some("C:/work/api"));
+        assert_eq!(pane.saved_agent(), Some("claude"));
+        pane.feed(b"\x1b]7;file://DESKTOP/C:/old\x07");
+        assert_eq!(pane.saved_cwd(), Some("C:/work/api"));
+        pane.set_agent(None);
+        pane.set_process_cwd(Some("C:/shell/start".to_string()));
+        assert_eq!(
+            pane.saved_cwd(),
+            Some("C:/old"),
+            "no agent: the shell's report wins"
+        );
+    }
+
+    #[test]
+    fn a_program_saying_it_waits_shows_as_needs_you_even_while_viewed() {
+        // Break caught: Claude's trust prompt reading as "Ready".
+        use crate::rail::Status;
+        let mut pane = Pane::with_size(40, 5, 10);
+        // base64 of "Approve?"
+        pane.feed(b"\x1b]7501;state=blocked:kind=permission:msg=QXBwcm92ZT8=\x07");
+        assert_eq!(pane.rail_step(true, 0), Status::NeedsYou);
+        assert_eq!(pane.rail_step(false, 0), Status::NeedsYou);
+        assert_eq!(
+            pane.status_message(Status::NeedsYou).as_deref(),
+            Some("Approve?")
+        );
+        pane.feed(b"\x1b]7501;state=blocked:kind=question\x07");
+        assert_eq!(
+            pane.status_message(Status::NeedsYou).as_deref(),
+            Some("Has a question for you")
+        );
+    }
+
+    /// A pane with Claude Code's permission question on its screen.
+    fn asking_pane() -> Pane {
+        let mut pane = Pane::with_size(60, 8, 10);
+        pane.set_agent(Some("claude"));
+        pane.feed(b"Do you want to run this?\r\n 1. Yes\r\n 2. No\r\n Esc to cancel\r\n");
+        pane
+    }
+
+    #[test]
+    fn a_report_cant_hide_a_question_on_the_screen() {
+        // Break caught: a program reporting "working" or "idle" so a boss and a person
+        // both believe nothing is waiting while a real prompt sits on the screen.
+        use crate::rail::Status;
+        // base64 of "All fine"
+        for state in ["working", "idle", "done", "error"] {
+            let mut pane = asking_pane();
+            pane.feed(format!("\x1b]7501;state={state}:msg=QWxsIGZpbmU=\x07").as_bytes());
+            assert_eq!(pane.rail_step(false, 0), Status::NeedsYou, "{state}");
+            assert_eq!(
+                pane.status_message(Status::NeedsYou).as_deref(),
+                Some("Do you want to run this?"),
+                "{state}: the report's words must not stand in for the question"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blocked_report_still_says_what_it_is_waiting_for() {
+        use crate::rail::Status;
+        let mut pane = asking_pane();
+        // base64 of "Approve?"
+        pane.feed(b"\x1b]7501;state=blocked:kind=permission:msg=QXBwcm92ZT8=\x07");
+        assert_eq!(pane.rail_step(false, 0), Status::NeedsYou);
+        assert_eq!(
+            pane.status_message(Status::NeedsYou).as_deref(),
+            Some("Approve?")
+        );
+    }
+
+    #[test]
+    fn a_report_beats_guessing_from_output() {
+        // Break caught: a status bar redrawing making an idle agent "Working".
+        use crate::rail::Status;
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.feed(b"\x1b]7501;state=idle\x07noise");
+        assert_eq!(pane.rail_step(false, 0), Status::Idle);
+        pane.feed(b"\x1b]7501;state=working\x07");
+        assert_eq!(pane.rail_step(false, 10), Status::Working);
+    }
+
+    #[test]
+    fn a_result_shows_until_seen_and_then_gives_way() {
+        use crate::rail::Status;
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.feed(b"\x1b]7501;state=done\x07");
+        assert_eq!(pane.rail_step(false, 0), Status::Finished);
+        assert_eq!(
+            pane.rail_step(true, 1),
+            Status::Working,
+            "falls back: output just arrived"
+        );
+        pane.feed(b"\x1b]7501;state=error\x07");
+        assert_eq!(pane.rail_step(false, 2), Status::Failed);
+    }
+
+    #[test]
+    fn an_agent_that_ended_is_not_working_any_more() {
+        // Break caught: a killed agent showing Working forever.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.set_agent(Some("claude"));
+        pane.feed(b"\x1b]7501;state=working\x07");
+        assert!(pane.program_status.summary().is_some());
+        pane.set_agent(None);
+        assert!(pane.program_status.summary().is_none());
+        pane.feed(b"\x1b]7501;state=blocked\x07\x1b]133;A\x07");
+        assert!(
+            pane.program_status.summary().is_none(),
+            "a new prompt ends it too"
+        );
+    }
+
+    #[test]
+    fn an_agents_question_on_screen_needs_you_until_it_is_answered() {
+        use crate::rail::Status;
+        let mut pane = Pane::with_size(60, 10, 10);
+        pane.set_agent(Some("claude"));
+        pane.feed(
+            "Do you want to create a.txt?\r\n\u{276F} 1. Yes\r\n  2. No\r\nEsc to cancel"
+                .as_bytes(),
+        );
+        assert_eq!(
+            pane.rail_step(true, 0),
+            Status::NeedsYou,
+            "even while viewed"
+        );
+        assert_eq!(
+            pane.status_message(Status::NeedsYou).as_deref(),
+            Some("Do you want to create a.txt?")
+        );
+        pane.feed(b"\x1b[2J\x1b[H");
+        assert_ne!(pane.rail_step(true, 1), Status::NeedsYou);
+        // Not an agent: those words mean nothing.
+        let mut shell = Pane::with_size(60, 10, 10);
+        shell.feed("Do you want to create a.txt?\r\n1. Yes\r\nEsc to cancel".as_bytes());
+        assert_ne!(shell.rail_step(false, 0), Status::NeedsYou);
+    }
+
+    #[test]
+    fn a_redrawing_status_bar_is_not_an_agent_working() {
+        // Break caught: Claude showing Working long after it finished, and
+        // Finished without doing anything, because its status line redraws.
+        use crate::rail::Status;
+        let mut pane = Pane::with_size(60, 10, 10);
+        pane.set_agent(Some("claude"));
+        pane.feed(b"\x1b]0;\xE2\x9C\xB3 Done\x07status bar redraw");
+        assert_eq!(pane.rail_step(false, 0), Status::Idle);
+        pane.feed(b"\x1b]0;\xE2\xA0\x82 Busy\x07");
+        assert_eq!(pane.rail_step(false, 10), Status::Working);
+    }
+
+    #[test]
+    fn a_prompt_directory_report_sets_the_folder() {
+        // OSC 9;9 is how many Windows prompts report where they are.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.feed(b"\x1b]9;9;\"C:\\src\\rust\"\x07");
+        assert_eq!(pane.cwd(), Some("C:/src/rust"));
+        assert!(!pane.needs_attention());
+    }
+
+    #[test]
+    fn a_new_prompt_ends_progress() {
+        // Break caught: a program killed mid-progress showing Working forever.
+        let mut pane = Pane::with_size(40, 5, 10);
+        pane.feed(b"\x1b]9;4;1;50\x07");
+        assert!(pane.progress_active());
+        pane.feed(b"\x1b]133;A\x07");
+        assert!(!pane.progress_active());
+    }
+
+    #[test]
+    fn a_resize_repaint_does_not_look_like_work() {
+        // Break caught: dragging the window marking every session Working.
+        let mut pane = Pane::with_size(40, 5, 10);
+        let _ = pane.resize(50, 6);
+        pane.feed(b"repaint");
+        assert_eq!(pane.output_age(), None);
+    }
+
+    #[test]
+    fn fit_grid_resizes_without_a_shell() {
+        let mut pane = Pane::with_size(80, 24, 100);
+        pane.fit_grid(100, 30);
+        assert_eq!((pane.grid().cols, pane.grid().rows), (100, 30));
     }
 
     #[test]

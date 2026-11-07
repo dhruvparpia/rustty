@@ -29,6 +29,9 @@ pub enum Shape {
         /// Working directory to respawn this pane's shell in.
         #[serde(default)]
         cwd: Option<String>,
+        /// The agent CLI this pane was running (RESTORE-002).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
     },
     /// A split: `dir` cuts the area, `ratio` is the first child's share.
     Split {
@@ -49,8 +52,19 @@ impl Shape {
     #[must_use]
     pub fn leaf_cwd(&self) -> Option<&str> {
         match self {
-            Self::Leaf { cwd } => cwd.as_deref(),
+            Self::Leaf { cwd, .. } => cwd.as_deref(),
             Self::Split { .. } => None,
+        }
+    }
+
+    /// The saved agent of every leaf, in flatten order.
+    pub fn leaf_agents(&self, out: &mut Vec<Option<String>>) {
+        match self {
+            Self::Leaf { agent, .. } => out.push(agent.clone()),
+            Self::Split { a, b, .. } => {
+                a.leaf_agents(out);
+                b.leaf_agents(out);
+            }
         }
     }
 
@@ -58,13 +72,29 @@ impl Shape {
     /// the same order as [`crate::split::PaneTree::flatten`].
     pub fn leaf_cwds(&self, out: &mut Vec<Option<String>>) {
         match self {
-            Self::Leaf { cwd } => out.push(cwd.clone()),
+            Self::Leaf { cwd, .. } => out.push(cwd.clone()),
             Self::Split { a, b, .. } => {
                 a.leaf_cwds(out);
                 b.leaf_cwds(out);
             }
         }
     }
+}
+
+/// The first saved tab with a pane in `dir`, however the path is spelled.
+#[must_use]
+pub fn tab_in_folder(session: &Session, dir: &str) -> Option<usize> {
+    let normal = |path: &str| {
+        path.replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    };
+    let wanted = normal(dir);
+    session.tabs.iter().position(|tab| {
+        let mut cwds = Vec::new();
+        tab.shape.leaf_cwds(&mut cwds);
+        cwds.iter().flatten().any(|cwd| normal(cwd) == wanted)
+    })
 }
 
 /// A saved tab: profile, title, focused pane, pane shape.
@@ -168,6 +198,7 @@ mod tests {
     fn leaf(cwd: Option<&str>) -> Shape {
         Shape::Leaf {
             cwd: cwd.map(str::to_owned),
+            agent: None,
         }
     }
 
@@ -265,5 +296,66 @@ mod tests {
         // The reader's job: bad text yields None through `load`'s match.
         let parsed = toml::from_str::<Session>("tabs = [1, 2]");
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn an_agent_survives_the_round_trip_in_pane_order() {
+        // Break caught: a restart forgetting which pane was running an agent.
+        let shape = Shape::Split {
+            dir: crate::split::Dir::Vertical,
+            ratio: 0.5,
+            a: Box::new(Shape::Leaf {
+                cwd: Some("C:/a".to_string()),
+                agent: Some("claude".to_string()),
+            }),
+            b: Box::new(leaf(Some("C:/b"))),
+        };
+        let session = Session {
+            tabs: vec![SessionTab {
+                profile: "p".to_string(),
+                title: String::new(),
+                title_fixed: false,
+                focused_pane: 0,
+                shape,
+            }],
+            focused_tab: 0,
+            window: None,
+        };
+        let text = toml::to_string(&session).expect("serializes");
+        let back: Session = toml::from_str(&text).expect("parses");
+        assert_eq!(back, session);
+        let mut agents = Vec::new();
+        back.tabs[0].shape.leaf_agents(&mut agents);
+        assert_eq!(agents, vec![Some("claude".to_string()), None]);
+    }
+
+    #[test]
+    fn a_session_file_from_before_agents_still_loads() {
+        let text = "focused_tab = 0\n[[tabs]]\nprofile = \"p\"\n[tabs.shape]\nkind = \"leaf\"\ncwd = \"C:/a\"\n";
+        let back: Session = toml::from_str(text).expect("parses");
+        let mut agents = Vec::new();
+        back.tabs[0].shape.leaf_agents(&mut agents);
+        assert_eq!(agents, vec![None]);
+    }
+
+    #[test]
+    fn a_saved_tab_is_found_by_its_folder_however_it_is_spelled() {
+        // Break caught: a shortcut with a folder adding a new tab every launch.
+        let tab = |cwd: &str| SessionTab {
+            profile: "p".to_string(),
+            title: String::new(),
+            title_fixed: false,
+            focused_pane: 0,
+            shape: leaf(Some(cwd)),
+        };
+        let session = Session {
+            tabs: vec![tab("C:/other"), tab("C:/Work/API")],
+            focused_tab: 0,
+            window: None,
+        };
+        assert_eq!(tab_in_folder(&session, "C:/Work/API"), Some(1));
+        assert_eq!(tab_in_folder(&session, r"c:\work\api\"), Some(1));
+        assert_eq!(tab_in_folder(&session, "C:/Work"), None);
+        assert_eq!(tab_in_folder(&session, "C:/Work/API2"), None);
     }
 }

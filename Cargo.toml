@@ -1,6 +1,6 @@
 [package]
 name = "rustty"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.99.1"
 description = "A fast, native-feeling, MIT-licensed terminal emulator for Windows (spec: docs/SPEC.md)"
@@ -20,6 +20,7 @@ toml = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
+    "Wdk_System_Threading",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Dwm",
@@ -29,19 +30,23 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Imaging",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_UI_Controls",
     "Win32_UI_Controls_Dialogs",
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_DataExchange",
     "Win32_System_IO",
     "Win32_System_JobObjects",
+    "Win32_System_Kernel",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Pipes",
+    "Win32_System_Recovery",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",

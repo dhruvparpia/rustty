@@ -25,7 +25,7 @@ pub const DEFAULT_FONT_SIZE: f32 = 11.0;
 pub const DEFAULT_LINE_HEIGHT: f32 = 1.2;
 
 /// Default theme preset name (SPEC §14).
-pub const DEFAULT_THEME: &str = "predawn";
+pub const DEFAULT_THEME: &str = "copper-dark";
 
 /// Default scrollback depth (matches [`Grid::new`](crate::grid::Grid::new)).
 pub const DEFAULT_SCROLLBACK: usize = 1000;
@@ -254,7 +254,7 @@ fn default_rows() -> usize {
 }
 
 /// Window padding.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Padding {
     /// Left/right padding in pixels.
@@ -263,6 +263,12 @@ pub struct Padding {
     /// Top/bottom padding in pixels.
     #[serde(default)]
     pub y: u32,
+}
+
+impl Default for Padding {
+    fn default() -> Self {
+        Self { x: 12, y: 10 }
+    }
 }
 
 /// Split settings (`[split]`, CONFIG-013).
@@ -575,6 +581,16 @@ pub enum KeyAction {
     ToggleBookmark,
     /// Show the bookmark list (issue #53, BKMK-002).
     ShowBookmarks,
+    /// Show or hide the sessions sidebar (RAIL-001).
+    ToggleSessionRail,
+    /// Show or hide the project's roadmap board (BOARD-001).
+    ToggleBoard,
+    /// Open a new session in its own Git worktree (WORKTREE-010).
+    NewWorktreeSession,
+    /// Create any missing project brain files (BRAIN-001).
+    InitProjectBrain,
+    /// Start King Crab, the boss agent, for this project (BOSS-001).
+    StartBoss,
     /// Export the current selection to a file (issue #53, EXPORT-001).
     ExportSelection,
     /// Export the last finished command's output to a file
@@ -625,6 +641,11 @@ impl KeyAction {
             "command-palette" | "palette" => Self::CommandPalette,
             "hint-mode" | "hints" => Self::HintMode,
             "toggle-bookmark" | "bookmark" => Self::ToggleBookmark,
+            "toggle-session-rail" | "session-rail" => Self::ToggleSessionRail,
+            "toggle-board" | "board" => Self::ToggleBoard,
+            "new-worktree-session" => Self::NewWorktreeSession,
+            "init-project-brain" => Self::InitProjectBrain,
+            "start-boss" | "start-king-crab" => Self::StartBoss,
             "show-bookmarks" | "bookmarks" => Self::ShowBookmarks,
             "export-selection" => Self::ExportSelection,
             "export-last-command" | "export-command-output" => Self::ExportLastCommand,
@@ -814,6 +835,21 @@ pub struct Config {
     /// startup (TAB-026, WINDOW-015/016).
     #[serde(rename = "session-restore", default = "default_true")]
     pub session_restore: bool,
+    /// RAIL-001: show the sessions sidebar.
+    #[serde(rename = "session-rail", default = "default_true")]
+    pub session_rail: bool,
+    /// AUTO-007: let any local client of this user open tabs and type into
+    /// sessions. Off, writes need this window's token. A window reads it once, when
+    /// it starts: a reload never changes what a running window grants.
+    #[serde(rename = "automation-writes", default)]
+    pub automation_writes: bool,
+    /// AUTO-007: let any local client of this user list sessions, read their
+    /// screens and subscribe to their events. Read once, as `automation-writes` is.
+    #[serde(rename = "automation-reads", default)]
+    pub automation_reads: bool,
+    /// WELCOME-001: show the crab banner when rustty starts.
+    #[serde(default = "default_true")]
+    pub welcome: bool,
     /// SHELLINT-013/014: launch known shells (Git Bash, PowerShell, WSL
     /// bash) with the rustty integration script, and enable per-command
     /// tracking, navigation and completion notices. Explicit opt-in.
@@ -873,6 +909,10 @@ impl Default for Config {
             copy_on_select: false,
             bell: BellMode::default(),
             session_restore: true,
+            welcome: true,
+            session_rail: true,
+            automation_writes: false,
+            automation_reads: false,
             shell_integration: false,
             command_notify_ms: default_notify_ms(),
             detach_prefix: default_detach_prefix(),
@@ -906,6 +946,10 @@ impl PartialEq for Config {
             && self.cursor_blink == other.cursor_blink
             && self.copy_on_select == other.copy_on_select
             && self.session_restore == other.session_restore
+            && self.welcome == other.welcome
+            && self.session_rail == other.session_rail
+            && self.automation_writes == other.automation_writes
+            && self.automation_reads == other.automation_reads
             && self.shell_integration == other.shell_integration
             && self.command_notify_ms == other.command_notify_ms
             && self.detach_prefix == other.detach_prefix
@@ -1435,5 +1479,20 @@ background = \"#000000\"
                 Err(e) => panic!("{e}"),
             }
         }
+    }
+
+    #[test]
+    fn default_padding_is_twelve_by_ten() {
+        // Break caught: text flush against the window edges by default.
+        assert_eq!(Padding::default(), Padding { x: 12, y: 10 });
+        let cfg = Config::parse("").expect("empty config");
+        assert_eq!(cfg.window.padding, Padding { x: 12, y: 10 });
+    }
+
+    #[test]
+    fn explicit_zero_padding_is_honoured() {
+        // Break caught: the new default overriding what the user set.
+        let cfg = Config::parse("[window]\npadding = { x = 0, y = 0 }\n").expect("config");
+        assert_eq!(cfg.window.padding, Padding { x: 0, y: 0 });
     }
 }

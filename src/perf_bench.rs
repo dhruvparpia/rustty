@@ -112,6 +112,19 @@ unsafe extern "system" fn bench_wnd_proc(
 /// invisible windows and `Renderer` skips those frames, which would time an
 /// empty paint instead of a real one.
 fn bench_target(cols: usize, rows: usize) -> (HWND, Renderer) {
+    // Ligatures off (the shipped default is on): with ligatures on the
+    // atlas is never built (FONT-010), and the bench would measure the
+    // DrawText fallback while reporting a "healthy" atlas. Issue #28
+    // requires real blit counters.
+    let font = FontConfig {
+        ligatures: false,
+        ..FontConfig::default()
+    };
+    bench_target_with_font(cols, rows, &font)
+}
+
+/// Same window and renderer as [`bench_target`], with a chosen font setup.
+fn bench_target_with_font(cols: usize, rows: usize, font: &FontConfig) -> (HWND, Renderer) {
     static REGISTER: Once = Once::new();
     let hinstance = unsafe { GetModuleHandleW(None) }.expect("bench: module handle");
     let class_name = wstr(CLASS_NAME);
@@ -153,15 +166,7 @@ fn bench_target(cols: usize, rows: usize) -> (HWND, Renderer) {
     }
     .expect("bench: window creation failed");
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-    // Ligatures off (the shipped default is on): with ligatures on the
-    // atlas is never built (FONT-010), and the bench would measure the
-    // DrawText fallback while reporting a "healthy" atlas. Issue #28
-    // requires real blit counters.
-    let font = FontConfig {
-        ligatures: false,
-        ..FontConfig::default()
-    };
-    let renderer = Renderer::new(hwnd, dpi, &font, cols, rows, TAB_BAR_HEIGHT)
+    let renderer = Renderer::new(hwnd, dpi, font, cols, rows, TAB_BAR_HEIGHT)
         .expect("bench: renderer creation failed");
     (hwnd, renderer)
 }
@@ -370,6 +375,8 @@ fn burst_of_10000_lines_paints_inside_the_budget() {
         "bench: worst frame painted in {:?}, over the {frame_budget:?} budget",
         report.worst,
     );
+    // The target must go before its window.
+    drop(renderer);
     let _ = unsafe { DestroyWindow(hwnd) };
 }
 
@@ -418,6 +425,152 @@ fn damage_frames_allocate_nothing() {
          with a full atlas of {} tiles (issue #28)",
         report.frames, report.fallbacks, report.tiles,
     );
+    // The target must go before its window.
+    drop(renderer);
+    let _ = unsafe { DestroyWindow(hwnd) };
+}
+
+/// NFR-113, RAIL-004: the sessions sidebar is in every frame, so it follows
+/// the same hot-path rule, including with a working session's dot mid-pulse.
+#[test]
+#[ignore = "needs a desktop session: cargo test --release -- --ignored"]
+fn damage_frames_with_the_sidebar_allocate_nothing() {
+    use crate::rail::{self, Row, Status, Target};
+    let _guard = bench_lock();
+    let (hwnd, mut renderer) = bench_target(80, 24);
+    renderer.set_rail_width(rail::RAIL_WIDTH);
+    let row = |title: &str, status, target, active| Row {
+        target,
+        title: title.to_string(),
+        detail: rail::detail_for(status, None),
+        project: "winttyghost".to_string(),
+        status,
+        active,
+    };
+    renderer.set_rail_rows(vec![
+        row(
+            "Fixing the login bug",
+            Status::Working,
+            Target::Tab(0),
+            true,
+        ),
+        row(
+            "Refactor the parser",
+            Status::NeedsYou,
+            Target::Tab(1),
+            false,
+        ),
+        row("Running tests", Status::Finished, Target::Tab(2), false),
+        row("Docs", Status::Idle, Target::Tab(3), false),
+        row(
+            "overnight-build",
+            Status::Background,
+            Target::Host(7),
+            false,
+        ),
+    ]);
+    let _ = renderer.set_rail_pulse(0.5);
+    let (cols, rows) = renderer.grid_size();
+    let mut app = App::with_size(cols, rows, 1_000);
+    let theme = Theme::predawn();
+    let floor = present_floor(&mut app, &mut renderer, &theme);
+    let report = paint_burst(&mut app, &mut renderer, &theme, 20, floor);
+    report.print("sidebar allocations");
+
+    assert_eq!(
+        report.allocations, 0,
+        "bench: the sidebar allocated {} times in {} frames (NFR-113)",
+        report.allocations, report.frames,
+    );
+    // The target must go before its window.
+    drop(renderer);
+    let _ = unsafe { DestroyWindow(hwnd) };
+}
+
+/// RAIL-001: hovering a row draws its highlight and close target, inside the
+/// sidebar and nowhere else. A synthetic mouse message cannot show this in the
+/// real window: `TrackMouseEvent` ends the hover at once when the real pointer
+/// is elsewhere.
+#[test]
+#[ignore = "needs a desktop session: cargo test --release -- --ignored"]
+fn hovering_a_sidebar_row_paints_only_the_sidebar() {
+    use crate::rail::{self, Hit, Row, Status, Target};
+    let _guard = bench_lock();
+    let (hwnd, mut renderer) = bench_target(80, 24);
+    // DWM only composes windows that are on a monitor.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+    .expect("bench: moving the bench window on-screen failed");
+    renderer.set_rail_width(rail::RAIL_WIDTH);
+    renderer.set_rail_rows(vec![Row {
+        target: Target::Tab(0),
+        title: "Docs".to_string(),
+        detail: rail::detail_for(Status::Idle, None),
+        project: "winttyghost".to_string(),
+        status: Status::Idle,
+        active: false,
+    }]);
+    let (cols, rows) = renderer.grid_size();
+    let mut app = App::with_size(cols, rows, 1_000);
+    let theme = Theme::predawn();
+    app.feed_active(lines(0, rows).as_bytes());
+    let _ = app.take_dirty();
+    renderer.paint_damage(&app, &theme, None, None, None, None, &[], None);
+    app.clear_grid_damage();
+    let plain = capture_presented(hwnd, None);
+    assert!(!is_flat(&plain), "bench: the capture is one flat colour");
+
+    assert!(renderer.set_rail_hover(Hit::Close(0)));
+    renderer.paint_damage(&app, &theme, None, None, None, None, &[], None);
+    let hovered = capture_presented(hwnd, Some(&plain));
+
+    let mut rect = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut rect) }.expect("bench: client rect");
+    let width = (rect.right - rect.left) as usize;
+    let changed: Vec<usize> = plain
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(hovered.as_chunks::<4>().0.iter())
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(i, _)| i % width)
+        .collect();
+    assert!(!changed.is_empty(), "bench: hovering changed no pixels");
+    let right = changed.iter().copied().max().unwrap_or(0);
+    // The window is far wider than the sidebar, and a capture can be scaled,
+    // so half the window is the safe line.
+    assert!(
+        right < width / 2,
+        "bench: hover painted out to x {right} of {width}, past the sidebar"
+    );
+
+    // BELL-003: with the tab strip gone, a bell flashes the row.
+    renderer.set_rail_hover(Hit::None);
+    renderer.paint_damage(&app, &theme, None, None, None, None, &[], None);
+    let settled = capture_presented(hwnd, Some(&hovered));
+    renderer.set_bell_state(true, &[true], false);
+    renderer.paint_damage(&app, &theme, None, None, None, None, &[], None);
+    let flashed = capture_presented(hwnd, Some(&settled));
+    let changed = settled
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(flashed.as_chunks::<4>().0.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(changed > 0, "bench: a bell changed nothing in the sidebar");
+    // The target must go before its window.
+    drop(renderer);
     let _ = unsafe { DestroyWindow(hwnd) };
 }
 
@@ -461,6 +614,8 @@ fn damage_frames_cover_only_the_dirty_rows() {
         damaged < rows / 2,
         "bench: a one-line change repainted {damaged} of {rows} rows",
     );
+    // The target must go before its window.
+    drop(renderer);
     let _ = unsafe { DestroyWindow(hwnd) };
 }
 
@@ -564,6 +719,76 @@ fn capture_window(hwnd: HWND) -> Vec<u8> {
         ReleaseDC(Some(hwnd), dc);
     }
     buf
+}
+
+/// Full blocks in one column must form an unbroken bar at any line height.
+/// A font glyph stops at the font's line box, which would show the background
+/// between rows at line height 1.2.
+#[test]
+#[ignore = "needs a desktop session: cargo test --release -- --ignored"]
+fn block_rows_have_no_gaps() {
+    let _guard = bench_lock();
+    for line_height in [1.0_f32, 1.2] {
+        let font = FontConfig {
+            line_height,
+            ..FontConfig::default()
+        };
+        let (hwnd, mut renderer) = bench_target_with_font(80, 24, &font);
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        }
+        .expect("bench: moving the bench window on-screen failed");
+        let (cols, rows) = renderer.grid_size();
+        let mut app = App::with_size(cols, rows, 100);
+        let theme = Theme::default();
+        // Bright red blocks in the first column of six rows.
+        app.feed_active("\x1b[38;2;255;0;0m".as_bytes());
+        for _ in 0..6 {
+            app.feed_active("\u{2588}\r\n".as_bytes());
+        }
+        let _ = app.take_dirty();
+        renderer.paint_damage(&app, &theme, None, None, None, None, &[], None);
+        let shot = capture_presented(hwnd, None);
+        assert!(!is_flat(&shot), "bench: the capture is one flat colour");
+
+        let mut rect = RECT::default();
+        unsafe { GetClientRect(hwnd, &mut rect) }.expect("bench: client rect");
+        let width = (rect.right - rect.left) as usize;
+        let height = shot.len() / 4 / width;
+        let m = renderer.metrics();
+        // This process is not DPI-aware, so the capture can be scaled to the
+        // display. Find the bar rather than computing where it should be.
+        let x = (renderer.grid_left() + m.cell_width / 2.0) as usize;
+        let is_red = |y: usize| {
+            let at = (y * width + x) * 4;
+            shot[at..at + 3] == [0, 0, 255]
+        };
+        let first = (0..height).find(|&y| is_red(y));
+        let last = (0..height).rev().find(|&y| is_red(y));
+        let (Some(first), Some(last)) = (first, last) else {
+            panic!("bench: no block pixels in column {x}");
+        };
+        assert!(
+            (last - first) as f32 >= 5.0 * m.cell_height,
+            "line height {line_height}: bar spans only {first}..={last}"
+        );
+        let gap = (first..=last).find(|&y| !is_red(y));
+        assert_eq!(
+            gap, None,
+            "line height {line_height}: gap in bar {first}..={last}"
+        );
+        // The target must go before its window.
+        drop(renderer);
+        let _ = unsafe { DestroyWindow(hwnd) };
+    }
 }
 
 /// True when every pixel equals the first: a flat capture means the

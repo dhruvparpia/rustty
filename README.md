@@ -12,12 +12,15 @@ no web UI, no bundled interpreted runtime.
 > **Early development.** `rustty` runs today as a native Windows terminal:
 > ConPTY shells in tabs, Direct2D/DirectWrite rendering with a glyph atlas,
 > mouse selection, clipboard, fullscreen, and a TOML config with theme presets.
-> `packaging/build-portable.ps1` builds the portable ZIP. Splits, search, native
-> menus, mouse reporting, tab rename/reorder/close, shell profiles (per-profile
-> theme, tab colour, working directory, environment), custom key bindings,
-> window opacity and cursor shape/blink are built; session restore, notifications
-> and the quick terminal are not built yet. See [`ROADMAP.md`](ROADMAP.md) for
-> what ships in each version.
+> `packaging/build-portable.ps1` builds the portable ZIP. Splits, search, mouse
+> reporting, tab rename/reorder/close, shell profiles (per-profile theme, tab colour,
+> working directory, environment), custom key bindings, window opacity, cursor
+> shape/blink, session restore, notifications, the quick terminal and persistent
+> sessions are built. A sessions sidebar shows every session and what it is doing:
+> needs you, working, finished. Ctrl+Shift+S hides it, and tabs then sit in the title
+> bar. "Start King Crab" runs a Claude Code session that hands work to other sessions in their own
+> worktrees, and `rustty ctl` and `rustty mcp` give any program the same control. Tapping Alt opens
+> the window menu. See [`ROADMAP.md`](ROADMAP.md) for what ships in each version.
 
 ## Vision
 
@@ -28,6 +31,11 @@ no web UI, no bundled interpreted runtime.
   what Windows Terminal users expect: tabs always visible, `+` button, close
   destroys the shell, tab switching stays in the terminal.
 - **Open** — MIT, no telemetry, TOML config, portable ZIP first.
+
+## Fonts
+
+Prompt icons work with no setup: Symbols Nerd Font Mono is embedded as a fallback, and a
+font that has the glyph keeps it. Its licence is in [`assets/fonts`](assets/fonts).
 
 ## Configuration
 

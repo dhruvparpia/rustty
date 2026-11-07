@@ -22,9 +22,9 @@
 
 # Theme preset. Known: predawn, catppuccin-mocha, gruvbox-dark, one-dark,
 # solarized-dark, solarized-light, copper-dark, copper-light.
-# An unknown name warns and falls back to predawn. A [theme]
+# An unknown name warns and falls back to copper-dark. A [theme]
 # table (below) can name a theme file and override single colors.
-theme = "predawn"
+theme = "copper-dark"
 
 # Font family, as installed on the system.
 font = "Cascadia Mono"
@@ -70,6 +70,30 @@ copy-on-select = true
 # background also raises a Windows toast (BELL-005).
 bell = "audible"
 
+# Show the sessions sidebar: every session with what it is doing, grouped by
+# project (RAIL-001). Ctrl+Shift+S shows or hides it. The tab strip steps aside
+# while it is on, and it collapses when the window is under 720 DIPs wide.
+session-rail = true
+
+# Let scripts and agents running as you open tabs, close them and type into
+# sessions through `rustty ctl` and `rustty mcp` (AUTO-007). This also lets them read.
+# Off, a write needs this window's token, which only a session the window starts for
+# a boss is given. Each window reads this once, when it starts, so editing the file
+# never grants anything to a running window. While it is on, the sidebar heading says
+# "rustty · automation on".
+automation-writes = false
+
+# Let scripts and agents running as you list sessions, read their screens and history
+# and subscribe to their events, without being able to change anything (AUTO-007).
+# A screen can hold anything ever printed in it, so this is off by default. Each
+# window reads this once, when it starts. While it is on, the sidebar heading says
+# "rustty · automation reads on".
+automation-reads = false
+
+# Show the crab banner when rustty starts with no other rustty window open
+# (WELCOME-001). It never appears on new tabs or splits.
+welcome = true
+
 # Reopen the previous run's tabs, splits and window position at startup
 # (TAB-026, WINDOW-015/016). Shells respawn in each pane's last reported
 # directory; the file is `session.toml` beside `config.toml`.
@@ -88,7 +112,7 @@ editor = "code --goto {file}:{line}:{column}"
 # gruvbox-dark, one-dark, solarized-dark, solarized-light, copper-dark, copper-light.
 # With no `theme` key
 # the app follows the Windows dark/light setting (THEME-010): light picks
-# solarized-light, dark picks predawn.
+# copper-light, dark picks copper-dark.
 #
 # A [theme] table replaces the plain `theme` key. `name` picks the base: a
 # preset, or the name of themes\<name>.toml beside this file (that file may
@@ -226,7 +250,7 @@ editor = "code --goto {file}:{line}:{column}"
 # [window]
 # cols = 80
 # rows = 24
-# padding = { x = 4, y = 4 }   # grid inset; the tab bar spans full width
+# padding = { x = 12, y = 10 } # grid inset (the default); the tab bar spans full width
 
 # ---------------------------------------------------------------------------
 # Tab bar (CONFIG-012, TAB-011/015/022/023/024/025)

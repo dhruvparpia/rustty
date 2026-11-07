@@ -16,9 +16,16 @@ pub mod app;
 #[cfg(windows)]
 #[allow(unsafe_code, reason = "FFI boundary (NFR-401)")]
 pub mod attach;
+/// Local automation API (issue #44, docs/design-automation-api.md): pure core,
+/// dispatcher, events, pipe transport, `rustty ctl` and `rustty mcp`.
+pub mod automation;
 /// Bookmarks over a pane's history (issue #53, SPEC BKMK-001..003). Pure
 /// anchor math.
 pub mod bookmark;
+/// Title-bar strip geometry and hit testing.
+pub mod caption;
+/// Characters drawn as geometry (block elements, Powerline separators).
+pub mod cellart;
 pub mod cli;
 pub mod color;
 /// Per-command metadata from OSC 133 transitions (SHELLINT-006/010/013-019,
@@ -83,6 +90,14 @@ pub mod pane;
 pub mod parser;
 // Render hot-path benchmark (NFR-113/NFR-114): tests only, ignored by
 // default because Direct2D needs a desktop session.
+/// The sessions sidebar: session status and row layout.
+pub mod agents;
+pub mod board;
+/// King Crab, the boss agent: its command and brief (BOSS-001).
+pub mod boss;
+/// Skinned dialogs (DIALOG-001).
+#[allow(unsafe_code, reason = "DIALOG-001: Win32 dialog FFI")]
+pub mod dialog;
 #[cfg(all(test, windows))]
 #[allow(
     unsafe_code,
@@ -90,8 +105,28 @@ pub mod parser;
 )]
 mod perf_bench;
 pub mod portable;
+pub mod program_search;
+pub mod program_status;
+pub mod project_brain;
+pub mod rail;
 /// Terminal search over screen + scrollback (SPEC SEARCH-001..015).
 pub mod search;
+// The real `op` runner and the command launcher behind `rustty secrets`.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "SECRET-011: CreateProcessW with a wiped environment block is a raw Win32 FFI boundary"
+)]
+pub mod secret_exec;
+/// Per-project 1Password secrets: manifest, naming, token store and verb
+/// logic (SECRET-001..012). Portable; every `op` call goes through a trait.
+pub mod secrets;
+/// Locked, encrypted-at-rest secret buffers and DPAPI (SECRET-004..006).
+#[allow(
+    unsafe_code,
+    reason = "SECRET-004: VirtualLock, CryptProtectMemory and DPAPI are a raw Win32 FFI boundary"
+)]
+pub mod secure_mem;
 pub mod selection;
 pub mod session;
 pub mod shell;
@@ -125,6 +160,8 @@ pub mod tasks;
     reason = "THEME-010: the system theme check is a Win32 registry FFI boundary"
 )]
 pub mod theme;
+/// The startup banner: crab, status, key commands and a tip.
+pub mod welcome;
 /// Workspace templates (WORKSPACE-001..009): pure Rust store + schema.
 pub mod workspace;
 /// Worktree discovery (#92): existing Git worktrees, branch/path and availability.

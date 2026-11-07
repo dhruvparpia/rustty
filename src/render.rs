@@ -16,22 +16,29 @@ use std::collections::HashMap;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+    D2D1_FIGURE_END_CLOSED, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_WINDOW_STATE_OCCLUDED,
-    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1PathGeometry,
+    ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWriteCreateFactory, IDWriteFactory,
-    IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout, IDWriteTypography,
+    DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_UNICODE_RANGE, DWriteCreateFactory,
+    IDWriteFactory, IDWriteFactory5, IDWriteFontCollection, IDWriteFontFallback, IDWriteTextFormat,
+    IDWriteTextFormat1, IDWriteTextLayout, IDWriteTypography,
+};
+use windows::Win32::Graphics::DirectWrite::{
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Imaging::{
@@ -40,14 +47,17 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::core::{Interface, PCWSTR};
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::app::App;
+use crate::caption;
+use crate::cellart;
 use crate::color::Color;
 use crate::config::{CursorShape, FontConfig, TabBarPlacement};
 use crate::glyph_cache::{self, GlyphAtlas, GlyphKey, Tile};
 use crate::grid::{Cell, CellAttribute, Grid};
 use crate::pane::{Pane, StoredImage};
+use crate::rail;
 use crate::search::SearchState;
 use crate::selection::Selection;
 use crate::split::Rect;
@@ -94,7 +104,7 @@ fn is_recreate_target(err: &windows::core::Error) -> bool {
 /// Cell geometry derived from the font, in DIPs.
 #[derive(Debug, Clone, Copy)]
 pub struct CellMetrics {
-    /// Cell width (monospace advance of `M`, rounded up).
+    /// Cell width: the monospace advance of `M`, rounded up for atlas text.
     pub cell_width: f32,
     /// Cell height (glyph box with leading, rounded up).
     pub cell_height: f32,
@@ -145,13 +155,55 @@ pub(crate) const fn color_key(c: Color) -> u32 {
 /// Blend two colors: `t` is the fraction of `to` (0 = `from`, 1 = `to`).
 /// Used for dimmed tab-bar labels on the predawn palette.
 fn mix(from: Color, to: Color, t: f32) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    let blend = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-    Color {
-        r: blend(from.r, to.r),
-        g: blend(from.g, to.g),
-        b: blend(from.b, to.b),
+    from.mix(to, t)
+}
+
+/// Position of a separator in [`Renderer::powerline`].
+const fn powerline_index(side: cellart::PowerlineSide) -> usize {
+    match side {
+        cellart::PowerlineSide::SolidRight => 0,
+        cellart::PowerlineSide::ThinRight => 1,
+        cellart::PowerlineSide::SolidLeft => 2,
+        cellart::PowerlineSide::ThinLeft => 3,
     }
+}
+
+/// Build the four Powerline separators in unit cell coordinates.
+fn powerline_geometries(factory: &ID2D1Factory) -> windows::core::Result<[ID2D1PathGeometry; 4]> {
+    /// Stroke width of the thin chevrons, as a fraction of the cell.
+    const T: f32 = 0.12;
+    let v = |x: f32, y: f32| Vector2 { X: x, Y: y };
+    let polygon = |points: &[Vector2]| -> windows::core::Result<ID2D1PathGeometry> {
+        let geometry = unsafe { factory.CreatePathGeometry() }?;
+        let sink = unsafe { geometry.Open() }?;
+        unsafe {
+            sink.BeginFigure(points[0], D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLines(&points[1..]);
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+        }
+        Ok(geometry)
+    };
+    Ok([
+        polygon(&[v(0.0, 0.0), v(1.0, 0.5), v(0.0, 1.0)])?,
+        polygon(&[
+            v(0.0, 0.0),
+            v(T, 0.0),
+            v(1.0, 0.5),
+            v(T, 1.0),
+            v(0.0, 1.0),
+            v(1.0 - T, 0.5),
+        ])?,
+        polygon(&[v(1.0, 0.0), v(0.0, 0.5), v(1.0, 1.0)])?,
+        polygon(&[
+            v(1.0, 0.0),
+            v(1.0 - T, 0.0),
+            v(0.0, 0.5),
+            v(1.0 - T, 1.0),
+            v(1.0, 1.0),
+            v(T, 0.5),
+        ])?,
+    ])
 }
 
 /// Measure cell geometry for the configured font at `dpi` (FONT-002/011).
@@ -291,7 +343,19 @@ fn build_font_resources(
             DWRITE_FONT_STYLE_ITALIC,
         )?,
     ];
-    let metrics = measure_cells_with(dwrite, &formats[0], font.line_height)?;
+    // Prompt icons work with no setup. Without the bundled font, those glyphs
+    // show as empty boxes, which is ugly but not fatal (NFR-216).
+    match symbol_fallback(dwrite) {
+        Some(fallback) => {
+            for format in &formats {
+                if let Ok(format) = format.cast::<IDWriteTextFormat1>() {
+                    let _ = unsafe { format.SetFontFallback(&fallback) };
+                }
+            }
+        }
+        None => eprintln!("rustty: the bundled symbols font could not be loaded"),
+    }
+    let metrics = measure_cells_with(dwrite, &formats[0], font.line_height, font.ligatures)?;
     Ok((chosen.to_string(), formats, metrics))
 }
 
@@ -322,6 +386,134 @@ fn make_format(
     Ok(format)
 }
 
+/// Symbols Nerd Font Mono, embedded so prompt icons work with no setup.
+static SYMBOLS_FONT: &[u8] = include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
+
+/// Family name inside [`SYMBOLS_FONT`].
+const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
+
+/// Private-use ranges the bundled font answers for: the BMP area and plane 15.
+const SYMBOL_RANGES: [DWRITE_UNICODE_RANGE; 2] = [
+    DWRITE_UNICODE_RANGE {
+        first: 0xE000,
+        last: 0xF8FF,
+    },
+    DWRITE_UNICODE_RANGE {
+        first: 0xF0000,
+        last: 0xFFFFD,
+    },
+];
+
+/// A font fallback that sends private-use characters to the bundled symbols
+/// font and everything else to the system fallback. DirectWrite only consults
+/// it for characters the chosen font lacks, so the user's font still wins.
+/// `None` when the font cannot be loaded. Built once per thread: font changes
+/// rebuild the text formats, and each build would register another loader.
+fn symbol_fallback(dwrite: &IDWriteFactory) -> Option<IDWriteFontFallback> {
+    thread_local! {
+        static FALLBACK: std::cell::OnceCell<Option<IDWriteFontFallback>> =
+            const { std::cell::OnceCell::new() };
+    }
+    FALLBACK.with(|cell| cell.get_or_init(|| build_symbol_fallback(dwrite)).clone())
+}
+
+fn build_symbol_fallback(dwrite: &IDWriteFactory) -> Option<IDWriteFontFallback> {
+    let factory: IDWriteFactory5 = dwrite.cast().ok()?;
+    unsafe {
+        let loader = factory.CreateInMemoryFontFileLoader().ok()?;
+        factory.RegisterFontFileLoader(&loader).ok()?;
+        // SYMBOLS_FONT is 'static, so the loader can reference it directly.
+        let file = loader
+            .CreateInMemoryFontFileReference(
+                &factory,
+                SYMBOLS_FONT.as_ptr().cast(),
+                SYMBOLS_FONT.len() as u32,
+                None,
+            )
+            .ok()?;
+        let set_builder = factory.CreateFontSetBuilder().ok()?;
+        set_builder.AddFontFile(&file).ok()?;
+        let set = set_builder.CreateFontSet().ok()?;
+        let collection = factory.CreateFontCollectionFromFontSet(&set).ok()?;
+        let builder = factory.CreateFontFallbackBuilder().ok()?;
+        let family = wstr(SYMBOLS_FAMILY);
+        let families = [family.as_ptr()];
+        builder
+            .AddMapping(
+                &SYMBOL_RANGES,
+                &families,
+                &collection,
+                PCWSTR::null(),
+                PCWSTR::null(),
+                1.0,
+            )
+            .ok()?;
+        let system = factory.GetSystemFontFallback().ok()?;
+        builder.AddMappings(&system).ok()?;
+        builder.CreateFontFallback().ok()
+    }
+}
+
+/// Caption button glyph size in DIPs.
+const CAPTION_GLYPH_SIZE: f32 = 10.0;
+/// Caption button glyphs in the system icon fonts.
+const CAPTION_GLYPH_MINIMIZE: char = '\u{E921}';
+const CAPTION_GLYPH_MAXIMIZE: char = '\u{E922}';
+const CAPTION_GLYPH_RESTORE: char = '\u{E923}';
+const CAPTION_GLYPH_CLOSE: char = '\u{E8BB}';
+/// The close button's fill, as Windows draws it.
+const CLOSE_HOVER: Color = Color::rgb(0xC4, 0x2B, 0x1C);
+const CLOSE_PRESSED: Color = Color::rgb(0xA3, 0x26, 0x1A);
+
+/// A plain symbol for a caption glyph, for systems without the icon fonts.
+const fn plain_caption_glyph(glyph: char) -> char {
+    match glyph {
+        CAPTION_GLYPH_CLOSE => '\u{2715}',
+        CAPTION_GLYPH_MINIMIZE => '\u{2013}',
+        _ => '\u{25A1}',
+    }
+}
+
+/// Tab title size in DIPs.
+const TAB_FONT_SIZE: f32 = 12.5;
+/// Sidebar heading and detail size in DIPs.
+const RAIL_SMALL_FONT_SIZE: f32 = 11.0;
+
+/// The tab title format and the centred format for the close and `+` glyphs.
+fn make_tab_formats(
+    dwrite: &IDWriteFactory,
+) -> anyhow::Result<(IDWriteTextFormat, IDWriteTextFormat, IDWriteTextFormat)> {
+    let make = |size: f32| {
+        make_format(
+            dwrite,
+            "Segoe UI",
+            size,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+        )
+    };
+    let title = make(TAB_FONT_SIZE)?;
+    let small = make(RAIL_SMALL_FONT_SIZE)?;
+    let glyph = make(TAB_FONT_SIZE)?;
+    unsafe {
+        for format in [&title, &small] {
+            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+            let trimming = DWRITE_TRIMMING {
+                granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                delimiter: 0,
+                delimiterCount: 0,
+            };
+            let sign = dwrite.CreateEllipsisTrimmingSign(format)?;
+            format.SetTrimming(&trimming, &sign)?;
+        }
+        glyph.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        glyph.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+        glyph.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+    }
+    Ok((title, glyph, small))
+}
+
 /// Icon-only text face for the tab bar: the system icon font carrying the
 /// shell glyph (U+E756 CommandPrompt). `None` when no icon font is present.
 fn make_icon_format(dwrite: &IDWriteFactory, size: f32) -> Option<IDWriteTextFormat> {
@@ -343,43 +535,30 @@ fn make_icon_format(dwrite: &IDWriteFactory, size: f32) -> Option<IDWriteTextFor
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
             )
-            .ok();
+            .ok()
+            .inspect(|format| unsafe {
+                let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                let _ = format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            });
         }
     }
     None
 }
 
-/// Tab-bar shell icon: the CommandPrompt glyph tinted per shell family.
-fn shell_icon(profile: &str) -> Option<(char, Color)> {
-    let p = profile.to_ascii_lowercase();
-    let rgb = if p.contains("powershell") || p.contains("pwsh") {
-        (74, 143, 217) // PowerShell blue
-    } else if p.contains("cmd") || p.contains("command") {
-        (204, 204, 204)
-    } else if p.contains("bash") || p.contains("git") {
-        (92, 184, 92)
-    } else if p.contains("wsl") {
-        (242, 166, 51)
-    } else if p.contains("nushell") {
-        (153, 102, 204)
-    } else if p.contains("rust") {
-        (200, 100, 50) // rust orange
-    } else {
-        return None;
-    };
-    Some(('\u{e756}', Color::rgb(rgb.0, rgb.1, rgb.2)))
-}
-
-/// Measure the cell box for `format`: width = advance of `M` (rounded up),
+/// Measure the cell box for `format`: width = advance of `M`,
 /// height = glyph box scaled by `line_height` (SPEC `line-height`).
 fn measure_cells_with(
     dwrite: &IDWriteFactory,
     format: &IDWriteTextFormat,
     line_height: f32,
+    shaped: bool,
 ) -> anyhow::Result<CellMetrics> {
     let width = layout_height(dwrite, format, "M")?.width;
     let glyph = layout_height(dwrite, format, "Mg")?;
-    let cell_width = width.ceil().max(1.0);
+    // Shaped text is drawn as runs at the font's own advance, so the grid has
+    // to match it or the gaps between words stretch. The atlas blits one tile
+    // per cell, and whole-pixel cells keep those tiles sharp.
+    let cell_width = if shaped { width } else { width.ceil() }.max(1.0);
     let cell_height = (glyph.height * line_height).ceil().max(1.0);
     Ok(CellMetrics {
         cell_width,
@@ -412,9 +591,40 @@ pub struct Renderer {
     dwrite: IDWriteFactory,
     typography: Option<IDWriteTypography>,
     formats: [IDWriteTextFormat; 4],
-    /// Tab-bar shell icon face ("Segoe Fluent Icons" / "Segoe MDL2 Assets");
-    /// `None` when neither is installed, which disables tab icons.
-    icon_format: Option<IDWriteTextFormat>,
+    /// Powerline separators in cell coordinates, built on first use. They
+    /// belong to the factory, so they survive render-target recreation.
+    powerline: Option<[ID2D1PathGeometry; 4]>,
+    /// Tab titles: the Windows UI font, centred in the strip, trimmed with
+    /// an ellipsis.
+    tab_format: IDWriteTextFormat,
+    /// Tab close and `+` glyphs: the UI font, centred both ways.
+    tab_close_format: IDWriteTextFormat,
+    /// Caption button glyphs ("Segoe Fluent Icons" / "Segoe MDL2 Assets");
+    /// `None` when neither is installed.
+    caption_format: Option<IDWriteTextFormat>,
+    /// Title strip height in DIPs; 0 for quick and fullscreen windows.
+    caption_height: f32,
+    /// Sessions sidebar width in DIPs; 0 when hidden.
+    rail_width: f32,
+    /// Sidebar rows, grouped.
+    rail_rows: Vec<rail::Row>,
+    /// The sidebar's heading.
+    rail_heading: &'static str,
+    /// The open roadmap board.
+    board: Option<crate::board::View>,
+    /// Where each sidebar item goes, reused between frames.
+    rail_placed: Vec<rail::Placed>,
+    /// What the pointer is over in the sidebar.
+    rail_hover: rail::Hit,
+    /// Sidebar list scroll offset.
+    rail_scroll: f32,
+    /// Brightness of a working session's dot.
+    rail_pulse: f32,
+    /// Sidebar headings and detail lines.
+    rail_small_format: IDWriteTextFormat,
+    caption_hover: Option<caption::Hit>,
+    caption_pressed: Option<caption::Hit>,
+    caption_maximized: bool,
     metrics: CellMetrics,
     dpi: f32,
     /// Tab-bar strip height in DIPs; 0.0 when the bar is hidden
@@ -669,7 +879,8 @@ impl Renderer {
         let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
         // Family name is diagnostics-only; the formats carry the chosen face.
         let (_family, formats, metrics) = build_font_resources(&dwrite, dpi, font)?;
-        let icon_format = make_icon_format(&dwrite, metrics.text_height);
+        let (tab_format, tab_close_format, rail_small_format) = make_tab_formats(&dwrite)?;
+        let caption_format = make_icon_format(&dwrite, CAPTION_GLYPH_SIZE);
         let typography = build_typography(&dwrite, font)?;
         let width = dips_to_px(cols.max(1) as f32 * metrics.cell_width, dpi).max(1);
         let height = dips_to_px(
@@ -705,7 +916,23 @@ impl Renderer {
             dwrite,
             typography,
             formats,
-            icon_format,
+            powerline: None,
+            tab_format,
+            tab_close_format,
+            caption_format,
+            caption_height: 0.0,
+            rail_width: 0.0,
+            rail_rows: Vec::new(),
+            rail_heading: rail::heading(false, false),
+            board: None,
+            rail_placed: Vec::new(),
+            rail_hover: rail::Hit::None,
+            rail_scroll: 0.0,
+            rail_pulse: 1.0,
+            rail_small_format,
+            caption_hover: None,
+            caption_pressed: None,
+            caption_maximized: false,
             metrics,
             dpi,
             tab_bar_height,
@@ -765,6 +992,550 @@ impl Renderer {
         self.tab_bar_height
     }
 
+    /// Set the sessions sidebar's width: 0 hides it. Callers re-read
+    /// [`Renderer::grid_size`] afterwards.
+    pub fn set_rail_width(&mut self, width: f32) {
+        self.rail_width = width.max(0.0);
+    }
+
+    /// The sessions sidebar's width.
+    #[must_use]
+    pub const fn rail_width(&self) -> f32 {
+        self.rail_width
+    }
+
+    /// The rows the sidebar shows.
+    #[must_use]
+    pub fn rail_rows(&self) -> &[rail::Row] {
+        &self.rail_rows
+    }
+
+    /// Set the sidebar's heading.
+    pub const fn set_rail_heading(&mut self, heading: &'static str) {
+        self.rail_heading = heading;
+    }
+
+    /// Replace the sidebar's rows.
+    pub fn set_rail_rows(&mut self, rows: Vec<rail::Row>) {
+        self.rail_rows = rows;
+        self.layout_rail();
+    }
+
+    /// Set what the pointer is over in the sidebar. `true` when that changed.
+    pub fn set_rail_hover(&mut self, hover: rail::Hit) -> bool {
+        let changed = self.rail_hover != hover;
+        self.rail_hover = hover;
+        changed
+    }
+
+    /// Set how bright a working session's dot is, 0 to 1. `true` when that
+    /// changed.
+    pub fn set_rail_pulse(&mut self, pulse: f32) -> bool {
+        let changed = (self.rail_pulse - pulse).abs() > f32::EPSILON;
+        self.rail_pulse = pulse;
+        changed
+    }
+
+    /// Show the roadmap board, or take it away.
+    pub fn set_board(&mut self, view: Option<crate::board::View>) {
+        self.board = view;
+    }
+
+    /// What the point (`x`, `y`) is over on the board: column, then card.
+    #[must_use]
+    pub fn board_hit(&self, x: f32, y: f32) -> Option<(usize, Option<usize>)> {
+        let view = self.board.as_ref()?;
+        let px = unsafe { self.target.GetPixelSize() };
+        let width = px_to_dips(px.width, self.dpi) - self.rail_width;
+        let height = px_to_dips(px.height, self.dpi) - self.caption_height;
+        crate::board::hit(
+            view,
+            x - self.rail_width,
+            y - self.caption_height,
+            width,
+            height,
+        )
+    }
+
+    /// The roadmap board, over the terminal area.
+    fn paint_board(&mut self, view: &crate::board::View, theme: &Theme, width: f32, height: f32) {
+        use crate::board::{
+            CARD_HEIGHT, COLUMN_HEADER_HEIGHT, COLUMNS, GUTTER, HEADER_HEIGHT, column_width,
+            first_visible,
+        };
+        let ui = theme.ui_colors();
+        let top = self.caption_height;
+        let area = (height - top).max(0.0);
+        self.fill_rect(0.0, top, width, height, theme.background);
+        let title = self.tab_format.clone();
+        let small = self.rail_small_format.clone();
+        let rect = |left: f32, top: f32, right: f32, bottom: f32| D2D_RECT_F {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let heading = format!("Roadmap \u{b7} {}", view.project);
+        self.draw_rail_text(
+            &heading,
+            &title,
+            rect(GUTTER + 2.0, top + 12.0, width * 0.4, top + 36.0),
+            ui.foreground,
+        );
+        self.draw_rail_text(
+            "Arrows select \u{b7} Shift+arrows move \u{b7} Enter session \u{b7} W worktree \u{b7} N new \u{b7} Esc close",
+            &small,
+            rect(width * 0.4, top + 16.0, width - GUTTER, top + 36.0),
+            ui.muted,
+        );
+        let w = column_width(width);
+        for (at, name) in COLUMNS.iter().enumerate() {
+            let left = GUTTER + w * at as f32;
+            let right = left + w - GUTTER;
+            let cards = &view.columns[at];
+            let label = format!("{name}  {}", cards.len());
+            let color = if at == view.column {
+                ui.accent
+            } else {
+                ui.muted
+            };
+            self.draw_rail_text(
+                &label,
+                &small,
+                rect(
+                    left + 2.0,
+                    top + HEADER_HEIGHT + 8.0,
+                    right,
+                    top + HEADER_HEIGHT + 28.0,
+                ),
+                color,
+            );
+            let first_top = top + HEADER_HEIGHT + COLUMN_HEADER_HEIGHT;
+            let first = first_visible(view, at, area);
+            for (slot, card) in cards.iter().skip(first).enumerate() {
+                let y = first_top + CARD_HEIGHT * slot as f32;
+                if y + CARD_HEIGHT > height {
+                    break;
+                }
+                let selected = at == view.column && first + slot == view.row;
+                let fill = if selected {
+                    theme.tab_active
+                } else {
+                    theme.tab_bar
+                };
+                self.fill_rect(left, y, right, y + CARD_HEIGHT - 6.0, fill);
+                if selected {
+                    self.fill_rect(left, y, left + 2.0, y + CARD_HEIGHT - 6.0, ui.accent);
+                }
+                self.draw_rail_text(
+                    card,
+                    &title,
+                    rect(left + 10.0, y + 9.0, right - 6.0, y + CARD_HEIGHT - 8.0),
+                    ui.foreground,
+                );
+            }
+            if at == view.column
+                && let Some(text) = &view.editing
+            {
+                let shown = cards.len().saturating_sub(first);
+                let y = (first_top + CARD_HEIGHT * shown as f32).min(height - CARD_HEIGHT);
+                self.fill_rect(left, y, right, y + CARD_HEIGHT - 6.0, theme.tab_active);
+                self.fill_rect(left, y, left + 2.0, y + CARD_HEIGHT - 6.0, ui.accent);
+                let typing = format!("{text}\u{2502}");
+                self.draw_rail_text(
+                    &typing,
+                    &title,
+                    rect(left + 10.0, y + 9.0, right - 6.0, y + CARD_HEIGHT - 8.0),
+                    ui.foreground,
+                );
+            }
+        }
+    }
+
+    /// Scroll the sidebar's list by `delta` DIPs.
+    pub fn scroll_rail(&mut self, delta: f32) {
+        self.rail_scroll += delta;
+        self.layout_rail();
+    }
+
+    /// What the point (`x`, `y`) is over in the sidebar.
+    #[must_use]
+    pub fn rail_hit(&self, x: f32, y: f32) -> rail::Hit {
+        rail::hit_test(
+            x,
+            y,
+            caption::STRIP_HEIGHT,
+            &self.rail_rows,
+            &self.rail_placed,
+            self.tab_close_button,
+        )
+    }
+
+    /// The rectangle of the sidebar row for tab `tab`, for screen readers.
+    #[must_use]
+    pub fn rail_tab_rect(&self, tab: usize) -> Option<(f32, f32, f32, f32)> {
+        self.rail_placed
+            .iter()
+            .find_map(|placed| match placed.kind {
+                rail::ItemKind::Row(i)
+                    if self.rail_rows.get(i).map(|row| row.target)
+                        == Some(rail::Target::Tab(tab)) =>
+                {
+                    Some((0.0, placed.top, self.rail_width, placed.bottom))
+                }
+                _ => None,
+            })
+    }
+
+    fn layout_rail(&mut self) {
+        let list_top = caption::STRIP_HEIGHT + rail::NEW_ROW_HEIGHT;
+        let height = self.client_dips().1;
+        self.rail_scroll = rail::clamp_scroll(
+            self.rail_scroll,
+            &self.rail_rows,
+            (height - list_top).max(0.0),
+        );
+        rail::layout_into(
+            &self.rail_rows,
+            caption::STRIP_HEIGHT,
+            self.rail_scroll,
+            &mut self.rail_placed,
+        );
+    }
+
+    /// Draw `text` in `rect` with `format`, using the reused buffer.
+    fn draw_rail_text(
+        &mut self,
+        text: &str,
+        format: &IDWriteTextFormat,
+        rect: D2D_RECT_F,
+        color: Color,
+    ) {
+        let Some(brush) = self.brush(color) else {
+            return;
+        };
+        let mut units = std::mem::take(&mut self.utf16);
+        units.clear();
+        units.extend(text.encode_utf16());
+        // No shaping: DrawText keeps the format's ellipsis at the rect's edge.
+        unsafe {
+            self.target.DrawText(
+                &units,
+                format,
+                &rect,
+                &brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+        units.clear();
+        self.utf16 = units;
+    }
+
+    /// The sessions sidebar: its heading, "New session" and the session rows.
+    fn paint_rail(&mut self, theme: &Theme, height: f32) {
+        let w = self.rail_width;
+        if w <= 0.0 {
+            return;
+        }
+        let ui = theme.ui_colors();
+        let surface = theme.tab_bar;
+        let top = caption::STRIP_HEIGHT;
+        self.layout_rail();
+        unsafe {
+            self.target
+                .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
+        };
+        self.fill_rect(0.0, 0.0, w, height, surface);
+        self.fill_rect(w - 1.0, 0.0, w, height, ui.border);
+        let title_format = self.tab_format.clone();
+        let small_format = self.rail_small_format.clone();
+        let glyph_format = self.tab_close_format.clone();
+        let text_rect = |left: f32, top: f32, right: f32, bottom: f32| D2D_RECT_F {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        self.draw_rail_text(
+            self.rail_heading,
+            &title_format,
+            text_rect(16.0, 0.0, w - 12.0, top),
+            ui.muted,
+        );
+        let list_top = top + rail::NEW_ROW_HEIGHT;
+        if self.rail_hover == rail::Hit::New {
+            self.fill_rect(
+                0.0,
+                top,
+                w - 1.0,
+                list_top,
+                surface.mix(ui.foreground, 0.08),
+            );
+        }
+        self.draw_rail_text(
+            "+",
+            &glyph_format,
+            text_rect(8.0, top, 24.0, list_top),
+            ui.accent,
+        );
+        self.draw_rail_text(
+            "New session",
+            &title_format,
+            text_rect(30.0, top, w - 12.0, list_top),
+            ui.foreground,
+        );
+        let clip = D2D_RECT_F {
+            left: 0.0,
+            top: list_top,
+            right: w,
+            bottom: height,
+        };
+        unsafe {
+            self.target
+                .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED)
+        };
+        let rows = std::mem::take(&mut self.rail_rows);
+        let placed = std::mem::take(&mut self.rail_placed);
+        for item in &placed {
+            if item.bottom <= list_top || item.top >= height {
+                continue;
+            }
+            match item.kind {
+                rail::ItemKind::Section(i) => {
+                    if let Some(row) = rows.get(i) {
+                        self.draw_rail_text(
+                            &row.project,
+                            &small_format,
+                            text_rect(16.0, item.top + 6.0, w - 12.0, item.bottom),
+                            ui.muted,
+                        );
+                    }
+                }
+                rail::ItemKind::Row(i) => {
+                    let Some(row) = rows.get(i) else { continue };
+                    let hovered = matches!(
+                        self.rail_hover,
+                        rail::Hit::Row(h) | rail::Hit::Close(h) if h == i
+                    );
+                    if row.active {
+                        self.fill_rect(0.0, item.top, w - 1.0, item.bottom, theme.tab_active);
+                        self.fill_rect(0.0, item.top, 2.0, item.bottom, ui.accent);
+                    } else if hovered {
+                        self.fill_rect(
+                            0.0,
+                            item.top,
+                            w - 1.0,
+                            item.bottom,
+                            surface.mix(ui.foreground, 0.06),
+                        );
+                    }
+                    // BELL-003: the tab strip is hidden, so the row flashes.
+                    if self.bell_flash
+                        && matches!(
+                            row.target,
+                            rail::Target::Tab(tab) if self.bell_tabs.get(tab) == Some(&true)
+                        )
+                    {
+                        self.fill_rect(
+                            0.0,
+                            item.top,
+                            w - 1.0,
+                            item.bottom,
+                            mix(theme.search_highlight, theme.tab_bar, 0.25),
+                        );
+                    }
+                    self.paint_rail_dot(row.status, item.top, surface, theme);
+                    let closable = hovered
+                        && self.tab_close_button
+                        && matches!(row.target, rail::Target::Tab(_));
+                    let right = w - if closable { rail::CLOSE_WIDTH } else { 12.0 };
+                    self.draw_rail_text(
+                        &row.title,
+                        &title_format,
+                        text_rect(30.0, item.top + 5.0, right, item.top + 26.0),
+                        ui.foreground,
+                    );
+                    let detail_color = if row.status == rail::Status::NeedsYou {
+                        theme.palette[1]
+                    } else {
+                        ui.muted
+                    };
+                    self.draw_rail_text(
+                        &row.detail,
+                        &small_format,
+                        text_rect(30.0, item.top + 25.0, right, item.bottom - 4.0),
+                        detail_color,
+                    );
+                    if closable {
+                        let color = if self.rail_hover == rail::Hit::Close(i) {
+                            ui.foreground
+                        } else {
+                            ui.muted
+                        };
+                        self.draw_rail_text(
+                            "\u{2715}",
+                            &glyph_format,
+                            text_rect(w - rail::CLOSE_WIDTH, item.top, w - 2.0, item.bottom),
+                            color,
+                        );
+                    }
+                }
+            }
+        }
+        self.rail_rows = rows;
+        self.rail_placed = placed;
+        unsafe {
+            self.target.PopAxisAlignedClip();
+            self.target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+        }
+    }
+
+    /// A session's status dot, centred in its row's left margin.
+    fn paint_rail_dot(&mut self, status: rail::Status, top: f32, surface: Color, theme: &Theme) {
+        let ui = theme.ui_colors();
+        let color = match status {
+            // Red in every preset, so it stands apart from the accent.
+            rail::Status::NeedsYou => theme.palette[1],
+            rail::Status::Interrupted => theme.palette[3],
+            rail::Status::Failed => theme.palette[1],
+            rail::Status::Working => surface.mix(ui.accent, self.rail_pulse),
+            rail::Status::Finished => theme.palette[2],
+            rail::Status::Idle => surface.mix(ui.muted, 0.6),
+            rail::Status::Exited => ui.muted,
+            rail::Status::Background => theme.palette[4],
+        };
+        let Some(brush) = self.brush(color) else {
+            return;
+        };
+        let dot = D2D1_ELLIPSE {
+            point: Vector2 {
+                X: 17.0,
+                Y: top + rail::ROW_HEIGHT / 2.0,
+            },
+            radiusX: 4.0,
+            radiusY: 4.0,
+        };
+        unsafe {
+            if status == rail::Status::Exited {
+                self.target.DrawEllipse(&dot, &brush, 1.2, None);
+            } else {
+                self.target.FillEllipse(&dot, &brush);
+            }
+        }
+    }
+
+    /// Set the caption strip height: 0 for quick and fullscreen windows. Callers
+    /// re-read [`Renderer::grid_size`] afterwards.
+    pub fn set_caption_height(&mut self, height: f32) {
+        self.caption_height = height.max(0.0);
+    }
+
+    /// The caption strip height.
+    #[must_use]
+    pub const fn caption_height(&self) -> f32 {
+        self.caption_height
+    }
+
+    /// Set the caption buttons' hover and press state and the window's
+    /// maximized state, which picks the maximize or restore glyph.
+    pub const fn set_caption_state(
+        &mut self,
+        hover: Option<caption::Hit>,
+        pressed: Option<caption::Hit>,
+        maximized: bool,
+    ) {
+        self.caption_hover = hover;
+        self.caption_pressed = pressed;
+        self.caption_maximized = maximized;
+    }
+
+    /// End of the `+` button as last painted.
+    #[must_use]
+    pub const fn tabs_end(&self) -> f32 {
+        self.layout.plus.1
+    }
+
+    fn tabs_on_top(&self) -> bool {
+        self.tab_bar_placement == TabBarPlacement::Top
+    }
+
+    /// The title strip: the window title when the strip holds no tabs, and the
+    /// three caption buttons.
+    fn paint_caption(&mut self, app: &App, theme: &Theme, width: f32) {
+        let height = self.caption_height;
+        let ui = theme.ui_colors();
+        let strip = theme.strip_color();
+        if !self.tabs_on_top() || self.tab_bar_height <= 0.0 {
+            self.fill_rect(self.rail_width, 0.0, width, height, strip);
+            if let (Some(tab), Some(brush)) = (app.active_tab(), self.brush(ui.muted)) {
+                let mut units = std::mem::take(&mut self.utf16);
+                units.clear();
+                units.extend(tab.title().encode_utf16());
+                let rect = D2D_RECT_F {
+                    left: self.rail_width + TAB_CHROME / 2.0,
+                    top: 0.0,
+                    right: (width - 3.0 * caption::BUTTON_WIDTH - TAB_CHROME / 2.0)
+                        .max(self.rail_width + TAB_CHROME / 2.0),
+                    bottom: height,
+                };
+                self.draw_units(&units, &self.tab_format, rect, &brush);
+                units.clear();
+                self.utf16 = units;
+            }
+        }
+        for (slot, button) in [caption::Hit::Close, caption::Hit::Max, caption::Hit::Min]
+            .into_iter()
+            .enumerate()
+        {
+            let right = width - slot as f32 * caption::BUTTON_WIDTH;
+            let left = (right - caption::BUTTON_WIDTH).max(0.0);
+            let close = button == caption::Hit::Close;
+            let pressed = self.caption_pressed == Some(button);
+            let hovered = self.caption_hover == Some(button);
+            let fill = match (close, pressed, hovered) {
+                (true, true, _) => Some(CLOSE_PRESSED),
+                (true, false, true) => Some(CLOSE_HOVER),
+                (false, true, _) => Some(strip.mix(ui.foreground, 0.2)),
+                (false, false, true) => Some(strip.mix(ui.foreground, 0.1)),
+                _ => None,
+            };
+            if let Some(fill) = fill {
+                self.fill_rect(left, 0.0, right, height, fill);
+            }
+            let color = if close && (pressed || hovered) {
+                Color::rgb(0xFF, 0xFF, 0xFF)
+            } else {
+                ui.foreground
+            };
+            let glyph = match button {
+                caption::Hit::Close => CAPTION_GLYPH_CLOSE,
+                caption::Hit::Max if self.caption_maximized => CAPTION_GLYPH_RESTORE,
+                caption::Hit::Max => CAPTION_GLYPH_MAXIMIZE,
+                _ => CAPTION_GLYPH_MINIMIZE,
+            };
+            let Some(brush) = self.brush(color) else {
+                continue;
+            };
+            let rect = D2D_RECT_F {
+                left,
+                top: 0.0,
+                right,
+                bottom: height,
+            };
+            let units = [glyph as u16];
+            // Without the system icon font these show as plain text symbols,
+            // which still work; the close button keeps its usual mark.
+            match &self.caption_format {
+                Some(format) => self.draw_units(&units, format, rect, &brush),
+                None => {
+                    let text = [plain_caption_glyph(glyph) as u16];
+                    self.draw_units(&text, &self.tab_close_format, rect, &brush);
+                }
+            }
+        }
+    }
+
     /// Set the tab-bar strip height (TAB-010 visibility modes). The grid
     /// area below the strip changes with it — callers re-read
     /// [`Renderer::grid_size`] and resize the grid afterwards.
@@ -804,7 +1575,6 @@ impl Renderer {
         let (_family, formats, metrics) = build_font_resources(&self.dwrite, self.dpi, font)?;
         self.typography = build_typography(&self.dwrite, font)?;
         self.formats = formats;
-        self.icon_format = make_icon_format(&self.dwrite, metrics.text_height);
         self.metrics = metrics;
         self.ligatures = font.ligatures;
         self.atlas = None;
@@ -889,7 +1659,7 @@ impl Renderer {
     /// Left edge of the grid in client DIPs (the window padding).
     #[must_use]
     pub fn grid_left(&self) -> f32 {
-        self.pad_x
+        self.rail_width + self.pad_x
     }
 
     /// Client-area size in DIPs (UIA-002 bounds building).
@@ -918,12 +1688,8 @@ impl Renderer {
     /// when the bar is at the top (WINDOW-011, TAB-022).
     #[must_use]
     pub fn grid_top(&self) -> f32 {
-        let bar = if self.tab_bar_placement == TabBarPlacement::Top {
-            self.tab_bar_height
-        } else {
-            0.0
-        };
-        bar + self.pad_y
+        caption::top_chrome(self.tabs_on_top(), self.tab_bar_height, self.caption_height)
+            + self.pad_y
     }
 
     fn draw_units(
@@ -1044,8 +1810,10 @@ impl Renderer {
     #[must_use]
     pub fn grid_size(&self) -> (usize, usize) {
         let px = unsafe { self.target.GetPixelSize() };
-        let w = (px_to_dips(px.width, self.dpi) - 2.0 * self.pad_x).max(0.0);
-        let h = (px_to_dips(px.height, self.dpi) - self.tab_bar_height - 2.0 * self.pad_y).max(0.0);
+        let w = (px_to_dips(px.width, self.dpi) - self.rail_width - 2.0 * self.pad_x).max(0.0);
+        let chrome =
+            caption::total_chrome(self.tabs_on_top(), self.tab_bar_height, self.caption_height);
+        let h = (px_to_dips(px.height, self.dpi) - chrome - 2.0 * self.pad_y).max(0.0);
         (
             (w / self.metrics.cell_width).floor().max(1.0) as usize,
             (h / self.metrics.cell_height).floor().max(1.0) as usize,
@@ -1260,7 +2028,7 @@ impl Renderer {
     /// Columns this frame may paint: the client width measured in cells.
     /// Each leaf clamps this further to its own box (SPLIT-002).
     fn frame_cols(&self, width: f32) -> usize {
-        ((width - 2.0 * self.pad_x).max(0.0) / self.metrics.cell_width)
+        ((width - self.rail_width - 2.0 * self.pad_x).max(0.0) / self.metrics.cell_width)
             .floor()
             .max(1.0) as usize
     }
@@ -1454,6 +2222,24 @@ impl Renderer {
         if self.tab_bar_height > 0.0 {
             self.paint_tab_bar(app, theme, width, height);
         }
+        if self.caption_height > 0.0 {
+            self.paint_caption(app, theme, width);
+        }
+        self.paint_rail(theme, height);
+        // Overlays belong to the terminal area, beside the sidebar.
+        let rail_shift = self.rail_width;
+        let width = width - rail_shift;
+        if rail_shift > 0.0 {
+            let shift = Matrix3x2 {
+                M11: 1.0,
+                M12: 0.0,
+                M21: 0.0,
+                M22: 1.0,
+                M31: rail_shift,
+                M32: 0.0,
+            };
+            unsafe { self.target.SetTransform(&shift) };
+        }
         // TAB-013: the rename prompt takes the overlay strip from search.
         // PALETTE-001 (issue #39): the palette takes it from search too, and
         // sits above the rename prompt (only one is open at a time in
@@ -1469,6 +2255,13 @@ impl Renderer {
             self.paint_bookmarks(rows, sel, theme, width, height);
         } else if let Some(search) = search {
             self.paint_search_bar(search, search_ctx, theme, width, height);
+        }
+        if let Some(view) = self.board.take() {
+            self.paint_board(&view, theme, width, height);
+            self.board = Some(view);
+        }
+        if rail_shift > 0.0 {
+            unsafe { self.target.SetTransform(&Matrix3x2::identity()) };
         }
         unsafe {
             self.target
@@ -2080,11 +2873,10 @@ impl Renderer {
         let ui = theme.ui_colors();
         let bar_top = self.tab_bar_top(height);
         let bar_bottom = bar_top + self.tab_bar_height;
-        self.fill_rect(0.0, bar_top, width, bar_bottom, theme.tab_bar);
-        self.fill_rect(0.0, bar_bottom - 1.0, width, bar_bottom, ui.border);
+        self.fill_rect(0.0, bar_top, width, bar_bottom, theme.strip_color());
         // Titles: fill the reused slots with the reused scratch String,
         // swapping buffers so each slot keeps its own capacity.
-        let cw = self.metrics.cell_width;
+        let cw = tabbar::UI_CHAR_WIDTH;
         let mut label = std::mem::take(&mut self.label);
         let mut units = std::mem::take(&mut self.utf16);
         let titles = &mut self.titles;
@@ -2104,15 +2896,20 @@ impl Renderer {
             }
             std::mem::swap(slot, &mut label);
         }
+        // The buttons share a top strip; a bottom bar has the full width.
+        let tab_room = if self.caption_height > 0.0 && self.tabs_on_top() {
+            caption::tab_area_width(width)
+        } else {
+            width
+        };
         tabbar::layout_into(
             &self.titles,
-            width,
-            self.metrics.cell_width,
+            tab_room,
+            cw,
             app.active_index(),
             &mut self.layout,
         );
         let active = app.active_index();
-        let y_top = bar_top + (self.tab_bar_height - self.metrics.text_height) / 2.0;
         let plus = self.layout.plus;
         let tabs = std::mem::take(&mut self.layout.tabs);
         for (i, &(lo, hi)) in tabs.iter().enumerate() {
@@ -2141,36 +2938,24 @@ impl Renderer {
                 );
             }
             if i == active {
-                self.fill_rect(lo, bar_top, hi, bar_top + 3.0, ui.accent);
+                self.fill_rect(lo, bar_top, hi, bar_top + 2.0, ui.accent);
             }
             let close_w = if self.tab_close_button {
                 tabbar::close_width(cw)
             } else {
                 0.0
             };
-            let icon = shell_icon(tab.profile());
-            // Reserve the icon slot only when a profile icon is drawn; otherwise
-            // the title starts at the tab's left chrome and leaves no blank band.
-            let icon_w = if icon.is_some() { cw * 1.6 } else { 0.0 };
             let marquee = self.marquee_tab == Some(i);
-            tabbar::fit_title_into(
-                &self.titles[i],
-                (hi - lo) - TAB_CHROME - close_w - icon_w,
-                cw,
-                &mut label,
-            );
-            if marquee {
-                // Signboard: show the whole title, not the ellipsised fit.
-                label.clear();
-                label.extend(self.titles[i].chars().filter(|c| !c.is_control()));
-            }
+            // DirectWrite trims with an ellipsis against the real text width.
+            label.clear();
+            label.extend(self.titles[i].chars().filter(|c| !c.is_control()));
             units.clear();
             units.extend(label.encode_utf16());
             let rect = D2D_RECT_F {
-                left: lo + TAB_CHROME / 2.0 + icon_w,
-                top: y_top,
-                right: (hi - TAB_CHROME / 2.0 - close_w).max(lo + TAB_CHROME / 2.0 + icon_w),
-                bottom: y_top + self.metrics.text_height,
+                left: lo + TAB_CHROME / 2.0,
+                top: bar_top,
+                right: (hi - TAB_CHROME / 2.0 - close_w).max(lo + TAB_CHROME / 2.0),
+                bottom: bar_bottom,
             };
             let color = if i == active { ui.foreground } else { ui.muted };
             let Some(brush) = self.brush(color) else {
@@ -2186,21 +2971,7 @@ impl Renderer {
                 self.target
                     .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED)
             };
-            if let Some((glyph, icon_color)) = icon
-                && hi - lo >= TAB_CHROME + icon_w + close_w
-                && let (Some(icon_brush), Some(icon_format)) =
-                    (self.brush(icon_color), self.icon_format.as_ref())
-            {
-                let icon_units = [glyph as u16]; // icon glyph is BMP
-                let icon_rect = D2D_RECT_F {
-                    left: lo + TAB_CHROME / 2.0,
-                    top: y_top,
-                    right: lo + TAB_CHROME / 2.0 + icon_w,
-                    bottom: y_top + self.metrics.text_height,
-                };
-                self.draw_units(&icon_units, icon_format, icon_rect, &icon_brush);
-            }
-            let format = &self.formats[0];
+            let format = &self.tab_format;
             if marquee {
                 // Ticker: the title enters from the tab's right edge,
                 // scrolls across, exits left, and the loop restarts.
@@ -2220,35 +2991,33 @@ impl Renderer {
                 self.draw_units(&units, format, rect, &brush);
             }
             if self.tab_close_button {
-                let close_w = tabbar::close_width(cw);
                 units.clear();
-                units.extend("\u{d7}".encode_utf16());
+                units.extend("\u{2715}".encode_utf16());
                 let close_rect = D2D_RECT_F {
-                    left: (hi - close_w).max(lo),
-                    top: y_top,
-                    right: hi,
-                    bottom: y_top + self.metrics.text_height,
+                    left: (hi - close_w - TAB_CHROME / 4.0).max(lo),
+                    top: bar_top,
+                    right: hi - TAB_CHROME / 4.0,
+                    bottom: bar_bottom,
                 };
-                self.draw_units(&units, format, close_rect, &brush);
+                if let Some(close_brush) = self.brush(ui.muted) {
+                    self.draw_units(&units, &self.tab_close_format, close_rect, &close_brush);
+                }
             }
             unsafe { self.target.PopAxisAlignedClip() };
         }
         self.layout.tabs = tabs;
         let (lo, hi) = plus;
         if hi > lo {
-            let cx = (lo + hi) / 2.0;
             units.clear();
             units.push(u16::from(b'+'));
             let rect = D2D_RECT_F {
-                left: cx - self.metrics.cell_width / 2.0,
-                top: y_top,
-                right: cx + self.metrics.cell_width / 2.0,
-                bottom: y_top + self.metrics.text_height,
+                left: lo,
+                top: bar_top,
+                right: hi,
+                bottom: bar_bottom,
             };
-            let color = ui.muted;
-            if let Some(brush) = self.brush(color) {
-                let format = &self.formats[0];
-                self.draw_units(&units, format, rect, &brush);
+            if let Some(brush) = self.brush(ui.muted) {
+                self.draw_units(&units, &self.tab_close_format, rect, &brush);
             }
         }
         units.clear();
@@ -2328,6 +3097,12 @@ impl Renderer {
                 i += 1;
                 continue;
             }
+            if let Some(shape) = cellart::shape(cell.char) {
+                let (fg, bg) = Self::effective_colors(cell, theme);
+                self.paint_shape(shape, left + i as f32 * cw, top, fg, bg);
+                i += 1;
+                continue;
+            }
             let key = Self::cell_key(cell, i, span, theme);
             let tile = key
                 .as_ref()
@@ -2348,6 +3123,7 @@ impl Renderer {
                 if next.char == ' '
                     || next.attributes.contains(CellAttribute::HIDDEN)
                     || next.attributes != attrs
+                    || cellart::shape(next.char).is_some()
                     || Self::effective_colors(next, theme).0 != fg
                 {
                     break;
@@ -2615,6 +3391,60 @@ impl Renderer {
         self.label = label;
     }
 
+    /// Draw a [`cellart::Shape`] over the cell at (`left`, `top`). Runs in
+    /// the text pass, where aliased fills land on whole pixels, so
+    /// neighbouring cells share an edge with no seam.
+    fn paint_shape(&mut self, shape: cellart::Shape, left: f32, top: f32, fg: Color, bg: Color) {
+        let cw = self.metrics.cell_width;
+        let ch = self.metrics.cell_height;
+        match shape {
+            cellart::Shape::Fill {
+                rects,
+                count,
+                alpha,
+            } => {
+                let color = bg.mix(fg, alpha);
+                for r in rects.iter().take(usize::from(count)) {
+                    self.fill_rect(
+                        left + r.x0 * cw,
+                        top + r.y0 * ch,
+                        left + r.x1 * cw,
+                        top + r.y1 * ch,
+                        color,
+                    );
+                }
+            }
+            cellart::Shape::Triangle(side) => {
+                if self.powerline.is_none() {
+                    self.powerline = powerline_geometries(&self.factory).ok();
+                }
+                let Some(brush) = self.brush(fg) else {
+                    return;
+                };
+                let Some(shapes) = &self.powerline else {
+                    return;
+                };
+                let geometry = &shapes[powerline_index(side)];
+                let place = Matrix3x2 {
+                    M11: cw,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: ch,
+                    M31: left,
+                    M32: top,
+                };
+                unsafe {
+                    self.target
+                        .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    self.target.SetTransform(&place);
+                    self.target.FillGeometry(geometry, &brush, None);
+                    self.target.SetTransform(&Matrix3x2::identity());
+                    self.target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+                }
+            }
+        }
+    }
+
     fn fill_rect(&mut self, left: f32, top: f32, right: f32, bottom: f32, color: Color) {
         let rect = D2D_RECT_F {
             left,
@@ -2673,7 +3503,7 @@ impl Renderer {
 fn format_index(attrs: CellAttribute) -> usize {
     let bold = usize::from(attrs.contains(CellAttribute::BOLD));
     let italic = usize::from(attrs.contains(CellAttribute::ITALIC));
-    bold * 2 + italic
+    bold + italic * 2
 }
 
 #[cfg(test)]
@@ -2730,5 +3560,180 @@ mod tests {
             let pairs: Vec<(&str, bool)> = got.iter().map(|(t, e)| (t.as_str(), *e)).collect();
             assert_eq!(pairs, want, "feature string {text:?}");
         }
+    }
+
+    use super::{
+        DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_WEIGHT_NORMAL, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
+        PCWSTR, symbol_fallback, wstr,
+    };
+
+    /// A one-string text source for `MapCharacters`.
+    #[windows::core::implement(windows::Win32::Graphics::DirectWrite::IDWriteTextAnalysisSource)]
+    struct OneString(Vec<u16>);
+
+    #[allow(non_snake_case, reason = "COM method names")]
+    impl windows::Win32::Graphics::DirectWrite::IDWriteTextAnalysisSource_Impl for OneString_Impl {
+        fn GetTextAtPosition(
+            &self,
+            position: u32,
+            text: *mut *mut u16,
+            length: *mut u32,
+        ) -> windows::core::Result<()> {
+            let rest = self.0.get(position as usize..).unwrap_or(&[]);
+            unsafe {
+                *text = if rest.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    rest.as_ptr().cast_mut()
+                };
+                *length = rest.len() as u32;
+            }
+            Ok(())
+        }
+        fn GetTextBeforePosition(
+            &self,
+            _position: u32,
+            text: *mut *mut u16,
+            length: *mut u32,
+        ) -> windows::core::Result<()> {
+            unsafe {
+                *text = std::ptr::null_mut();
+                *length = 0;
+            }
+            Ok(())
+        }
+        fn GetParagraphReadingDirection(
+            &self,
+        ) -> windows::Win32::Graphics::DirectWrite::DWRITE_READING_DIRECTION {
+            windows::Win32::Graphics::DirectWrite::DWRITE_READING_DIRECTION_LEFT_TO_RIGHT
+        }
+        fn GetLocaleName(
+            &self,
+            _position: u32,
+            length: *mut u32,
+            locale: *mut *mut u16,
+        ) -> windows::core::Result<()> {
+            unsafe {
+                *length = 0;
+                *locale = std::ptr::null_mut();
+            }
+            Ok(())
+        }
+        fn GetNumberSubstitution(
+            &self,
+            _position: u32,
+            length: *mut u32,
+            substitution: windows::core::OutRef<
+                windows::Win32::Graphics::DirectWrite::IDWriteNumberSubstitution,
+            >,
+        ) -> windows::core::Result<()> {
+            unsafe { *length = 0 };
+            substitution.write(None)
+        }
+    }
+
+    /// The family DirectWrite picks for `ch` when `base` is the font.
+    fn mapped_family(ch: char, base: &str) -> Option<String> {
+        let dwrite: IDWriteFactory =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.expect("factory");
+        let fallback = symbol_fallback(&dwrite).expect("fallback");
+        let mut collection: Option<IDWriteFontCollection> = None;
+        unsafe { dwrite.GetSystemFontCollection(&raw mut collection, false) }.expect("fonts");
+        let mut units = [0u16; 2];
+        let text = ch.encode_utf16(&mut units).to_vec();
+        let count = text.len() as u32;
+        let source: windows::Win32::Graphics::DirectWrite::IDWriteTextAnalysisSource =
+            OneString(text).into();
+        let family = wstr(base);
+        let (mut mapped_length, mut scale) = (0u32, 0f32);
+        let mut font = None;
+        unsafe {
+            fallback.MapCharacters(
+                &source,
+                0,
+                count,
+                collection.as_ref(),
+                PCWSTR::from_raw(family.as_ptr()),
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                &raw mut mapped_length,
+                &raw mut font,
+                &raw mut scale,
+            )
+        }
+        .expect("MapCharacters");
+        let font: windows::Win32::Graphics::DirectWrite::IDWriteFont = font?;
+        let names =
+            unsafe { font.GetFontFamily().and_then(|f| f.GetFamilyNames()) }.expect("names");
+        let len = unsafe { names.GetStringLength(0) }.expect("length") as usize;
+        let mut buf = vec![0u16; len + 1];
+        unsafe { names.GetString(0, &mut buf) }.expect("name");
+        Some(String::from_utf16_lossy(&buf[..len]))
+    }
+
+    #[test]
+    fn powerline_and_icon_glyphs_map_to_the_bundled_font() {
+        // Break caught: prompt icons showing as empty boxes.
+        for ch in ['\u{E0A0}', '\u{F115}'] {
+            let family = mapped_family(ch, "Consolas").unwrap_or_default();
+            assert!(family.contains("Symbols Nerd Font"), "{ch:?}: {family}");
+        }
+    }
+
+    #[test]
+    fn a_font_with_the_glyph_keeps_it() {
+        // Break caught: the bundled font overriding the user's chosen font.
+        assert_eq!(mapped_family('A', "Consolas").as_deref(), Some("Consolas"));
+        assert_eq!(
+            mapped_family('\u{E8BB}', "Segoe MDL2 Assets").as_deref(),
+            Some("Segoe MDL2 Assets"),
+            "a private-use glyph the chosen font has stays with that font"
+        );
+    }
+
+    #[test]
+    fn non_symbol_text_still_uses_system_fallback() {
+        // Break caught: losing system fallback for everything else.
+        let family = mapped_family('\u{4E2D}', "Consolas").unwrap_or_default();
+        assert!(!family.contains("Symbols Nerd Font"), "{family}");
+    }
+
+    #[test]
+    fn shaped_text_uses_the_fonts_own_advance() {
+        // Break caught: rounding the cell up makes each word narrower than
+        // the grid, so the gaps between words stretch ("Windows  PowerShell").
+        let font = crate::config::FontConfig {
+            family: "Consolas".to_string(),
+            ligatures: true,
+            ..crate::config::FontConfig::default()
+        };
+        let cell = super::measure_cells(96, &font).expect("metrics").cell_width;
+        assert_ne!(cell, cell.ceil(), "Consolas 11pt has a fractional advance");
+    }
+
+    #[test]
+    fn atlas_text_keeps_whole_pixel_cells() {
+        // Break caught: blitting atlas tiles at fractional positions, which
+        // blurs them. Ligatures off is the atlas path.
+        let font = crate::config::FontConfig {
+            family: "Consolas".to_string(),
+            ligatures: false,
+            ..crate::config::FontConfig::default()
+        };
+        let cell = super::measure_cells(96, &font).expect("metrics").cell_width;
+        assert_eq!(cell, cell.ceil());
+    }
+
+    #[test]
+    fn bold_and_italic_pick_the_matching_format() {
+        // Break caught: bold text drawn italic and italic drawn bold. The
+        // formats are built in the order plain, bold, italic, bold-italic.
+        use super::{CellAttribute, format_index};
+        assert_eq!(format_index(CellAttribute::empty()), 0);
+        assert_eq!(format_index(CellAttribute::BOLD), 1);
+        assert_eq!(format_index(CellAttribute::ITALIC), 2);
+        assert_eq!(format_index(CellAttribute::BOLD | CellAttribute::ITALIC), 3);
     }
 }
