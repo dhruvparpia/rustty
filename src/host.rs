@@ -762,7 +762,8 @@ pub mod server {
         /// revision bump tells clients the repaint bytes are in the
         /// stream.
         fn resize(&mut self, cols: usize, rows: usize) {
-            self.grid.resize(cols, rows);
+            let moved_up = self.grid.resize_around(cols, rows, self.parser.cursor_row);
+            self.parser.cursor_row = self.parser.cursor_row.saturating_sub(moved_up);
             if let Some(ref mut main) = self.main_grid {
                 main.resize(cols, rows);
             }

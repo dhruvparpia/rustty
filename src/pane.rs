@@ -1307,7 +1307,8 @@ impl Pane {
             let _ = self.shell.resize(cols, rows);
             return Ok(());
         }
-        self.grid.resize(cols, rows);
+        let moved_up = self.grid.resize_around(cols, rows, self.parser.cursor_row);
+        self.parser.cursor_row = self.parser.cursor_row.saturating_sub(moved_up);
         if let Some(main) = &mut self.main_grid {
             main.resize(cols, rows);
         }
@@ -1981,6 +1982,28 @@ mod tests {
         let _ = pane.resize(50, 6);
         pane.feed(b"repaint");
         assert_eq!(pane.output_age(), None);
+    }
+
+    #[test]
+    fn a_shorter_pane_keeps_the_cursor_on_its_own_text() {
+        let mut pane = Pane::with_size(40, 24, 100);
+        pane.feed(b"one\r\ntwo\r\nthree");
+        let _ = pane.resize(40, 10);
+        assert_eq!(pane.parser().cursor_row, 2);
+        assert_eq!(pane.grid().line_text(2).as_deref(), Some("three"));
+    }
+
+    #[test]
+    fn a_much_shorter_pane_moves_the_cursor_up_with_its_text() {
+        let mut pane = Pane::with_size(40, 24, 100);
+        for n in 0..20 {
+            pane.feed(format!("line {n}\r\n").as_bytes());
+        }
+        pane.feed(b"last");
+        let _ = pane.resize(40, 10);
+        assert_eq!(pane.parser().cursor_row, 9);
+        assert_eq!(pane.grid().line_text(9).as_deref(), Some("last"));
+        assert_eq!(pane.grid().line_text(8).as_deref(), Some("line 19"));
     }
 
     #[test]

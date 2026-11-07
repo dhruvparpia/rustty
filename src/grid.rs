@@ -160,6 +160,11 @@ impl Line {
         }
     }
 
+    /// Nothing to lose if this line is dropped.
+    fn is_blank(&self) -> bool {
+        self.clipped.is_none() && self.cells.iter().all(|cell| *cell == Cell::blank())
+    }
+
     /// Make the line `cols` wide, keeping what falls off the end to restore later.
     fn fit_width(&mut self, cols: usize) {
         let len = self.cells.len();
@@ -662,15 +667,33 @@ impl Grid {
         Some(&mut self.lines[slot])
     }
 
-    /// Resize the viewport and reallocate the buffer.
-    ///
-    /// Content is preserved by keeping the newest lines (the oldest are
-    /// evicted when the capacity shrinks, the newly available slots on
-    /// growth come back blank). Scroll is clamped and every row is marked
-    /// dirty so the next frame repaints once.
+    /// Resize with no cursor to follow: the last row with text stays in view.
     pub fn resize(&mut self, cols: usize, rows: usize) {
+        let live_top = self.live_top();
+        let last_text = (0..self.rows)
+            .rev()
+            .find(|row| {
+                let v = live_top + row;
+                v < self.total && !self.lines[self.slot(v)].is_blank()
+            })
+            .unwrap_or(0);
+        self.resize_around(cols, rows, last_text);
+    }
+
+    /// Resize the viewport and reallocate the buffer, keeping viewport row
+    /// `cursor_row` in view. Returns how many rows the text moved up, which the
+    /// caller takes off its cursor row.
+    ///
+    /// ConPTY repaints a resized screen at the same row numbers it has, so the
+    /// text has to stay on those rows. Losing rows takes blank ones from the
+    /// bottom, and scrolls into the history only what the cursor or the text
+    /// below it needs. Gaining rows adds blank ones at the bottom. Beyond that the
+    /// newest lines are kept when the capacity shrinks. Scroll is clamped and every
+    /// row is marked dirty so the next frame repaints once.
+    pub fn resize_around(&mut self, cols: usize, rows: usize, cursor_row: usize) -> usize {
         let cols = cols.max(1);
         let rows = rows.max(1);
+        let old_rows = self.rows;
 
         // Drain the live lines in virtual order.
 
@@ -678,6 +701,23 @@ impl Grid {
         for v in 0..self.total {
             let slot = self.slot(v);
             content.push(std::mem::take(&mut self.lines[slot]));
+        }
+
+        let mut moved_up = 0;
+        if rows < old_rows {
+            let lost = old_rows - rows;
+            let cursor_needs = (cursor_row + 1).saturating_sub(rows);
+            let may_drop = lost.saturating_sub(cursor_needs);
+            let blank_tail = content
+                .iter()
+                .rev()
+                .take(may_drop)
+                .take_while(|line| line.is_blank())
+                .count();
+            content.truncate(content.len() - blank_tail);
+            moved_up = lost - blank_tail;
+        } else {
+            content.resize_with(content.len() + (rows - old_rows), || Line::blank(cols));
         }
 
         let rows = rows.min(rows + self.scrollback);
@@ -712,6 +752,7 @@ impl Grid {
         self.evicted += start;
         self.clamp_scroll();
         self.mark_all_dirty();
+        moved_up
     }
 
     /// Change the scrollback depth and re-allocate the buffer
@@ -1080,12 +1121,78 @@ mod tests {
         assert_eq!(grid.capacity(), 110);
         assert_eq!(grid.total_lines(), 110);
         assert_eq!(row_text(&grid, 9), "line 200");
-        // Grow back: viewport shows the last 24 of the 110 retained lines
+        // Grow back: text stays on its row with blanks below, as ConPTY has it.
         grid.resize(80, 24);
         assert_eq!(grid.rows, 24);
-        assert_eq!(grid.total_lines(), 110);
-        assert_eq!(row_text(&grid, 23), "line 200");
-        assert_eq!(row_text(&grid, 0), "line 177");
+        assert_eq!(grid.total_lines(), 124);
+        assert_eq!(row_text(&grid, 9), "line 200");
+        assert_eq!(row_text(&grid, 23), "");
+    }
+
+    #[test]
+    fn shrinking_leaves_text_where_it_is_when_the_cursor_still_fits() {
+        // Break caught: every lost row scrolled the screen up here while ConPTY,
+        // which keeps its viewport unless the cursor falls off it, repainted the
+        // same text on its old row. Lines appeared twice, and the cursor sat on
+        // the wrong one.
+        let mut grid = Grid::with_size(80, 24, 100);
+        grid.write_line_stub(3, "prompt");
+        let before = grid.abs_of_view(3);
+        assert_eq!(grid.resize_around(80, 10, 3), 0);
+        assert_eq!(row_text(&grid, 3), "prompt");
+        assert_eq!(grid.abs_of_view(3), before, "the line keeps its identity");
+        assert_eq!(grid.rows, 10);
+        assert_eq!(
+            (grid.total_lines() - grid.rows),
+            0,
+            "nothing went into the history"
+        );
+    }
+
+    #[test]
+    fn shrinking_scrolls_only_as_far_as_the_cursor_needs() {
+        let mut grid = Grid::with_size(80, 12, 100);
+        for row in 0..8 {
+            grid.write_line_stub(row, &format!("row {row}"));
+        }
+        assert_eq!(grid.resize_around(80, 5, 7), 3);
+        assert_eq!(row_text(&grid, 0), "row 3");
+        assert_eq!(row_text(&grid, 4), "row 7");
+        assert_eq!((grid.total_lines() - grid.rows), 3);
+    }
+
+    #[test]
+    fn shrinking_never_drops_text_below_the_cursor() {
+        let mut grid = Grid::with_size(80, 6, 100);
+        grid.write_line_stub(5, "status line");
+        assert_eq!(grid.resize_around(80, 4, 0), 2);
+        assert_eq!(row_text(&grid, 3), "status line");
+    }
+
+    #[test]
+    fn a_line_with_clipped_text_does_not_count_as_blank() {
+        let mut grid = Grid::with_size(10, 4, 100);
+        let far = Cell {
+            char: 'Z',
+            ..Cell::blank()
+        };
+        grid.write_cell(3, 9, far);
+        grid.resize_around(4, 4, 0);
+        assert_eq!(grid.resize_around(4, 3, 0), 1, "the line went up, not away");
+        grid.resize_around(10, 3, 0);
+        assert_eq!(row_text(&grid, 2), "         Z");
+    }
+
+    #[test]
+    fn growing_adds_blank_rows_below_and_leaves_the_history_alone() {
+        // Break caught: growing pulled history down over rows ConPTY then repainted.
+        let mut grid = Grid::with_size(80, 5, 100);
+        append_lines(&mut grid, 20);
+        let history = grid.total_lines() - grid.rows;
+        assert_eq!(grid.resize_around(80, 9, 4), 0);
+        assert_eq!(row_text(&grid, 4), "line 20");
+        assert_eq!(row_text(&grid, 8), "");
+        assert_eq!((grid.total_lines() - grid.rows), history);
     }
 
     #[test]
